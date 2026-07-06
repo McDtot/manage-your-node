@@ -1,10 +1,13 @@
 import json
 import mimetypes
 import re
+from http import HTTPStatus
+from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
+from .auth import AuthManager
 from .config import load_settings
 from .database import Database
 from .security import SecretBox
@@ -12,6 +15,7 @@ from .services import AppServices
 
 
 class RequestHandler(BaseHTTPRequestHandler):
+    auth: AuthManager
     services: AppServices
     static_dir: Path
 
@@ -19,6 +23,17 @@ class RequestHandler(BaseHTTPRequestHandler):
         path = urlparse(self.path).path
         if path == "/api/health":
             self.send_json({"ok": True})
+            return
+        if path == "/login":
+            if self.is_authenticated():
+                self.redirect("/")
+                return
+            self.serve_static(path)
+            return
+        if not self.require_auth(path):
+            return
+        if path == "/api/auth/session":
+            self.send_json({"authenticated": True, "username": self.auth.admin_username})
             return
         if path == "/api/summary":
             self.send_json(self.services.summary())
@@ -34,6 +49,9 @@ class RequestHandler(BaseHTTPRequestHandler):
             return
         if path == "/api/subscriptions":
             self.send_json({"subscriptions": self.services.list_subscriptions()})
+            return
+        if path == "/api/chains":
+            self.send_json({"chains": self.services.list_proxy_chains()})
             return
 
         match = re.fullmatch(r"/api/subscriptions/([^/]+)", path)
@@ -56,6 +74,11 @@ class RequestHandler(BaseHTTPRequestHandler):
             self.handle_text(lambda: self.services.render_deployment_subscription(match.group(1)))
             return
 
+        match = re.fullmatch(r"/sub/chains/([^/]+)", path)
+        if match:
+            self.handle_text(lambda: self.services.render_proxy_chain_subscription(match.group(1)))
+            return
+
         match = re.fullmatch(r"/api/jobs/([^/]+)", path)
         if match:
             self.handle_value(lambda: self.services.get_job(match.group(1)))
@@ -65,13 +88,34 @@ class RequestHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         path = urlparse(self.path).path
-        body = self.read_json()
+        if path == "/api/auth/login":
+            self.handle_login()
+            return
+        if not self.require_auth(path):
+            return
+        if path == "/api/auth/logout":
+            self.send_json({"ok": True}, headers=[self.clear_session_cookie()])
+            return
+
+        try:
+            body = self.read_json()
+        except ValueError as exc:
+            self.send_json({"error": str(exc)}, status=400)
+            return
 
         if path == "/api/servers":
             self.handle_value(lambda: self.services.create_server(body), status=201)
             return
         if path == "/api/subscriptions":
             self.handle_value(lambda: self.services.create_subscription(body), status=201)
+            return
+        if path == "/api/chains":
+            self.handle_value(lambda: self.services.create_proxy_chain(body), status=201)
+            return
+
+        match = re.fullmatch(r"/api/chains/([^/]+)/deploy", path)
+        if match:
+            self.handle_value(lambda: self.services.start_proxy_chain_deployment(match.group(1)), status=201)
             return
 
         match = re.fullmatch(r"/api/servers/([^/]+)/test", path)
@@ -98,7 +142,13 @@ class RequestHandler(BaseHTTPRequestHandler):
 
     def do_PATCH(self) -> None:
         path = urlparse(self.path).path
-        body = self.read_json()
+        if not self.require_auth(path):
+            return
+        try:
+            body = self.read_json()
+        except ValueError as exc:
+            self.send_json({"error": str(exc)}, status=400)
+            return
 
         match = re.fullmatch(r"/api/clients/([^/]+)", path)
         if match:
@@ -119,6 +169,8 @@ class RequestHandler(BaseHTTPRequestHandler):
 
     def do_DELETE(self) -> None:
         path = urlparse(self.path).path
+        if not self.require_auth(path):
+            return
 
         match = re.fullmatch(r"/api/servers/([^/]+)", path)
         if match:
@@ -133,6 +185,11 @@ class RequestHandler(BaseHTTPRequestHandler):
         match = re.fullmatch(r"/api/subscriptions/([^/]+)", path)
         if match:
             self.handle_value(lambda: self.services.delete_subscription(match.group(1)))
+            return
+
+        match = re.fullmatch(r"/api/chains/([^/]+)", path)
+        if match:
+            self.handle_value(lambda: self.services.delete_proxy_chain(match.group(1)))
             return
 
         self.send_json({"error": "not found"}, status=404)
@@ -153,35 +210,127 @@ class RequestHandler(BaseHTTPRequestHandler):
         except Exception as exc:  # noqa: BLE001
             self.send_json({"error": str(exc)}, status=500)
 
-    def read_json(self) -> dict:
-        length = int(self.headers.get("content-length", "0"))
+    def handle_login(self) -> None:
+        try:
+            payload = self.read_payload()
+        except ValueError as exc:
+            self.send_json({"error": str(exc)}, status=400)
+            return
+        username = str(payload.get("username", ""))
+        password = str(payload.get("password", ""))
+        if not self.auth.verify_credentials(username, password):
+            self.send_json({"error": "invalid username or password"}, status=401)
+            return
+        token = self.auth.issue_session()
+        self.send_json({"ok": True}, headers=[self.session_cookie(token)])
+
+    def require_auth(self, path: str) -> bool:
+        if self.is_public_path(path):
+            return True
+        if self.is_authenticated():
+            return True
+        if path.startswith("/api/"):
+            self.send_json({"error": "unauthorized"}, status=401)
+        else:
+            self.redirect("/login")
+        return False
+
+    def is_public_path(self, path: str) -> bool:
+        return path == "/static/styles.css" or path.startswith("/sub/")
+
+    def is_authenticated(self) -> bool:
+        return self.auth.verify_session(self.session_token())
+
+    def session_token(self) -> str:
+        raw = self.headers.get("Cookie", "")
+        if not raw:
+            return ""
+        cookie = SimpleCookie()
+        try:
+            cookie.load(raw)
+        except Exception:  # noqa: BLE001
+            return ""
+        morsel = cookie.get(self.auth.cookie_name)
+        return morsel.value if morsel else ""
+
+    def session_cookie(self, token: str) -> str:
+        return (
+            f"{self.auth.cookie_name}={token}; Path=/; "
+            f"Max-Age={self.auth.session_seconds}; HttpOnly; SameSite=Strict"
+        )
+
+    def clear_session_cookie(self) -> str:
+        return f"{self.auth.cookie_name}=; Path=/; Max-Age=0; HttpOnly; SameSite=Strict"
+
+    def redirect(self, location: str) -> None:
+        self.send_response(HTTPStatus.SEE_OTHER)
+        self.send_header("Location", location)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+    def read_payload(self) -> dict:
+        try:
+            length = int(self.headers.get("content-length", "0"))
+        except ValueError as exc:
+            raise ValueError("invalid content length") from exc
         if length == 0:
             return {}
         raw = self.rfile.read(length)
         try:
-            return json.loads(raw.decode("utf-8"))
+            text = raw.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise ValueError("invalid utf-8 payload") from exc
+        content_type = self.headers.get("content-type", "")
+        if content_type.startswith("application/x-www-form-urlencoded"):
+            parsed = parse_qs(text, keep_blank_values=True)
+            return {key: values[-1] if values else "" for key, values in parsed.items()}
+        try:
+            return json.loads(text)
         except json.JSONDecodeError as exc:
             raise ValueError("invalid json") from exc
 
-    def send_json(self, data, status: int = 200) -> None:
+    def read_json(self) -> dict:
+        try:
+            length = int(self.headers.get("content-length", "0"))
+        except ValueError as exc:
+            raise ValueError("invalid content length") from exc
+        if length == 0:
+            return {}
+        raw = self.rfile.read(length)
+        try:
+            text = raw.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise ValueError("invalid utf-8 payload") from exc
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError as exc:
+            raise ValueError("invalid json") from exc
+
+    def send_json(self, data, status: int = 200, headers: list[str] | None = None) -> None:
         raw = json.dumps(data, ensure_ascii=False).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(raw)))
+        for header in headers or []:
+            self.send_header("Set-Cookie", header)
         self.end_headers()
         self.wfile.write(raw)
 
-    def send_text(self, data: str, status: int = 200) -> None:
+    def send_text(self, data: str, status: int = 200, headers: list[str] | None = None) -> None:
         raw = data.encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "text/plain; charset=utf-8")
         self.send_header("Content-Length", str(len(raw)))
+        for header in headers or []:
+            self.send_header("Set-Cookie", header)
         self.end_headers()
         self.wfile.write(raw)
 
     def serve_static(self, path: str) -> None:
         if path == "/":
             file_path = self.static_dir / "index.html"
+        elif path == "/login":
+            file_path = self.static_dir / "login.html"
         elif path.startswith("/static/"):
             file_path = self.static_dir / path.removeprefix("/static/")
         else:
@@ -189,10 +338,11 @@ class RequestHandler(BaseHTTPRequestHandler):
 
         try:
             resolved = file_path.resolve()
-            if not str(resolved).startswith(str(self.static_dir.resolve())):
+            resolved.relative_to(self.static_dir.resolve())
+            if not resolved.is_file():
                 raise FileNotFoundError
             raw = resolved.read_bytes()
-        except OSError:
+        except (OSError, ValueError):
             self.send_response(404)
             self.end_headers()
             return
@@ -212,10 +362,16 @@ def main() -> None:
     settings = load_settings()
     db = Database(settings.db_path)
     services = AppServices(db, SecretBox(settings.app_secret))
+    auth = AuthManager(
+        settings.app_secret,
+        settings.admin_username,
+        settings.admin_password,
+        settings.session_seconds,
+    )
     handler = type(
         "ManageNodeRequestHandler",
         (RequestHandler,),
-        {"services": services, "static_dir": settings.static_dir},
+        {"auth": auth, "services": services, "static_dir": settings.static_dir},
     )
     server = ThreadingHTTPServer((settings.host, settings.port), handler)
     print(f"Manage Your Node running at http://{settings.host}:{settings.port}", flush=True)

@@ -21,6 +21,7 @@
           <button class="nav-item" data-section="subscriptions">订阅</button>
           <button class="nav-item" data-section="servers">服务器</button>
           <button class="nav-item" data-section="deployments">部署</button>
+          <button class="nav-item" data-section="chains">代理链</button>
           <button class="nav-item" data-section="clients">客户端</button>
           <button class="nav-item" data-section="logs">日志</button>
         </nav>
@@ -34,6 +35,7 @@
           </div>
           <div class="top-actions">
             <button class="secondary" id="refreshBtn">刷新</button>
+            <button class="secondary" id="logoutBtn">退出</button>
             <button class="primary" id="topAddServerBtn" data-section-jump="servers" hidden>添加服务器</button>
           </div>
         </header>
@@ -174,6 +176,43 @@
                 <h2>部署列表</h2>
               </div>
               <div id="deploymentList" class="list"></div>
+            </section>
+          </div>
+        </section>
+
+        <section class="section" id="chains">
+          <div class="grid two">
+            <form class="panel form" id="chainForm">
+              <div class="panel-head">
+                <h2>编排代理链</h2>
+              </div>
+              <label>
+                名称
+                <input name="name" placeholder="hk -> jp -> us" />
+              </label>
+              <div class="chain-builder">
+                <section>
+                  <h3>可用节点</h3>
+                  <div id="chainAvailableNodes" class="chain-node-list"></div>
+                </section>
+                <section>
+                  <h3>链路顺序</h3>
+                  <div id="chainSelectedNodes" class="chain-node-list chain-dropzone"></div>
+                  <div class="meta">从上到下：入口节点 -> 中继节点 -> 出口节点</div>
+                </section>
+              </div>
+              <div class="chain-preview">
+                <span>当前路径</span>
+                <strong id="chainPreview">未选择</strong>
+              </div>
+              <button class="primary" id="chainSubmitBtn" type="submit" disabled>保存代理链</button>
+            </form>
+
+            <section class="panel wide">
+              <div class="panel-head">
+                <h2>代理链列表</h2>
+              </div>
+              <div id="chainList" class="list"></div>
             </section>
           </div>
         </section>

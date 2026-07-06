@@ -115,6 +115,43 @@ class Database:
                     FOREIGN KEY(deployment_id) REFERENCES deployments(id) ON DELETE SET NULL
                 );
 
+                CREATE TABLE IF NOT EXISTS proxy_chains (
+                    id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    token TEXT NOT NULL UNIQUE,
+                    client_uuid TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    share_link TEXT NOT NULL,
+                    last_error TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS proxy_chain_nodes (
+                    chain_id TEXT NOT NULL,
+                    deployment_id TEXT NOT NULL,
+                    position INTEGER NOT NULL,
+                    inbound_port INTEGER,
+                    client_uuid TEXT,
+                    encrypted_private_key TEXT,
+                    public_key TEXT,
+                    short_id TEXT,
+                    remote_service_name TEXT,
+                    status TEXT NOT NULL DEFAULT 'planned',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT,
+                    PRIMARY KEY(chain_id, position),
+                    UNIQUE(chain_id, deployment_id),
+                    FOREIGN KEY(chain_id) REFERENCES proxy_chains(id) ON DELETE CASCADE,
+                    FOREIGN KEY(deployment_id) REFERENCES deployments(id) ON DELETE CASCADE
+                );
+
+                CREATE TRIGGER IF NOT EXISTS trg_proxy_chain_node_delete
+                AFTER DELETE ON proxy_chain_nodes
+                BEGIN
+                    DELETE FROM proxy_chains WHERE id = OLD.chain_id;
+                END;
+
                 CREATE INDEX IF NOT EXISTS idx_deployments_server
                     ON deployments(server_id);
                 CREATE INDEX IF NOT EXISTS idx_clients_deployment
@@ -125,12 +162,24 @@ class Database:
                     ON subscription_entries(node_client_id);
                 CREATE INDEX IF NOT EXISTS idx_jobs_server
                     ON jobs(server_id);
+                CREATE INDEX IF NOT EXISTS idx_proxy_chain_nodes_deployment
+                    ON proxy_chain_nodes(deployment_id);
                 """
             )
             self._ensure_column("deployments", "install_method", "TEXT NOT NULL DEFAULT 'dry-run'")
             self._ensure_column("deployments", "panel_scheme", "TEXT NOT NULL DEFAULT 'http'")
             self._ensure_column("deployments", "xui_inbound_id", "INTEGER")
             self._ensure_column("deployments", "subscription_configured", "INTEGER NOT NULL DEFAULT 0")
+            self._ensure_column("jobs", "chain_id", "TEXT")
+            self._ensure_column("proxy_chains", "last_error", "TEXT")
+            self._ensure_column("proxy_chain_nodes", "inbound_port", "INTEGER")
+            self._ensure_column("proxy_chain_nodes", "client_uuid", "TEXT")
+            self._ensure_column("proxy_chain_nodes", "encrypted_private_key", "TEXT")
+            self._ensure_column("proxy_chain_nodes", "public_key", "TEXT")
+            self._ensure_column("proxy_chain_nodes", "short_id", "TEXT")
+            self._ensure_column("proxy_chain_nodes", "remote_service_name", "TEXT")
+            self._ensure_column("proxy_chain_nodes", "status", "TEXT NOT NULL DEFAULT 'planned'")
+            self._ensure_column("proxy_chain_nodes", "updated_at", "TEXT")
             self._conn.execute(
                 """
                 INSERT OR IGNORE INTO subscription_nodes (

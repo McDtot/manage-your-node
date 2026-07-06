@@ -7,9 +7,10 @@ services:
     environment:
       APP_DATA_DIR: /data
       APP_SECRET: change-this-before-real-use
+      ADMIN_USERNAME: admin
+      ADMIN_PASSWORD: change-this-admin-password
       HOST: 0.0.0.0
       PORT: 8787
     volumes:
       - ./data:/data
     restart: unless-stopped
-

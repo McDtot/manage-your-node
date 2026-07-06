@@ -3,7 +3,9 @@ const state = {
   servers: [],
   deployments: [],
   subscriptions: [],
+  chains: [],
   clients: [],
+  chainDraft: [],
   activeJobId: null,
   jobTimer: null,
 };
@@ -12,15 +14,31 @@ const $ = (selector) => document.querySelector(selector);
 const $$ = (selector) => Array.from(document.querySelectorAll(selector));
 
 async function api(path, options = {}) {
+  const headers = { "Content-Type": "application/json", ...(options.headers || {}) };
   const response = await fetch(path, {
-    headers: { "Content-Type": "application/json" },
+    credentials: "same-origin",
     ...options,
+    headers,
   });
-  const data = await response.json();
+  const data = await response.json().catch(() => ({}));
+  if (response.status === 401) {
+    window.location.href = `/login?next=${encodeURIComponent(window.location.pathname)}`;
+    throw new Error(data.error || "登录已过期");
+  }
   if (!response.ok) {
     throw new Error(data.error || "请求失败");
   }
   return data;
+}
+
+async function logout() {
+  await fetch("/api/auth/logout", {
+    method: "POST",
+    credentials: "same-origin",
+    headers: { "Content-Type": "application/json" },
+    body: "{}",
+  });
+  window.location.href = "/login";
 }
 
 function formData(form) {
@@ -57,12 +75,14 @@ function statusBadge(status) {
     reachable: "ok",
     enabled: "ok",
     success: "ok",
+    deploying: "warn",
     provisioning: "warn",
     running: "warn",
     auth_failed: "bad",
     unreachable: "bad",
     disabled: "bad",
     failed: "bad",
+    planned: "warn",
   };
   return `<span class="badge ${map[status] || ""}">${status || "new"}</span>`;
 }
@@ -105,17 +125,19 @@ function absoluteUrl(value) {
 }
 
 async function refresh() {
-  const [summary, servers, deployments, subscriptions, clients] = await Promise.all([
+  const [summary, servers, deployments, subscriptions, chains, clients] = await Promise.all([
     api("/api/summary"),
     api("/api/servers"),
     api("/api/deployments"),
     api("/api/subscriptions"),
+    api("/api/chains"),
     api("/api/clients"),
   ]);
   state.summary = summary;
   state.servers = servers.servers;
   state.deployments = deployments.deployments;
   state.subscriptions = subscriptions.subscriptions;
+  state.chains = chains.chains;
   state.clients = clients.clients;
   render();
 }
@@ -125,9 +147,10 @@ function render() {
   renderServers();
   renderDeployments();
   renderSubscriptions();
+  renderChains();
   renderClients();
   renderSelects();
-  $("#statusLine").textContent = `${state.servers.length} 台服务器，${state.deployments.length} 个部署，${state.subscriptions.length} 条订阅，${state.clients.length} 个客户端`;
+  $("#statusLine").textContent = `${state.servers.length} 台服务器，${state.deployments.length} 个部署，${state.chains.length} 条代理链，${state.subscriptions.length} 条订阅，${state.clients.length} 个客户端`;
 }
 
 function renderSummary() {
@@ -176,6 +199,122 @@ function renderDeployments() {
 function renderSubscriptions() {
   $("#subscriptionList").innerHTML =
     state.subscriptions.map(subscriptionItem).join("") || empty("暂无订阅");
+}
+
+function renderChains() {
+  $("#chainList").innerHTML =
+    state.chains.map(chainItem).join("") || empty("暂无代理链");
+  renderChainBuilder();
+}
+
+function chainItem(chain) {
+  const subscriptionUrl = absoluteUrl(chain.subscription_url);
+  return `
+    <article class="item">
+      <div class="item-head">
+        <div class="item-title">
+          <strong>${escapeHtml(chain.name)}</strong>
+          <small>${escapeHtml(chain.path || "未配置路径")}</small>
+        </div>
+        ${statusBadge(chain.status)}
+      </div>
+      <div class="meta">入口：${escapeHtml(chain.entry_server_name || "-")} · 出口：${escapeHtml(chain.exit_server_name || "-")}</div>
+      ${chain.last_error ? `<div class="meta bad-text">错误：${escapeHtml(chain.last_error)}</div>` : ""}
+      <div class="meta">订阅：<span class="mono">${escapeHtml(subscriptionUrl)}</span></div>
+      <div class="mono">${chain.share_link ? escapeHtml(chain.share_link) : "下发成功后生成入口节点链接"}</div>
+      <div class="item-actions">
+        <button class="primary" data-deploy-chain="${chain.id}">
+          ${chain.status === "ready" ? "重新下发" : "下发远端"}
+        </button>
+        <button class="secondary" data-copy="${escapeHtml(subscriptionUrl)}">复制订阅</button>
+        ${chain.share_link ? `<button class="secondary" data-copy="${escapeHtml(chain.share_link)}">复制入口节点</button>` : ""}
+        <button class="ghost" data-delete-chain="${chain.id}">删除</button>
+      </div>
+    </article>
+  `;
+}
+
+function readyDeployments() {
+  return state.deployments.filter((deployment) => deployment.status === "ready");
+}
+
+function renderChainBuilder() {
+  const availableNode = $("#chainAvailableNodes");
+  const selectedNode = $("#chainSelectedNodes");
+  if (!availableNode || !selectedNode) return;
+
+  const ready = readyDeployments();
+  const byId = new Map(ready.map((deployment) => [deployment.id, deployment]));
+  state.chainDraft = state.chainDraft.filter((deploymentId) => byId.has(deploymentId));
+  const selectedIds = new Set(state.chainDraft);
+  const selected = state.chainDraft.map((deploymentId) => byId.get(deploymentId)).filter(Boolean);
+  const available = ready.filter((deployment) => !selectedIds.has(deployment.id));
+
+  availableNode.innerHTML =
+    available.map((deployment) => chainAvailableItem(deployment)).join("") ||
+    empty("暂无可用 ready 部署");
+  selectedNode.innerHTML =
+    selected.map((deployment, index) => chainSelectedItem(deployment, index)).join("") ||
+    `<div class="empty">把节点拖到这里，顺序就是入口到出口</div>`;
+  $("#chainPreview").textContent =
+    selected.map((deployment) => deployment.server_name).join(" -> ") || "未选择";
+  $("#chainSubmitBtn").disabled = selected.length < 2;
+}
+
+function chainAvailableItem(deployment) {
+  return `
+    <article class="chain-node" draggable="true" data-chain-drag="deployment" data-deployment-id="${deployment.id}">
+      <div>
+        <strong>${escapeHtml(deployment.server_name)}</strong>
+        <small>${escapeHtml(deployment.host)}:${deployment.proxy_port} · ${escapeHtml(deployment.protocol)}</small>
+      </div>
+      <button class="secondary" type="button" data-chain-add="${deployment.id}">加入</button>
+    </article>
+  `;
+}
+
+function chainSelectedItem(deployment, index) {
+  return `
+    <article class="chain-node is-selected" draggable="true" data-chain-drag="selected" data-chain-index="${index}" data-chain-position="${index}">
+      <span class="chain-index">${index + 1}</span>
+      <div>
+        <strong>${escapeHtml(deployment.server_name)}</strong>
+        <small>${index === 0 ? "入口" : index === state.chainDraft.length - 1 ? "出口" : "中继"} · ${escapeHtml(deployment.host)}:${deployment.proxy_port}</small>
+      </div>
+      <div class="chain-node-actions">
+        <button class="ghost icon-button" type="button" data-chain-up="${index}" title="上移">↑</button>
+        <button class="ghost icon-button" type="button" data-chain-down="${index}" title="下移">↓</button>
+        <button class="ghost icon-button" type="button" data-chain-remove="${index}" title="移除">×</button>
+      </div>
+    </article>
+  `;
+}
+
+function addChainDeployment(deploymentId, index = state.chainDraft.length) {
+  if (state.chainDraft.includes(deploymentId)) return;
+  const safeIndex = Math.max(0, Math.min(index, state.chainDraft.length));
+  state.chainDraft.splice(safeIndex, 0, deploymentId);
+  renderChainBuilder();
+}
+
+function removeChainDeployment(index) {
+  state.chainDraft.splice(index, 1);
+  renderChainBuilder();
+}
+
+function moveChainDeployment(fromIndex, toIndex) {
+  if (fromIndex === toIndex || fromIndex < 0 || fromIndex >= state.chainDraft.length) return;
+  const [deploymentId] = state.chainDraft.splice(fromIndex, 1);
+  const adjusted = toIndex > fromIndex ? toIndex - 1 : toIndex;
+  const safeIndex = Math.max(0, Math.min(adjusted, state.chainDraft.length));
+  state.chainDraft.splice(safeIndex, 0, deploymentId);
+  renderChainBuilder();
+}
+
+function chainDropIndex(target) {
+  const positioned = target.closest("[data-chain-position]");
+  if (!positioned) return state.chainDraft.length;
+  return Number(positioned.dataset.chainPosition);
 }
 
 function deploymentItem(deployment, options = {}) {
@@ -361,23 +500,26 @@ function bindEvents() {
     button.addEventListener("click", () => setSection(button.dataset.sectionJump));
   });
   $("#refreshBtn").addEventListener("click", () => refresh().then(() => toast("已刷新")));
+  $("#logoutBtn").addEventListener("click", () => logout());
 
   $("#serverForm").addEventListener("submit", async (event) => {
     event.preventDefault();
+    const form = event.currentTarget;
     await api("/api/servers", {
       method: "POST",
-      body: JSON.stringify(formData(event.currentTarget)),
+      body: JSON.stringify(formData(form)),
     });
-    event.currentTarget.reset();
-    event.currentTarget.sshPort.value = 22;
-    event.currentTarget.sshUser.value = "root";
+    form.reset();
+    form.sshPort.value = 22;
+    form.sshUser.value = "root";
     toast("服务器已保存");
     await refresh();
   });
 
   $("#deployForm").addEventListener("submit", async (event) => {
     event.preventDefault();
-    const data = formData(event.currentTarget);
+    const form = event.currentTarget;
+    const data = formData(form);
     if (!data.serverId) return toast("请选择服务器");
     data.installMethod = "native";
     const result = await api(`/api/servers/${data.serverId}/deploy`, {
@@ -390,33 +532,54 @@ function bindEvents() {
 
   $("#clientForm").addEventListener("submit", async (event) => {
     event.preventDefault();
-    const data = formData(event.currentTarget);
+    const form = event.currentTarget;
+    const data = formData(form);
     if (!data.deploymentId) return toast("请选择部署");
     await api(`/api/deployments/${data.deploymentId}/clients`, {
       method: "POST",
       body: JSON.stringify(data),
     });
-    event.currentTarget.reset();
+    form.reset();
     toast("客户端已创建");
     await refresh();
   });
 
   $("#subscriptionCreateForm").addEventListener("submit", async (event) => {
     event.preventDefault();
-    const data = formData(event.currentTarget);
+    const form = event.currentTarget;
+    const data = formData(form);
     const subscription = await api("/api/subscriptions", {
       method: "POST",
       body: JSON.stringify(data),
     });
-    event.currentTarget.reset();
+    form.reset();
     toast("订阅已创建");
     await refresh();
     await openSubscriptionEdit(subscription.id);
   });
 
+  $("#chainForm").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const form = event.currentTarget;
+    const data = formData(form);
+    if (state.chainDraft.length < 2) return toast("至少选择两个部署节点");
+    await api("/api/chains", {
+      method: "POST",
+      body: JSON.stringify({
+        name: data.name,
+        deploymentIds: state.chainDraft,
+      }),
+    });
+    state.chainDraft = [];
+    form.reset();
+    toast("代理链已保存");
+    await refresh();
+  });
+
   $("#clientEditForm").addEventListener("submit", async (event) => {
     event.preventDefault();
-    const data = formData(event.currentTarget);
+    const form = event.currentTarget;
+    const data = formData(form);
     const client = state.clients.find((item) => item.id === data.id);
     if (!client) return toast("客户端不存在");
     await api(`/api/clients/${data.id}`, {
@@ -454,6 +617,44 @@ function bindEvents() {
     await refresh();
   });
 
+  document.body.addEventListener("dragstart", (event) => {
+    const node = event.target.closest("[data-chain-drag]");
+    if (!node) return;
+    event.dataTransfer.effectAllowed = "move";
+    event.dataTransfer.setData(
+      "text/plain",
+      JSON.stringify({
+        type: node.dataset.chainDrag,
+        deploymentId: node.dataset.deploymentId || "",
+        index: Number(node.dataset.chainIndex || -1),
+      })
+    );
+  });
+
+  document.body.addEventListener("dragover", (event) => {
+    if (event.target.closest("#chainSelectedNodes")) {
+      event.preventDefault();
+    }
+  });
+
+  document.body.addEventListener("drop", (event) => {
+    if (!event.target.closest("#chainSelectedNodes")) return;
+    event.preventDefault();
+    let payload;
+    try {
+      payload = JSON.parse(event.dataTransfer.getData("text/plain"));
+    } catch {
+      return;
+    }
+    const index = chainDropIndex(event.target);
+    if (payload.type === "deployment" && payload.deploymentId) {
+      addChainDeployment(payload.deploymentId, index);
+    }
+    if (payload.type === "selected") {
+      moveChainDeployment(Number(payload.index), index);
+    }
+  });
+
   document.body.addEventListener("click", async (event) => {
     const target = event.target.closest("button");
     if (!target) return;
@@ -468,6 +669,28 @@ function bindEvents() {
 
     if (target.dataset.copy) {
       copy(target.dataset.copy);
+    }
+
+    if (target.dataset.chainAdd) {
+      addChainDeployment(target.dataset.chainAdd);
+      return;
+    }
+
+    if (target.dataset.chainRemove !== undefined) {
+      removeChainDeployment(Number(target.dataset.chainRemove));
+      return;
+    }
+
+    if (target.dataset.chainUp !== undefined) {
+      const index = Number(target.dataset.chainUp);
+      moveChainDeployment(index, index - 1);
+      return;
+    }
+
+    if (target.dataset.chainDown !== undefined) {
+      const index = Number(target.dataset.chainDown);
+      moveChainDeployment(index, index + 2);
+      return;
     }
 
     if (target.dataset.sectionJump) {
@@ -519,6 +742,25 @@ function bindEvents() {
       });
       toast("订阅已删除");
       await refresh();
+    }
+
+    if (target.dataset.deleteChain) {
+      const chain = state.chains.find((item) => item.id === target.dataset.deleteChain);
+      if (!confirm(`删除代理链 ${chain?.name || ""}？`)) return;
+      await api(`/api/chains/${target.dataset.deleteChain}`, {
+        method: "DELETE",
+      });
+      toast("代理链已删除");
+      await refresh();
+    }
+
+    if (target.dataset.deployChain) {
+      const result = await api(`/api/chains/${target.dataset.deployChain}/deploy`, {
+        method: "POST",
+        body: "{}",
+      });
+      toast("代理链下发任务已创建");
+      await pollJob(result.job.id);
     }
 
     if (target.dataset.editClient) {

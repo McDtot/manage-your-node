@@ -8,10 +8,10 @@ import time
 import uuid
 from datetime import date, datetime, time as datetime_time, timedelta, timezone
 from typing import Any
-from urllib.parse import quote, urlparse
+from urllib.parse import quote, urlencode, urlparse
 
 from .database import Database
-from .provisioning import native_3xui_script
+from .provisioning import native_3xui_script, shell_quote
 from .security import SecretBox
 from .ssh_runner import SshRunner
 from .xui_api import XuiApiClient
@@ -52,6 +52,7 @@ class AppServices:
             "SELECT COUNT(*) AS count FROM deployments WHERE status = 'ready'"
         )["count"]
         clients = self.db.query_one("SELECT COUNT(*) AS count FROM clients")["count"]
+        chains = self.db.query_one("SELECT COUNT(*) AS count FROM proxy_chains")["count"]
         traffic = self.db.query_one(
             "SELECT COALESCE(SUM(used_bytes), 0) AS used, "
             "COALESCE(SUM(quota_bytes), 0) AS quota FROM clients"
@@ -66,6 +67,7 @@ class AppServices:
             "servers": servers,
             "readyDeployments": ready,
             "clients": clients,
+            "proxyChains": chains,
             "usedBytes": traffic["used"],
             "quotaBytes": traffic["quota"],
             "expiringClients": expiring,
@@ -522,6 +524,9 @@ class AppServices:
     def _subscription_url(self, token: str) -> str:
         return f"/sub/links/{token}"
 
+    def _chain_subscription_url(self, token: str) -> str:
+        return f"/sub/chains/{token}"
+
     def _ensure_deployment_subscription(
         self,
         deployment_id: str,
@@ -565,6 +570,667 @@ class AppServices:
             ORDER BY c.created_at DESC
             """
         )
+
+    def list_proxy_chains(self) -> list[dict[str, Any]]:
+        rows = self.db.query_all(
+            """
+            SELECT id, name, token, client_uuid, status, share_link,
+                   last_error, created_at, updated_at
+            FROM proxy_chains
+            ORDER BY created_at DESC
+            """
+        )
+        for row in rows:
+            nodes = self._proxy_chain_nodes(row["id"])
+            row["nodes"] = nodes
+            row["path"] = " -> ".join(node["server_name"] for node in nodes)
+            row["entry_server_name"] = nodes[0]["server_name"] if nodes else ""
+            row["exit_server_name"] = nodes[-1]["server_name"] if nodes else ""
+            row["subscription_url"] = self._chain_subscription_url(row["token"])
+        return rows
+
+    def create_proxy_chain(self, payload: dict[str, Any]) -> dict[str, Any]:
+        deployment_ids = payload.get("deploymentIds") or payload.get("nodeIds") or []
+        if not isinstance(deployment_ids, list):
+            raise ValueError("deploymentIds must be a list")
+
+        ordered_ids: list[str] = []
+        seen = set()
+        for deployment_id in deployment_ids:
+            text_id = str(deployment_id).strip()
+            if not text_id or text_id in seen:
+                continue
+            ordered_ids.append(text_id)
+            seen.add(text_id)
+
+        if len(ordered_ids) < 2:
+            raise ValueError("proxy chain requires at least two deployments")
+        if len(ordered_ids) > 6:
+            raise ValueError("proxy chain supports up to six deployments for now")
+
+        deployments = self._chain_deployments_by_id(ordered_ids)
+        missing = [deployment_id for deployment_id in ordered_ids if deployment_id not in deployments]
+        if missing:
+            raise ValueError("selected deployment not found")
+        not_ready = [deployments[deployment_id]["server_name"] for deployment_id in ordered_ids if deployments[deployment_id]["status"] != "ready"]
+        if not_ready:
+            raise ValueError(f"deployment is not ready: {', '.join(not_ready)}")
+
+        name = str(payload.get("name", "")).strip()
+        if not name:
+            name = " -> ".join(deployments[deployment_id]["server_name"] for deployment_id in ordered_ids)
+
+        chain_id = new_id("chn")
+        token = secrets.token_urlsafe(14)
+        client_uuid = str(uuid.uuid4())
+        stamp = now_iso()
+        self.db.execute(
+            """
+            INSERT INTO proxy_chains (
+                id, name, token, client_uuid, status, share_link, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (chain_id, name, token, client_uuid, "planned", "", stamp, stamp),
+        )
+        self.db.executemany(
+            """
+            INSERT INTO proxy_chain_nodes (
+                chain_id, deployment_id, position, created_at
+            ) VALUES (?, ?, ?, ?)
+            """,
+            [
+                (chain_id, deployment_id, index, stamp)
+                for index, deployment_id in enumerate(ordered_ids)
+            ],
+        )
+        return self.get_proxy_chain(chain_id)
+
+    def get_proxy_chain(self, chain_id: str) -> dict[str, Any]:
+        rows = [chain for chain in self.list_proxy_chains() if chain["id"] == chain_id]
+        if not rows:
+            raise ValueError("proxy chain not found")
+        return rows[0]
+
+    def delete_proxy_chain(self, chain_id: str) -> dict[str, Any]:
+        logs = self._cleanup_proxy_chain_services(chain_id)
+        self.db.execute("DELETE FROM proxy_chains WHERE id = ?", (chain_id,))
+        return {"deleted": chain_id, "remoteLogs": logs[-20:]}
+
+    def start_proxy_chain_deployment(self, chain_id: str) -> dict[str, Any]:
+        self.get_proxy_chain(chain_id)
+        job_id = new_id("job")
+        stamp = now_iso()
+        self.db.execute(
+            """
+            INSERT INTO jobs (
+                id, type, chain_id, status, logs, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                job_id,
+                "deploy_proxy_chain",
+                chain_id,
+                "running",
+                json.dumps([], ensure_ascii=False),
+                stamp,
+                stamp,
+            ),
+        )
+        self.db.execute(
+            """
+            UPDATE proxy_chains
+            SET status = ?, last_error = NULL, updated_at = ?
+            WHERE id = ?
+            """,
+            ("deploying", stamp, chain_id),
+        )
+        thread = threading.Thread(
+            target=self._run_proxy_chain_deployment,
+            args=(job_id, chain_id),
+            daemon=True,
+        )
+        thread.start()
+        return {
+            "job": self.get_job(job_id),
+            "chain": self.get_proxy_chain(chain_id),
+        }
+
+    def _run_proxy_chain_deployment(self, job_id: str, chain_id: str) -> None:
+        try:
+            chain = self.get_proxy_chain(chain_id)
+            nodes = self._proxy_chain_full_nodes(chain_id)
+            if len(nodes) < 2:
+                raise ValueError("proxy chain requires at least two deployments")
+            if all(node["install_method"] == "dry-run" for node in nodes):
+                self._run_dry_proxy_chain_deployment(job_id, chain_id, chain, nodes)
+                return
+
+            invalid = [
+                node["server_name"]
+                for node in nodes
+                if node["install_method"] != "native" or node["deployment_status"] != "ready"
+            ]
+            if invalid:
+                raise ValueError(
+                    "real chain deployment requires every node to be a ready native deployment: "
+                    + ", ".join(invalid)
+                )
+
+            self._append_job_log(job_id, f"Preparing proxy chain: {chain['path']}")
+            nodes = self._prepare_proxy_chain_nodes(job_id, chain_id, nodes, dry_run=False)
+            self._append_job_log(job_id, "Installing chain services from exit to entry")
+            for index in range(len(nodes) - 1, -1, -1):
+                node = nodes[index]
+                next_node = nodes[index + 1] if index + 1 < len(nodes) else None
+                config = self._chain_xray_config(node, next_node)
+                self._install_proxy_chain_service(job_id, chain_id, node, config)
+                self.db.execute(
+                    """
+                    UPDATE proxy_chain_nodes
+                    SET status = ?, updated_at = ?
+                    WHERE chain_id = ? AND position = ?
+                    """,
+                    ("ready", now_iso(), chain_id, node["position"]),
+                )
+
+            self._finish_proxy_chain_deployment(job_id, chain_id, chain["name"])
+        except Exception as exc:  # noqa: BLE001
+            self.db.execute(
+                """
+                UPDATE proxy_chains
+                SET status = ?, last_error = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                ("failed", str(exc), now_iso(), chain_id),
+            )
+            self._append_job_log(job_id, f"Proxy chain deployment failed: {exc}")
+            self._finish_job(job_id, "failed", str(exc))
+
+    def _run_dry_proxy_chain_deployment(
+        self,
+        job_id: str,
+        chain_id: str,
+        chain: dict[str, Any],
+        nodes: list[dict[str, Any]],
+    ) -> None:
+        self._append_job_log(job_id, f"Dry-run: preparing proxy chain {chain['path']}")
+        nodes = self._prepare_proxy_chain_nodes(job_id, chain_id, nodes, dry_run=True)
+        for index, node in enumerate(nodes):
+            role = "exit" if index == len(nodes) - 1 else "relay"
+            self._append_job_log(
+                job_id,
+                f"Dry-run: {node['server_name']} prepared as {role} on port {node['inbound_port']}",
+            )
+            time.sleep(0.15)
+            self.db.execute(
+                """
+                UPDATE proxy_chain_nodes
+                SET status = ?, updated_at = ?
+                WHERE chain_id = ? AND position = ?
+                """,
+                ("ready", now_iso(), chain_id, node["position"]),
+            )
+        self._finish_proxy_chain_deployment(job_id, chain_id, chain["name"])
+
+    def _finish_proxy_chain_deployment(self, job_id: str, chain_id: str, name: str) -> None:
+        nodes = self._proxy_chain_full_nodes(chain_id)
+        if not nodes:
+            raise ValueError("proxy chain has no nodes")
+        entry = nodes[0]
+        share_link = self._chain_share_link(entry, name)
+        stamp = now_iso()
+        self.db.execute(
+            """
+            UPDATE proxy_chains
+            SET client_uuid = ?, status = ?, share_link = ?, last_error = NULL, updated_at = ?
+            WHERE id = ?
+            """,
+            (entry["node_client_uuid"], "ready", share_link, stamp, chain_id),
+        )
+        self._append_job_log(job_id, f"Proxy chain is ready: {self.get_proxy_chain(chain_id)['path']}")
+        self._finish_job(job_id, "success", None)
+
+    def _prepare_proxy_chain_nodes(
+        self,
+        job_id: str,
+        chain_id: str,
+        nodes: list[dict[str, Any]],
+        dry_run: bool,
+    ) -> list[dict[str, Any]]:
+        used_ports = {
+            int(row["inbound_port"])
+            for row in nodes
+            if row.get("inbound_port")
+        }
+        used_ports.update(
+            int(row["proxy_port"])
+            for row in nodes
+            if row.get("proxy_port")
+        )
+        prepared: list[dict[str, Any]] = []
+        for node in nodes:
+            update: dict[str, Any] = {}
+            if not node.get("inbound_port"):
+                update["inbound_port"] = self._new_chain_port(used_ports)
+                used_ports.add(update["inbound_port"])
+            if not node.get("node_client_uuid"):
+                update["client_uuid"] = str(uuid.uuid4())
+            if not node.get("short_id"):
+                update["short_id"] = secrets.token_hex(4)
+            if not node.get("public_key") or not node.get("encrypted_private_key"):
+                if dry_run:
+                    private_key, public_key = self._dry_reality_keypair()
+                else:
+                    self._append_job_log(job_id, f"Generating REALITY keypair on {node['server_name']}")
+                    private_key, public_key = self._remote_x25519_keypair(node)
+                update["encrypted_private_key"] = self.secret_box.seal(private_key)
+                update["public_key"] = public_key
+            if not node.get("remote_service_name"):
+                update["remote_service_name"] = f"myn-chain-{chain_id}-{node['position']}"
+
+            if update:
+                assignments = ", ".join(f"{column} = ?" for column in update)
+                params = list(update.values())
+                params.extend([now_iso(), chain_id, node["position"]])
+                self.db.execute(
+                    f"""
+                    UPDATE proxy_chain_nodes
+                    SET {assignments}, updated_at = ?
+                    WHERE chain_id = ? AND position = ?
+                    """,
+                    tuple(params),
+                )
+            prepared.append(self._proxy_chain_full_nodes(chain_id)[node["position"]])
+        return prepared
+
+    def _new_chain_port(self, used_ports: set[int]) -> int:
+        for _ in range(80):
+            port = random.randint(41000, 60999)
+            if port not in used_ports:
+                return port
+        raise ValueError("could not allocate a chain port")
+
+    def _dry_reality_keypair(self) -> tuple[str, str]:
+        return secrets.token_urlsafe(32)[:43], secrets.token_urlsafe(32)[:43]
+
+    def _remote_x25519_keypair(self, node: dict[str, Any]) -> tuple[str, str]:
+        lines = self.ssh.run_script(
+            node,
+            self._xray_keypair_script(),
+            lambda _: None,
+            timeout=60,
+        )
+        private_key = ""
+        public_key = ""
+        for line in lines:
+            text = line.strip()
+            if text.lower().startswith("private key:"):
+                private_key = text.split(":", 1)[1].strip()
+            if text.lower().startswith("public key:"):
+                public_key = text.split(":", 1)[1].strip()
+        if not private_key or not public_key:
+            raise ValueError(f"could not generate X25519 keypair on {node['server_name']}")
+        return private_key, public_key
+
+    def _xray_keypair_script(self) -> str:
+        return r"""
+set -Eeuo pipefail
+find_xray() {
+  for candidate in \
+    /usr/local/x-ui/bin/xray \
+    /usr/local/x-ui/bin/xray-linux-* \
+    /usr/bin/xray \
+    /usr/local/bin/xray
+  do
+    for path in $candidate; do
+      if [ -x "$path" ]; then
+        printf '%s\n' "$path"
+        return 0
+      fi
+    done
+  done
+  if command -v xray >/dev/null 2>&1; then
+    command -v xray
+    return 0
+  fi
+  return 1
+}
+XRAY="$(find_xray)" || { echo "xray binary not found" >&2; exit 42; }
+echo "Using Xray: $XRAY"
+"$XRAY" x25519
+"""
+
+    def _install_proxy_chain_service(
+        self,
+        job_id: str,
+        chain_id: str,
+        node: dict[str, Any],
+        config: dict[str, Any],
+    ) -> None:
+        service_name = node["remote_service_name"]
+        self._append_job_log(
+            job_id,
+            f"Installing {service_name} on {node['server_name']}:{node['inbound_port']}",
+        )
+        self.ssh.run_script(
+            node,
+            self._chain_install_script(service_name, int(node["inbound_port"]), config),
+            lambda line: self._append_job_log(job_id, f"{node['server_name']}: {line}"),
+            timeout=240,
+        )
+
+    def _chain_install_script(
+        self,
+        service_name: str,
+        inbound_port: int,
+        config: dict[str, Any],
+    ) -> str:
+        encoded_config = base64.b64encode(
+            json.dumps(config, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        ).decode("ascii")
+        return f"""#!/usr/bin/env bash
+set -Eeuo pipefail
+
+if [ "$(id -u)" -eq 0 ]; then
+  SUDO=""
+else
+  if ! command -v sudo >/dev/null 2>&1; then
+    echo "sudo is required when SSH user is not root" >&2
+    exit 20
+  fi
+  SUDO="sudo"
+fi
+
+find_xray() {{
+  for candidate in \\
+    /usr/local/x-ui/bin/xray \\
+    /usr/local/x-ui/bin/xray-linux-* \\
+    /usr/bin/xray \\
+    /usr/local/bin/xray
+  do
+    for path in $candidate; do
+      if [ -x "$path" ]; then
+        printf '%s\\n' "$path"
+        return 0
+      fi
+    done
+  done
+  if command -v xray >/dev/null 2>&1; then
+    command -v xray
+    return 0
+  fi
+  return 1
+}}
+
+XRAY="$(find_xray)" || {{ echo "xray binary not found" >&2; exit 42; }}
+SERVICE_NAME={shell_quote(service_name)}
+INSTALL_DIR="/opt/manage-node/chains/$SERVICE_NAME"
+CONFIG_FILE="$INSTALL_DIR/config.json"
+UNIT_FILE="/etc/systemd/system/$SERVICE_NAME.service"
+CONFIG_B64={shell_quote(encoded_config)}
+
+echo "Using Xray: $XRAY"
+$SUDO install -d -m 0755 "$INSTALL_DIR"
+printf '%s' "$CONFIG_B64" | base64 -d | $SUDO tee "$CONFIG_FILE.tmp" >/dev/null
+$SUDO chmod 0644 "$CONFIG_FILE.tmp"
+
+if $SUDO "$XRAY" run -test -config "$CONFIG_FILE.tmp" >/tmp/"$SERVICE_NAME".test.log 2>&1; then
+  true
+elif $SUDO "$XRAY" -test -config "$CONFIG_FILE.tmp" >/tmp/"$SERVICE_NAME".test.log 2>&1; then
+  true
+else
+  cat /tmp/"$SERVICE_NAME".test.log >&2 || true
+  exit 43
+fi
+
+$SUDO mv "$CONFIG_FILE.tmp" "$CONFIG_FILE"
+$SUDO tee "$UNIT_FILE" >/dev/null <<EOF
+[Unit]
+Description=Manage Your Node proxy chain $SERVICE_NAME
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=$XRAY run -config $CONFIG_FILE
+Restart=on-failure
+RestartSec=3
+LimitNOFILE=1048576
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+$SUDO systemctl daemon-reload
+$SUDO systemctl enable "$SERVICE_NAME" >/dev/null
+$SUDO systemctl restart "$SERVICE_NAME"
+$SUDO systemctl is-active --quiet "$SERVICE_NAME"
+
+if command -v ufw >/dev/null 2>&1; then
+  $SUDO ufw allow {shell_quote(inbound_port)}/tcp >/dev/null 2>&1 || true
+fi
+if command -v firewall-cmd >/dev/null 2>&1; then
+  $SUDO firewall-cmd --permanent --add-port={shell_quote(inbound_port)}/tcp >/dev/null 2>&1 || true
+  $SUDO firewall-cmd --reload >/dev/null 2>&1 || true
+fi
+
+echo "Service $SERVICE_NAME is active"
+"""
+
+    def _chain_xray_config(
+        self,
+        node: dict[str, Any],
+        next_node: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        inbound = {
+            "tag": "myn-chain-in",
+            "listen": "",
+            "port": int(node["inbound_port"]),
+            "protocol": "vless",
+            "settings": {
+                "clients": [
+                    {
+                        "id": node["node_client_uuid"],
+                        "email": f"myn-chain-{node['position']}",
+                        "flow": "xtls-rprx-vision",
+                    }
+                ],
+                "decryption": "none",
+            },
+            "streamSettings": {
+                "network": "tcp",
+                "tcpSettings": {"header": {"type": "none"}},
+                "security": "reality",
+                "realitySettings": {
+                    "show": False,
+                    "dest": "www.yahoo.com:443",
+                    "xver": 0,
+                    "serverNames": ["www.yahoo.com"],
+                    "privateKey": self.secret_box.open(node["encrypted_private_key"]),
+                    "shortIds": [node["short_id"]],
+                },
+            },
+            "sniffing": {
+                "enabled": True,
+                "destOverride": ["http", "tls", "quic"],
+                "metadataOnly": False,
+                "routeOnly": False,
+            },
+        }
+        if next_node:
+            outbound = {
+                "tag": "myn-chain-next",
+                "protocol": "vless",
+                "settings": {
+                    "vnext": [
+                        {
+                            "address": next_node["host"],
+                            "port": int(next_node["inbound_port"]),
+                            "users": [
+                                {
+                                    "id": next_node["node_client_uuid"],
+                                    "encryption": "none",
+                                    "flow": "xtls-rprx-vision",
+                                }
+                            ],
+                        }
+                    ]
+                },
+                "streamSettings": {
+                    "network": "tcp",
+                    "tcpSettings": {"header": {"type": "none"}},
+                    "security": "reality",
+                    "realitySettings": {
+                        "serverName": "www.yahoo.com",
+                        "fingerprint": "chrome",
+                        "publicKey": next_node["public_key"],
+                        "shortId": next_node["short_id"],
+                        "spiderX": "/",
+                    },
+                },
+            }
+        else:
+            outbound = {"tag": "direct", "protocol": "freedom"}
+        return {
+            "log": {"loglevel": "warning"},
+            "inbounds": [inbound],
+            "outbounds": [outbound],
+        }
+
+    def _chain_share_link(self, entry: dict[str, Any], name: str) -> str:
+        params = {
+            "security": "reality",
+            "type": "tcp",
+            "flow": "xtls-rprx-vision",
+            "pbk": entry["public_key"],
+            "fp": "chrome",
+            "sni": "www.yahoo.com",
+            "sid": entry["short_id"],
+            "spx": "/",
+        }
+        tag = quote(name)
+        return (
+            f"vless://{entry['node_client_uuid']}@{entry['host']}:{entry['inbound_port']}"
+            f"?{urlencode(params)}#{tag}"
+        )
+
+    def _cleanup_proxy_chain_services(self, chain_id: str) -> list[str]:
+        nodes = self._proxy_chain_full_nodes(chain_id)
+        logs: list[str] = []
+        for node in nodes:
+            service_name = node.get("remote_service_name")
+            if node.get("install_method") != "native" or not service_name:
+                continue
+            try:
+                lines = self.ssh.run_script(
+                    node,
+                    self._chain_cleanup_script(service_name),
+                    lambda _: None,
+                    timeout=120,
+                )
+                logs.extend(f"{node['server_name']}: {line}" for line in lines if line)
+            except Exception as exc:  # noqa: BLE001
+                logs.append(f"{node['server_name']}: cleanup failed: {exc}")
+        return logs
+
+    def _cleanup_proxy_chains_for_deployments(self, deployment_ids: list[str]) -> list[str]:
+        if not deployment_ids:
+            return []
+        placeholders = ",".join("?" for _ in deployment_ids)
+        rows = self.db.query_all(
+            f"""
+            SELECT DISTINCT chain_id
+            FROM proxy_chain_nodes
+            WHERE deployment_id IN ({placeholders})
+            """,
+            tuple(deployment_ids),
+        )
+        logs: list[str] = []
+        for row in rows:
+            logs.extend(self._cleanup_proxy_chain_services(row["chain_id"]))
+        return logs
+
+    def _chain_cleanup_script(self, service_name: str) -> str:
+        return f"""#!/usr/bin/env bash
+set -u
+if [ "$(id -u)" -eq 0 ]; then
+  SUDO=""
+else
+  SUDO="sudo"
+fi
+SERVICE_NAME={shell_quote(service_name)}
+INSTALL_DIR="/opt/manage-node/chains/$SERVICE_NAME"
+UNIT_FILE="/etc/systemd/system/$SERVICE_NAME.service"
+echo "Stopping $SERVICE_NAME"
+$SUDO systemctl stop "$SERVICE_NAME" 2>/dev/null || true
+$SUDO systemctl disable "$SERVICE_NAME" 2>/dev/null || true
+$SUDO rm -f "$UNIT_FILE"
+$SUDO rm -rf "$INSTALL_DIR"
+$SUDO systemctl daemon-reload 2>/dev/null || true
+$SUDO systemctl reset-failed "$SERVICE_NAME" 2>/dev/null || true
+echo "Removed $SERVICE_NAME"
+"""
+
+    def _proxy_chain_full_nodes(self, chain_id: str) -> list[dict[str, Any]]:
+        return self.db.query_all(
+            """
+            SELECT pcn.position, pcn.inbound_port,
+                   pcn.client_uuid AS node_client_uuid,
+                   pcn.encrypted_private_key, pcn.public_key, pcn.short_id,
+                   pcn.remote_service_name, pcn.status AS node_status,
+                   d.id AS deployment_id, d.install_method,
+                   d.status AS deployment_status, d.protocol, d.proxy_port,
+                   s.id AS server_id, s.name AS server_name, s.host, s.ssh_port,
+                   s.ssh_user, s.auth_type, s.encrypted_secret, s.secret_label
+            FROM proxy_chain_nodes pcn
+            JOIN deployments d ON d.id = pcn.deployment_id
+            JOIN servers s ON s.id = d.server_id
+            WHERE pcn.chain_id = ?
+            ORDER BY pcn.position ASC
+            """,
+            (chain_id,),
+        )
+
+    def render_proxy_chain_subscription(self, token: str) -> str:
+        row = self.db.query_one(
+            "SELECT share_link FROM proxy_chains WHERE token = ?",
+            (token,),
+        )
+        if not row:
+            raise ValueError("proxy chain not found")
+        return base64.b64encode(row["share_link"].encode("utf-8")).decode("ascii")
+
+    def _proxy_chain_nodes(self, chain_id: str) -> list[dict[str, Any]]:
+        return self.db.query_all(
+            """
+            SELECT pcn.position, d.id AS deployment_id, s.name AS server_name,
+                   s.host, d.protocol, d.proxy_port, d.status,
+                   pcn.inbound_port, pcn.client_uuid, pcn.public_key,
+                   pcn.short_id, pcn.remote_service_name, pcn.status AS node_status
+            FROM proxy_chain_nodes pcn
+            JOIN deployments d ON d.id = pcn.deployment_id
+            JOIN servers s ON s.id = d.server_id
+            WHERE pcn.chain_id = ?
+            ORDER BY pcn.position ASC
+            """,
+            (chain_id,),
+        )
+
+    def _chain_deployments_by_id(self, deployment_ids: list[str]) -> dict[str, dict[str, Any]]:
+        if not deployment_ids:
+            return {}
+        placeholders = ",".join("?" for _ in deployment_ids)
+        rows = self.db.query_all(
+            f"""
+            SELECT d.id, s.name AS server_name, s.host,
+                   d.protocol, d.proxy_port, d.status, d.install_method
+            FROM deployments d
+            JOIN servers s ON s.id = d.server_id
+            WHERE d.id IN ({placeholders})
+            """,
+            tuple(deployment_ids),
+        )
+        return {row["id"]: row for row in rows}
 
     def create_client(self, deployment_id: str, payload: dict[str, Any]) -> dict[str, Any]:
         deployment = self.get_deployment(deployment_id)
@@ -735,6 +1401,7 @@ class AppServices:
 
     def delete_deployment(self, deployment_id: str) -> dict[str, Any]:
         deployment = self.get_deployment(deployment_id)
+        chain_logs = self._cleanup_proxy_chains_for_deployments([deployment_id])
         other_native = self.db.query_one(
             """
             SELECT COUNT(*) AS count
@@ -750,7 +1417,7 @@ class AppServices:
         self._delete_deployment_records(deployment_id)
         return {
             "deleted": deployment_id,
-            "remoteLogs": remote_logs[-20:],
+            "remoteLogs": (chain_logs + remote_logs)[-20:],
         }
 
     def delete_server(self, server_id: str) -> dict[str, Any]:
@@ -758,6 +1425,9 @@ class AppServices:
         deployments = self.db.query_all(
             "SELECT id, install_method FROM deployments WHERE server_id = ?",
             (server_id,),
+        )
+        chain_logs = self._cleanup_proxy_chains_for_deployments(
+            [deployment["id"] for deployment in deployments]
         )
         remote_logs: list[str] = []
         if any(row["install_method"] == "native" for row in deployments):
@@ -767,7 +1437,7 @@ class AppServices:
         self.db.execute("DELETE FROM servers WHERE id = ?", (server_id,))
         return {
             "deleted": server_id,
-            "remoteLogs": remote_logs[-20:],
+            "remoteLogs": (chain_logs + remote_logs)[-20:],
         }
 
     def _delete_deployment_records(self, deployment_id: str) -> None:

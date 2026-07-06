@@ -46,6 +46,10 @@ body {
   line-height: 1.4;
 }
 
+body.login-page {
+  min-height: 100vh;
+}
+
 button,
 input,
 select,
@@ -61,6 +65,41 @@ button {
   display: grid;
   grid-template-columns: 248px minmax(0, 1fr);
   min-height: 100vh;
+}
+
+.login-shell {
+  display: grid;
+  min-height: 100vh;
+  place-items: center;
+  padding: 24px;
+}
+
+.login-panel {
+  width: min(420px, 100%);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  padding: 22px;
+  box-shadow: var(--shadow);
+}
+
+.login-brand {
+  color: var(--ink);
+  margin-bottom: 8px;
+}
+
+.login-brand small {
+  color: var(--muted);
+}
+
+.form-error {
+  border: 1px solid rgba(184, 91, 80, 0.28);
+  border-radius: 8px;
+  background: rgba(184, 91, 80, 0.1);
+  color: var(--red);
+  padding: 10px 11px;
+  font-size: 13px;
+  font-weight: 700;
 }
 
 .sidebar {
@@ -137,6 +176,7 @@ button {
 
 h1,
 h2,
+h3,
 p {
   margin: 0;
 }
@@ -149,6 +189,10 @@ h1 {
 
 h2 {
   font-size: 18px;
+}
+
+h3 {
+  font-size: 14px;
 }
 
 .topbar p {
@@ -336,6 +380,110 @@ textarea:focus {
   gap: 10px;
 }
 
+.chain-builder {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+
+.chain-builder section {
+  display: grid;
+  align-content: start;
+  gap: 10px;
+  min-width: 0;
+}
+
+.chain-node-list {
+  display: grid;
+  align-content: start;
+  gap: 8px;
+  min-height: 132px;
+  border: 1px dashed var(--line);
+  border-radius: 8px;
+  background: rgba(253, 250, 241, 0.6);
+  padding: 8px;
+}
+
+.chain-dropzone {
+  border-color: rgba(47, 124, 95, 0.42);
+  background: rgba(47, 124, 95, 0.06);
+}
+
+.chain-node {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: center;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--field);
+  padding: 10px;
+  cursor: grab;
+}
+
+.chain-node.is-selected {
+  grid-template-columns: 28px minmax(0, 1fr) auto;
+  border-color: rgba(47, 124, 95, 0.36);
+}
+
+.chain-node:active {
+  cursor: grabbing;
+}
+
+.chain-node strong,
+.chain-node small {
+  display: block;
+}
+
+.chain-node small {
+  margin-top: 2px;
+  color: var(--muted);
+}
+
+.chain-index {
+  display: grid;
+  width: 26px;
+  height: 26px;
+  place-items: center;
+  border-radius: 999px;
+  background: rgba(47, 124, 95, 0.13);
+  color: var(--primary-strong);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.chain-node-actions {
+  display: flex;
+  gap: 4px;
+}
+
+.chain-node-actions .icon-button {
+  width: 34px;
+  min-width: 34px;
+  min-height: 34px;
+  font-size: 18px;
+}
+
+.chain-preview {
+  display: grid;
+  gap: 4px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--field);
+  padding: 10px 11px;
+}
+
+.chain-preview span {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.chain-preview strong {
+  overflow-wrap: anywhere;
+  font-size: 14px;
+}
+
 .item {
   display: grid;
   gap: 10px;
@@ -362,6 +510,10 @@ textarea:focus {
 .item-title small,
 .meta {
   color: var(--muted);
+}
+
+.bad-text {
+  color: var(--red);
 }
 
 .item-actions {
@@ -613,6 +765,7 @@ textarea:focus {
 
   .metrics,
   .grid.two,
+  .chain-builder,
   .row {
     grid-template-columns: 1fr;
   }
