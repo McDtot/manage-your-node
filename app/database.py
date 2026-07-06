@@ -1,0 +1,204 @@
+import sqlite3
+import threading
+from pathlib import Path
+from typing import Any
+
+
+class Database:
+    def __init__(self, db_path: Path):
+        self._lock = threading.RLock()
+        self._conn = sqlite3.connect(db_path, check_same_thread=False)
+        self._conn.row_factory = sqlite3.Row
+        self._conn.execute("PRAGMA foreign_keys = ON")
+        self._migrate()
+
+    def _migrate(self) -> None:
+        with self._lock:
+            self._conn.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS servers (
+                    id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    host TEXT NOT NULL,
+                    ssh_port INTEGER NOT NULL,
+                    ssh_user TEXT NOT NULL,
+                    auth_type TEXT NOT NULL,
+                    encrypted_secret TEXT,
+                    secret_label TEXT NOT NULL DEFAULT 'not_saved',
+                    os TEXT,
+                    arch TEXT,
+                    status TEXT NOT NULL,
+                    last_check_at TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS deployments (
+                    id TEXT PRIMARY KEY,
+                    server_id TEXT NOT NULL,
+                    engine TEXT NOT NULL,
+                    protocol TEXT NOT NULL,
+                    install_method TEXT NOT NULL DEFAULT 'dry-run',
+                    panel_scheme TEXT NOT NULL DEFAULT 'http',
+                    panel_port INTEGER NOT NULL,
+                    panel_path TEXT NOT NULL,
+                    panel_username TEXT NOT NULL,
+                    encrypted_panel_password TEXT NOT NULL,
+                    encrypted_api_token TEXT NOT NULL,
+                    proxy_port INTEGER NOT NULL,
+                    xui_inbound_id INTEGER,
+                    subscription_configured INTEGER NOT NULL DEFAULT 0,
+                    status TEXT NOT NULL,
+                    subscription_url TEXT NOT NULL,
+                    last_error TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    FOREIGN KEY(server_id) REFERENCES servers(id) ON DELETE CASCADE
+                );
+
+                CREATE TABLE IF NOT EXISTS clients (
+                    id TEXT PRIMARY KEY,
+                    deployment_id TEXT NOT NULL,
+                    name TEXT NOT NULL,
+                    uuid TEXT NOT NULL,
+                    quota_bytes INTEGER NOT NULL,
+                    used_bytes INTEGER NOT NULL,
+                    expires_at TEXT NOT NULL,
+                    enabled INTEGER NOT NULL,
+                    share_link TEXT NOT NULL,
+                    subscription_url TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    FOREIGN KEY(deployment_id) REFERENCES deployments(id) ON DELETE CASCADE
+                );
+
+                CREATE TABLE IF NOT EXISTS subscription_nodes (
+                    subscription_id TEXT NOT NULL,
+                    node_client_id TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    PRIMARY KEY(subscription_id, node_client_id),
+                    FOREIGN KEY(subscription_id) REFERENCES deployments(id) ON DELETE CASCADE,
+                    FOREIGN KEY(node_client_id) REFERENCES clients(id) ON DELETE CASCADE
+                );
+
+                CREATE TABLE IF NOT EXISTS subscriptions (
+                    id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    token TEXT NOT NULL UNIQUE,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS subscription_entries (
+                    subscription_id TEXT NOT NULL,
+                    node_client_id TEXT NOT NULL,
+                    quota_bytes INTEGER NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY(subscription_id, node_client_id),
+                    FOREIGN KEY(subscription_id) REFERENCES subscriptions(id) ON DELETE CASCADE,
+                    FOREIGN KEY(node_client_id) REFERENCES clients(id) ON DELETE CASCADE
+                );
+
+                CREATE TABLE IF NOT EXISTS jobs (
+                    id TEXT PRIMARY KEY,
+                    type TEXT NOT NULL,
+                    server_id TEXT,
+                    deployment_id TEXT,
+                    status TEXT NOT NULL,
+                    logs TEXT NOT NULL,
+                    error TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    finished_at TEXT,
+                    FOREIGN KEY(server_id) REFERENCES servers(id) ON DELETE SET NULL,
+                    FOREIGN KEY(deployment_id) REFERENCES deployments(id) ON DELETE SET NULL
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_deployments_server
+                    ON deployments(server_id);
+                CREATE INDEX IF NOT EXISTS idx_clients_deployment
+                    ON clients(deployment_id);
+                CREATE INDEX IF NOT EXISTS idx_subscription_nodes_client
+                    ON subscription_nodes(node_client_id);
+                CREATE INDEX IF NOT EXISTS idx_subscription_entries_client
+                    ON subscription_entries(node_client_id);
+                CREATE INDEX IF NOT EXISTS idx_jobs_server
+                    ON jobs(server_id);
+                """
+            )
+            self._ensure_column("deployments", "install_method", "TEXT NOT NULL DEFAULT 'dry-run'")
+            self._ensure_column("deployments", "panel_scheme", "TEXT NOT NULL DEFAULT 'http'")
+            self._ensure_column("deployments", "xui_inbound_id", "INTEGER")
+            self._ensure_column("deployments", "subscription_configured", "INTEGER NOT NULL DEFAULT 0")
+            self._conn.execute(
+                """
+                INSERT OR IGNORE INTO subscription_nodes (
+                    subscription_id, node_client_id, created_at
+                )
+                SELECT d.id, c.id, COALESCE(c.created_at, d.created_at)
+                FROM deployments d
+                JOIN clients c ON c.deployment_id = d.id
+                WHERE d.subscription_configured = 0
+                """
+            )
+            self._conn.execute(
+                "UPDATE deployments SET subscription_configured = 1 WHERE subscription_configured = 0"
+            )
+            self._conn.execute(
+                """
+                INSERT OR IGNORE INTO subscriptions (
+                    id, name, token, created_at, updated_at
+                )
+                SELECT 'sub_' || d.id, s.name || ' 默认订阅', d.id,
+                       COALESCE(d.created_at, CURRENT_TIMESTAMP),
+                       COALESCE(d.updated_at, d.created_at, CURRENT_TIMESTAMP)
+                FROM deployments d
+                JOIN servers s ON s.id = d.server_id
+                """
+            )
+            self._conn.execute(
+                """
+                INSERT OR IGNORE INTO subscription_entries (
+                    subscription_id, node_client_id, quota_bytes, created_at, updated_at
+                )
+                SELECT 'sub_' || sn.subscription_id, sn.node_client_id, c.quota_bytes,
+                       COALESCE(sn.created_at, c.created_at, CURRENT_TIMESTAMP),
+                       COALESCE(c.updated_at, sn.created_at, CURRENT_TIMESTAMP)
+                FROM subscription_nodes sn
+                JOIN clients c ON c.id = sn.node_client_id
+                JOIN subscriptions s ON s.id = 'sub_' || sn.subscription_id
+                """
+            )
+            self._conn.commit()
+
+    def _ensure_column(self, table: str, column: str, definition: str) -> None:
+        rows = self._conn.execute(f"PRAGMA table_info({table})").fetchall()
+        if any(row["name"] == column for row in rows):
+            return
+        self._conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+
+    def query_all(self, sql: str, params: tuple[Any, ...] = ()) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = self._conn.execute(sql, params).fetchall()
+            return [dict(row) for row in rows]
+
+    def query_one(self, sql: str, params: tuple[Any, ...] = ()) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._conn.execute(sql, params).fetchone()
+            return dict(row) if row else None
+
+    def execute(self, sql: str, params: tuple[Any, ...] = ()) -> None:
+        with self._lock:
+            self._conn.execute(sql, params)
+            self._conn.commit()
+
+    def executemany(self, sql: str, params: list[tuple[Any, ...]]) -> None:
+        with self._lock:
+            self._conn.executemany(sql, params)
+            self._conn.commit()
+
+    def executescript(self, sql: str) -> None:
+        with self._lock:
+            self._conn.executescript(sql)
+            self._conn.commit()

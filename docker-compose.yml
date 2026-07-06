@@ -1,0 +1,15 @@
+services:
+  manage-your-node:
+    build: .
+    container_name: manage-your-node
+    ports:
+      - "8787:8787"
+    environment:
+      APP_DATA_DIR: /data
+      APP_SECRET: change-this-before-real-use
+      HOST: 0.0.0.0
+      PORT: 8787
+    volumes:
+      - ./data:/data
+    restart: unless-stopped
+

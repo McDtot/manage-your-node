@@ -1,0 +1,299 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Manage Your Node</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <div class="shell">
+      <aside class="sidebar">
+        <div class="brand">
+          <span class="brand-mark">MYN</span>
+          <div>
+            <strong>Manage Your Node</strong>
+            <small>3x-ui v0.1</small>
+          </div>
+        </div>
+        <nav class="nav">
+          <button class="nav-item is-active" data-section="overview">总览</button>
+          <button class="nav-item" data-section="subscriptions">订阅</button>
+          <button class="nav-item" data-section="servers">服务器</button>
+          <button class="nav-item" data-section="deployments">部署</button>
+          <button class="nav-item" data-section="clients">客户端</button>
+          <button class="nav-item" data-section="logs">日志</button>
+        </nav>
+      </aside>
+
+      <main class="workspace">
+        <header class="topbar">
+          <div>
+            <h1>节点部署器</h1>
+            <p id="statusLine">加载中</p>
+          </div>
+          <div class="top-actions">
+            <button class="secondary" id="refreshBtn">刷新</button>
+            <button class="primary" id="topAddServerBtn" data-section-jump="servers" hidden>添加服务器</button>
+          </div>
+        </header>
+
+        <section class="section is-active" id="overview">
+          <div class="metrics">
+            <article class="metric">
+              <span>服务器</span>
+              <strong id="metricServers">0</strong>
+            </article>
+            <article class="metric">
+              <span>可用部署</span>
+              <strong id="metricDeployments">0</strong>
+            </article>
+            <article class="metric">
+              <span>客户端</span>
+              <strong id="metricClients">0</strong>
+            </article>
+            <article class="metric warn">
+              <span>7 天内到期</span>
+              <strong id="metricExpiring">0</strong>
+            </article>
+          </div>
+
+          <div class="grid two">
+            <section class="panel">
+              <div class="panel-head">
+                <h2>最近服务器</h2>
+              </div>
+              <div id="overviewServers" class="list"></div>
+            </section>
+            <section class="panel">
+              <div class="panel-head">
+                <h2>部署状态</h2>
+              </div>
+              <div id="overviewDeployments" class="list"></div>
+            </section>
+          </div>
+        </section>
+
+        <section class="section" id="servers">
+          <div class="grid two">
+            <form class="panel form" id="serverForm">
+              <div class="panel-head">
+                <h2>添加服务器</h2>
+              </div>
+              <label>
+                名称
+                <input name="name" placeholder="hk-01" required />
+              </label>
+              <label>
+                IP / 域名
+                <input name="host" placeholder="203.0.113.10" required />
+              </label>
+              <div class="row">
+                <label>
+                  SSH 端口
+                  <input name="sshPort" type="number" value="22" min="1" max="65535" required />
+                </label>
+                <label>
+                  用户
+                  <input name="sshUser" value="root" required />
+                </label>
+              </div>
+              <label>
+                认证方式
+                <select name="authType">
+                  <option value="key">SSH 密钥</option>
+                  <option value="agent">SSH Agent / 默认密钥</option>
+                  <option value="password">密码</option>
+                </select>
+              </label>
+              <label>
+                密钥或密码
+                <textarea name="secret" rows="5" placeholder="粘贴私钥；如果选择 SSH Agent / 默认密钥可留空"></textarea>
+              </label>
+              <button class="primary" type="submit">保存服务器</button>
+            </form>
+
+            <section class="panel">
+              <div class="panel-head">
+                <h2>服务器列表</h2>
+              </div>
+              <div id="serverList" class="list"></div>
+            </section>
+          </div>
+        </section>
+
+        <section class="section" id="deployments">
+          <div class="grid two">
+            <form class="panel form" id="deployForm">
+              <div class="panel-head">
+                <h2>创建部署</h2>
+              </div>
+              <label>
+                服务器
+                <select name="serverId" id="deployServerSelect" required></select>
+              </label>
+              <label>
+                协议模板
+                <select name="protocol">
+                  <option value="VLESS + REALITY">VLESS + REALITY</option>
+                </select>
+              </label>
+              <div class="row">
+                <label>
+                  代理端口
+                  <input name="proxyPort" type="number" value="443" min="1" max="65535" />
+                </label>
+                <label>
+                  面板端口
+                  <input name="panelPort" type="number" placeholder="自动" min="1" max="65535" />
+                </label>
+              </div>
+              <label class="check">
+                <input name="createInitialClient" type="checkbox" checked />
+                创建首个客户端
+              </label>
+              <div class="row">
+                <label>
+                  客户端名
+                  <input name="clientName" value="default-client" />
+                </label>
+                <label>
+                  流量 GB
+                  <input name="quotaGb" type="number" value="100" min="1" />
+                </label>
+              </div>
+              <label>
+                到期日
+                <input name="expiresAt" type="date" />
+              </label>
+              <button class="primary" type="submit">开始部署</button>
+            </form>
+
+            <section class="panel">
+              <div class="panel-head">
+                <h2>部署列表</h2>
+              </div>
+              <div id="deploymentList" class="list"></div>
+            </section>
+          </div>
+        </section>
+
+        <section class="section" id="subscriptions">
+          <div class="grid two">
+            <form class="panel form" id="subscriptionCreateForm">
+              <div class="panel-head">
+                <h2>产生订阅链接</h2>
+              </div>
+              <label>
+                名称
+                <input name="name" placeholder="家庭设备 / 团队 A" required />
+              </label>
+              <button class="primary" type="submit">创建订阅</button>
+            </form>
+
+            <section class="panel wide">
+              <div class="panel-head">
+                <h2>订阅分发</h2>
+              </div>
+              <div id="subscriptionList" class="list"></div>
+            </section>
+          </div>
+        </section>
+
+        <section class="section" id="clients">
+          <div class="grid two">
+            <form class="panel form" id="clientForm">
+              <div class="panel-head">
+                <h2>新增客户端</h2>
+              </div>
+              <label>
+                部署
+                <select name="deploymentId" id="clientDeploymentSelect" required></select>
+              </label>
+              <label>
+                名称
+                <input name="name" placeholder="phone-a" required />
+              </label>
+              <div class="row">
+                <label>
+                  流量 GB
+                  <input name="quotaGb" type="number" value="100" min="1" />
+                </label>
+                <label>
+                  到期日
+                  <input name="expiresAt" type="date" />
+                </label>
+              </div>
+              <button class="primary" type="submit">创建客户端</button>
+            </form>
+
+            <section class="panel wide">
+              <div class="panel-head">
+                <h2>客户端列表</h2>
+              </div>
+              <div id="clientList" class="list"></div>
+            </section>
+          </div>
+        </section>
+
+        <section class="section" id="logs">
+          <section class="panel">
+            <div class="panel-head">
+              <h2>任务日志</h2>
+              <span id="jobStatus" class="badge">无任务</span>
+            </div>
+            <pre id="jobLog" class="log"></pre>
+          </section>
+        </section>
+      </main>
+    </div>
+
+    <dialog class="dialog" id="clientEditDialog">
+      <form class="dialog-panel form" id="clientEditForm">
+        <input type="hidden" name="id" />
+        <div class="panel-head">
+          <h2>编辑客户端</h2>
+          <button class="ghost icon-button" type="button" data-close-client-edit>×</button>
+        </div>
+        <label>
+          名称
+          <input name="name" required />
+        </label>
+        <label>
+          流量 GB
+          <input name="quotaGb" type="number" min="0" step="1" required />
+        </label>
+        <div class="dialog-actions">
+          <button class="ghost" type="button" data-close-client-edit>取消</button>
+          <button class="primary" type="submit">保存</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog class="dialog dialog-wide" id="subscriptionDialog">
+      <form class="dialog-panel form" id="subscriptionForm">
+        <input type="hidden" name="subscriptionId" />
+        <div class="panel-head">
+          <h2 id="subscriptionTitle">订阅节点</h2>
+          <button class="ghost icon-button" type="button" data-close-subscription-edit>×</button>
+        </div>
+        <label>
+          名称
+          <input name="name" required />
+        </label>
+        <div class="sub-link-row">
+          <span class="mono" id="subscriptionUrlValue"></span>
+          <button class="secondary" id="subscriptionCopyBtn" type="button" data-copy="">复制链接</button>
+        </div>
+        <div class="node-picker" id="subscriptionNodeList"></div>
+        <div class="dialog-actions">
+          <button class="ghost" type="button" data-close-subscription-edit>取消</button>
+          <button class="primary" type="submit">保存</button>
+        </div>
+      </form>
+    </dialog>
+
+    <div class="toast" id="toast" hidden></div>
+    <script src="/static/app.js"></script>
+  </body>
+</html>
