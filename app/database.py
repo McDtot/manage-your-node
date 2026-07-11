@@ -10,6 +10,9 @@ class Database:
         self._conn = sqlite3.connect(db_path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA foreign_keys = ON")
+        self._conn.execute("PRAGMA journal_mode = WAL")
+        self._conn.execute("PRAGMA synchronous = NORMAL")
+        self._conn.execute("PRAGMA busy_timeout = 5000")
         self._migrate()
 
     def _migrate(self) -> None:
@@ -31,6 +34,15 @@ class Database:
                     last_check_at TEXT,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS ssh_host_keys (
+                    server_id TEXT PRIMARY KEY,
+                    key_type TEXT NOT NULL,
+                    key_base64 TEXT NOT NULL,
+                    fingerprint TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY(server_id) REFERENCES servers(id) ON DELETE CASCADE
                 );
 
                 CREATE TABLE IF NOT EXISTS deployments (

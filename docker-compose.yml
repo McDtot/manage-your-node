@@ -4,11 +4,12 @@ services:
     container_name: manage-your-node
     ports:
       - "8787:8787"
+    # Secrets (APP_SECRET, ADMIN_USERNAME, ADMIN_PASSWORD, ...) are read from
+    # .env. Copy .env.example to .env and fill in real values first.
+    env_file:
+      - .env
     environment:
       APP_DATA_DIR: /data
-      APP_SECRET: change-this-before-real-use
-      ADMIN_USERNAME: admin
-      ADMIN_PASSWORD: change-this-admin-password
       HOST: 0.0.0.0
       PORT: 8787
     volumes:

@@ -1,11 +1,14 @@
 import base64
 import json
+import os
 import random
 import secrets
 import socket
 import threading
 import time
 import uuid
+from contextlib import contextmanager
+from collections.abc import Iterator
 from datetime import date, datetime, time as datetime_time, timedelta, timezone
 from typing import Any
 from urllib.parse import quote, urlencode, urlparse
@@ -14,7 +17,24 @@ from .database import Database
 from .provisioning import native_3xui_script, shell_quote
 from .security import SecretBox
 from .ssh_runner import SshRunner
+from .ssh_tunnel import SshTunnel
 from .xui_api import XuiApiClient
+
+
+DEFAULT_REALITY_DEST = "www.microsoft.com:443"
+
+
+def reality_dest() -> str:
+    """REALITY handshake target (``host:port``). Configurable via REALITY_DEST."""
+    return (os.getenv("REALITY_DEST") or DEFAULT_REALITY_DEST).strip()
+
+
+def reality_server_name() -> str:
+    """SNI advertised for REALITY. Defaults to the host of REALITY_DEST."""
+    override = (os.getenv("REALITY_SNI") or "").strip()
+    if override:
+        return override
+    return reality_dest().split(":", 1)[0]
 
 
 def now_iso() -> str:
@@ -44,7 +64,45 @@ class AppServices:
     def __init__(self, db: Database, secret_box: SecretBox):
         self.db = db
         self.secret_box = secret_box
-        self.ssh = SshRunner(secret_box)
+        self.ssh = SshRunner(secret_box, db)
+
+    def recover_orphaned_jobs(self) -> int:
+        """Fail jobs/records left ``running`` by a previous process.
+
+        Background deployment work runs in daemon threads, so a restart mid-run
+        would otherwise leave jobs stuck as ``running`` and deployments/chains
+        stuck as ``provisioning``/``deploying`` forever.
+        """
+        stamp = now_iso()
+        orphaned = self.db.query_all("SELECT id FROM jobs WHERE status = 'running'")
+        message = "Process restarted before this job finished; marked as failed."
+        for row in orphaned:
+            self._append_job_log(row["id"], message)
+        self.db.execute(
+            """
+            UPDATE jobs
+            SET status = 'failed', error = ?, updated_at = ?, finished_at = ?
+            WHERE status = 'running'
+            """,
+            (message, stamp, stamp),
+        )
+        self.db.execute(
+            """
+            UPDATE deployments
+            SET status = 'failed', last_error = ?, updated_at = ?
+            WHERE status = 'provisioning'
+            """,
+            ("Deployment interrupted by a process restart.", stamp),
+        )
+        self.db.execute(
+            """
+            UPDATE proxy_chains
+            SET status = 'failed', last_error = ?, updated_at = ?
+            WHERE status = 'deploying'
+            """,
+            ("Proxy chain deployment interrupted by a process restart.", stamp),
+        )
+        return len(orphaned)
 
     def summary(self) -> dict[str, Any]:
         servers = self.db.query_one("SELECT COUNT(*) AS count FROM servers")["count"]
@@ -330,6 +388,7 @@ class AppServices:
         server: dict[str, Any],
         payload: dict[str, Any],
     ) -> None:
+        install_applied = False
         try:
             deployment = self._get_deployment_row(deployment_id)
             panel_password = self.secret_box.open(deployment["encrypted_panel_password"])
@@ -350,26 +409,29 @@ class AppServices:
             result = self._parse_install_result(lines)
             if result:
                 self._apply_install_result(deployment_id, result)
+                install_applied = True
             deployment = self.get_deployment(deployment_id)
-            self._append_job_log(job_id, "Waiting for 3x-ui API to become ready")
-            xui = self._xui_client(deployment)
-            xui.wait_ready()
-            xui.login()
-            self._append_job_log(job_id, "Creating default VLESS + REALITY inbound through 3x-ui API")
-            inbound = xui.create_vless_reality_inbound(
-                port=deployment["proxy_port"],
-                remark=f"myn-{server['name']}-{deployment['proxy_port']}",
-            )
-            self.db.execute(
-                "UPDATE deployments SET xui_inbound_id = ?, updated_at = ? WHERE id = ?",
-                (int(inbound["id"]), now_iso(), deployment_id),
-            )
-            self._append_job_log(job_id, f"Created 3x-ui inbound id={inbound['id']}")
-            self.db.execute(
-                "UPDATE deployments SET status = ?, updated_at = ? WHERE id = ?",
-                ("ready", now_iso(), deployment_id),
-            )
-            self._append_job_log(job_id, "3x-ui panel is installed and default inbound is ready")
+            self._append_job_log(job_id, "Waiting for 3x-ui API to become ready over SSH tunnel")
+            with self._xui_session(deployment) as xui:
+                xui.wait_ready()
+                xui.login()
+                self._append_job_log(job_id, "Creating default VLESS + REALITY inbound through 3x-ui API")
+                inbound = xui.create_vless_reality_inbound(
+                    port=deployment["proxy_port"],
+                    remark=f"myn-{server['name']}-{deployment['proxy_port']}",
+                    target=reality_dest(),
+                    server_names=[reality_server_name()],
+                )
+                self.db.execute(
+                    "UPDATE deployments SET xui_inbound_id = ?, updated_at = ? WHERE id = ?",
+                    (int(inbound["id"]), now_iso(), deployment_id),
+                )
+                self._append_job_log(job_id, f"Created 3x-ui inbound id={inbound['id']}")
+                self.db.execute(
+                    "UPDATE deployments SET status = ?, updated_at = ? WHERE id = ?",
+                    ("ready", now_iso(), deployment_id),
+                )
+                self._append_job_log(job_id, "3x-ui panel is installed and default inbound is ready")
 
             if payload.get("createInitialClient", True):
                 self.create_client(
@@ -386,7 +448,9 @@ class AppServices:
                 self._append_job_log(job_id, "Created initial client in 3x-ui and stored share link")
 
             try:
-                xui.restart_xray()
+                with self._xui_session(self.get_deployment(deployment_id)) as xui:
+                    xui.login()
+                    xui.restart_xray()
                 self._append_job_log(job_id, "Requested Xray restart")
             except Exception as exc:  # noqa: BLE001
                 self._append_job_log(job_id, f"Xray restart request failed, panel may restart it soon: {exc}")
@@ -399,6 +463,20 @@ class AppServices:
                 ("failed", str(exc), now_iso(), deployment_id),
             )
             self._append_job_log(job_id, f"Deployment failed: {exc}")
+            if install_applied:
+                self._append_job_log(
+                    job_id,
+                    "Rolling back: uninstalling partial 3x-ui install on the target host",
+                )
+                try:
+                    for line in self._uninstall_remote_xui(server):
+                        if line:
+                            self._append_job_log(job_id, line)
+                except Exception as cleanup_exc:  # noqa: BLE001
+                    self._append_job_log(
+                        job_id,
+                        f"Rollback uninstall failed (manual cleanup may be needed): {cleanup_exc}",
+                    )
             self._finish_job(job_id, "failed", str(exc))
 
     def _parse_install_result(self, lines: list[str]) -> dict[str, str]:
@@ -549,13 +627,26 @@ class AppServices:
             ),
         )
 
-    def _xui_client(self, deployment: dict[str, Any]) -> XuiApiClient:
-        return XuiApiClient(
-            base_url=deployment["panel_url"],
-            username=deployment["panel_username"],
-            password=deployment["panel_password"],
-            api_token=deployment.get("api_token") or "",
-        )
+    @contextmanager
+    def _xui_session(self, deployment: dict[str, Any]) -> Iterator[XuiApiClient]:
+        """Yield a 3x-ui API client reachable through an SSH tunnel.
+
+        The panel is only exposed over plaintext HTTP on the remote host, so we
+        forward it through SSH and talk to it via ``127.0.0.1`` locally. This
+        keeps the panel password, API token and inbound secrets off the public
+        network.
+        """
+        server = self._get_server_row(deployment["server_id"])
+        scheme = deployment.get("panel_scheme") or "http"
+        panel_path = deployment.get("panel_path") or ""
+        with SshTunnel(self.ssh, server, "127.0.0.1", int(deployment["panel_port"])) as local_port:
+            base_url = f"{scheme}://127.0.0.1:{local_port}{panel_path}/"
+            yield XuiApiClient(
+                base_url=base_url,
+                username=deployment["panel_username"],
+                password=deployment["panel_password"],
+                api_token=deployment.get("api_token") or "",
+            )
 
     def list_clients(self) -> list[dict[str, Any]]:
         return self.db.query_all(
@@ -744,6 +835,9 @@ class AppServices:
                 ("failed", str(exc), now_iso(), chain_id),
             )
             self._append_job_log(job_id, f"Proxy chain deployment failed: {exc}")
+            self._append_job_log(job_id, "Rolling back: removing any partial myn-chain services")
+            for line in self._cleanup_proxy_chain_services(chain_id):
+                self._append_job_log(job_id, line)
             self._finish_job(job_id, "failed", str(exc))
 
     def _run_dry_proxy_chain_deployment(
@@ -1022,6 +1116,8 @@ echo "Service $SERVICE_NAME is active"
         node: dict[str, Any],
         next_node: dict[str, Any] | None,
     ) -> dict[str, Any]:
+        dest = reality_dest()
+        server_name = reality_server_name()
         inbound = {
             "tag": "myn-chain-in",
             "listen": "",
@@ -1043,9 +1139,9 @@ echo "Service $SERVICE_NAME is active"
                 "security": "reality",
                 "realitySettings": {
                     "show": False,
-                    "dest": "www.yahoo.com:443",
+                    "dest": dest,
                     "xver": 0,
-                    "serverNames": ["www.yahoo.com"],
+                    "serverNames": [server_name],
                     "privateKey": self.secret_box.open(node["encrypted_private_key"]),
                     "shortIds": [node["short_id"]],
                 },
@@ -1081,7 +1177,7 @@ echo "Service $SERVICE_NAME is active"
                     "tcpSettings": {"header": {"type": "none"}},
                     "security": "reality",
                     "realitySettings": {
-                        "serverName": "www.yahoo.com",
+                        "serverName": server_name,
                         "fingerprint": "chrome",
                         "publicKey": next_node["public_key"],
                         "shortId": next_node["short_id"],
@@ -1104,7 +1200,7 @@ echo "Service $SERVICE_NAME is active"
             "flow": "xtls-rprx-vision",
             "pbk": entry["public_key"],
             "fp": "chrome",
-            "sni": "www.yahoo.com",
+            "sni": reality_server_name(),
             "sid": entry["short_id"],
             "spx": "/",
         }
@@ -1253,17 +1349,17 @@ echo "Removed $SERVICE_NAME"
             and deployment.get("status") == "ready"
             and deployment.get("xui_inbound_id")
         ):
-            xui = self._xui_client(deployment)
-            xui.wait_ready(seconds=30)
-            xui.login()
-            links = xui.create_client(
-                inbound_id=int(deployment["xui_inbound_id"]),
-                email=name,
-                client_uuid=client_uuid,
-                sub_id=sub_id,
-                quota_bytes=quota_bytes,
-                expires_ms=self._expires_ms(expires_at),
-            )
+            with self._xui_session(deployment) as xui:
+                xui.wait_ready(seconds=30)
+                xui.login()
+                links = xui.create_client(
+                    inbound_id=int(deployment["xui_inbound_id"]),
+                    email=name,
+                    client_uuid=client_uuid,
+                    sub_id=sub_id,
+                    quota_bytes=quota_bytes,
+                    expires_ms=self._expires_ms(expires_at),
+                )
             if links:
                 share_link = links[0]
         stamp = now_iso()
@@ -1346,38 +1442,38 @@ echo "Removed $SERVICE_NAME"
             and deployment.get("status") == "ready"
             and deployment.get("xui_inbound_id")
         ):
-            xui = self._xui_client(deployment)
-            xui.wait_ready(seconds=30)
-            xui.login()
-            remote = xui.get_client(client["name"])
-            remote_client = remote.get("client") if isinstance(remote.get("client"), dict) else remote
-            if not isinstance(remote_client, dict):
-                raise ValueError("3x-ui client payload is invalid")
-            updated_remote = dict(remote_client)
-            remote_uuid = str(updated_remote.get("uuid") or client["uuid"])
-            updated_remote["id"] = remote_uuid
-            updated_remote.pop("uuid", None)
-            if isinstance(updated_remote.get("allowedIPs"), str):
-                updated_remote["allowedIPs"] = [
-                    item.strip()
-                    for item in updated_remote["allowedIPs"].split(",")
-                    if item.strip()
-                ]
-            updated_remote["email"] = name
-            updated_remote["totalGB"] = quota_bytes
-            updated_remote["expiryTime"] = self._expires_ms(expires_at)
-            updated_remote["enable"] = bool(enabled)
-            xui.update_client(client["name"], updated_remote)
-            try:
-                links = xui.client_links(name)
-                if links:
-                    share_link = links[0]
-            except Exception:  # noqa: BLE001
-                pass
-            try:
-                xui.restart_xray()
-            except Exception:  # noqa: BLE001
-                pass
+            with self._xui_session(deployment) as xui:
+                xui.wait_ready(seconds=30)
+                xui.login()
+                remote = xui.get_client(client["name"])
+                remote_client = remote.get("client") if isinstance(remote.get("client"), dict) else remote
+                if not isinstance(remote_client, dict):
+                    raise ValueError("3x-ui client payload is invalid")
+                updated_remote = dict(remote_client)
+                remote_uuid = str(updated_remote.get("uuid") or client["uuid"])
+                updated_remote["id"] = remote_uuid
+                updated_remote.pop("uuid", None)
+                if isinstance(updated_remote.get("allowedIPs"), str):
+                    updated_remote["allowedIPs"] = [
+                        item.strip()
+                        for item in updated_remote["allowedIPs"].split(",")
+                        if item.strip()
+                    ]
+                updated_remote["email"] = name
+                updated_remote["totalGB"] = quota_bytes
+                updated_remote["expiryTime"] = self._expires_ms(expires_at)
+                updated_remote["enable"] = bool(enabled)
+                xui.update_client(client["name"], updated_remote)
+                try:
+                    links = xui.client_links(name)
+                    if links:
+                        share_link = links[0]
+                except Exception:  # noqa: BLE001
+                    pass
+                try:
+                    xui.restart_xray()
+                except Exception:  # noqa: BLE001
+                    pass
         else:
             share_link = self._default_share_link(deployment, client["uuid"], name)
         stamp = now_iso()
@@ -1464,16 +1560,16 @@ echo "Removed $SERVICE_NAME"
             return []
 
         logs = [f"Deleting 3x-ui inbound id={deployment['xui_inbound_id']}"]
-        xui = self._xui_client(deployment)
-        xui.wait_ready(seconds=20)
-        xui.login()
-        xui.delete_inbound(int(deployment["xui_inbound_id"]))
-        logs.append("Deleted 3x-ui inbound")
-        try:
-            xui.restart_xray()
-            logs.append("Requested Xray restart")
-        except Exception as exc:  # noqa: BLE001
-            logs.append(f"Xray restart request failed: {exc}")
+        with self._xui_session(deployment) as xui:
+            xui.wait_ready(seconds=20)
+            xui.login()
+            xui.delete_inbound(int(deployment["xui_inbound_id"]))
+            logs.append("Deleted 3x-ui inbound")
+            try:
+                xui.restart_xray()
+                logs.append("Requested Xray restart")
+            except Exception as exc:  # noqa: BLE001
+                logs.append(f"Xray restart request failed: {exc}")
         return logs
 
     def _uninstall_remote_xui(self, server: dict[str, Any]) -> list[str]:

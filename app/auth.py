@@ -4,6 +4,7 @@ import hashlib
 import hmac
 import json
 import secrets
+import threading
 import time
 
 
@@ -16,11 +17,44 @@ class AuthManager:
         admin_username: str,
         admin_password: str,
         session_seconds: int,
+        max_attempts: int = 5,
+        window_seconds: int = 300,
+        lockout_seconds: int = 900,
     ):
         self.admin_username = admin_username
         self.admin_password = admin_password
         self.session_seconds = session_seconds
+        self.max_attempts = max_attempts
+        self.window_seconds = window_seconds
+        self.lockout_seconds = lockout_seconds
         self._key = hashlib.sha256(f"auth:{app_secret}".encode("utf-8")).digest()
+        self._failures: dict[str, list[float]] = {}
+        self._lock = threading.Lock()
+
+    def lockout_remaining(self, client_key: str) -> int:
+        """Return seconds the client must wait, or 0 if not currently locked."""
+        now = time.monotonic()
+        with self._lock:
+            attempts = self._recent(client_key, now)
+            if len(attempts) < self.max_attempts:
+                return 0
+            unlock_at = attempts[-1] + self.lockout_seconds
+            return max(0, int(unlock_at - now))
+
+    def register_failure(self, client_key: str) -> None:
+        now = time.monotonic()
+        with self._lock:
+            attempts = self._recent(client_key, now)
+            attempts.append(now)
+            self._failures[client_key] = attempts
+
+    def register_success(self, client_key: str) -> None:
+        with self._lock:
+            self._failures.pop(client_key, None)
+
+    def _recent(self, client_key: str, now: float) -> list[float]:
+        window_start = now - self.window_seconds
+        return [ts for ts in self._failures.get(client_key, []) if ts >= window_start]
 
     def verify_credentials(self, username: str, password: str) -> bool:
         return self._constant_time_equal(username, self.admin_username) and self._constant_time_equal(

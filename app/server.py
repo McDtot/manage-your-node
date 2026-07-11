@@ -1,4 +1,5 @@
 import json
+import logging
 import mimetypes
 import re
 from http import HTTPStatus
@@ -8,7 +9,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 from .auth import AuthManager
-from .config import load_settings
+from .config import ConfigError, load_settings
 from .database import Database
 from .security import SecretBox
 from .services import AppServices
@@ -18,6 +19,9 @@ class RequestHandler(BaseHTTPRequestHandler):
     auth: AuthManager
     services: AppServices
     static_dir: Path
+    cookie_secure: bool = False
+    max_body_bytes: int = 1024 * 1024
+    trust_x_forwarded_for: bool = False
 
     def do_GET(self) -> None:
         path = urlparse(self.path).path
@@ -93,8 +97,9 @@ class RequestHandler(BaseHTTPRequestHandler):
             return
         if not self.require_auth(path):
             return
+        self.log_audit()
         if path == "/api/auth/logout":
-            self.send_json({"ok": True}, headers=[self.clear_session_cookie()])
+            self.send_json({"ok": True}, headers=[("Set-Cookie", self.clear_session_cookie())])
             return
 
         try:
@@ -144,6 +149,7 @@ class RequestHandler(BaseHTTPRequestHandler):
         path = urlparse(self.path).path
         if not self.require_auth(path):
             return
+        self.log_audit()
         try:
             body = self.read_json()
         except ValueError as exc:
@@ -171,6 +177,7 @@ class RequestHandler(BaseHTTPRequestHandler):
         path = urlparse(self.path).path
         if not self.require_auth(path):
             return
+        self.log_audit()
 
         match = re.fullmatch(r"/api/servers/([^/]+)", path)
         if match:
@@ -200,7 +207,7 @@ class RequestHandler(BaseHTTPRequestHandler):
         except ValueError as exc:
             self.send_json({"error": str(exc)}, status=400)
         except Exception as exc:  # noqa: BLE001
-            self.send_json({"error": str(exc)}, status=500)
+            self.report_internal_error(exc)
 
     def handle_text(self, func, status: int = 200) -> None:
         try:
@@ -208,9 +215,43 @@ class RequestHandler(BaseHTTPRequestHandler):
         except ValueError as exc:
             self.send_json({"error": str(exc)}, status=400)
         except Exception as exc:  # noqa: BLE001
-            self.send_json({"error": str(exc)}, status=500)
+            self.report_internal_error(exc)
+
+    def report_internal_error(self, exc: Exception) -> None:
+        # Log full detail server-side, return a generic message to the client so
+        # internal paths, SQL, and stack details are not leaked.
+        logging.getLogger("myn").exception("Unhandled request error: %s", exc)
+        self.send_json({"error": "internal server error"}, status=500)
+
+    def client_key(self) -> str:
+        if self.trust_x_forwarded_for:
+            forwarded = self.headers.get("X-Forwarded-For", "")
+            if forwarded:
+                return forwarded.split(",")[0].strip() or "unknown"
+        return self.client_address[0] if self.client_address else "unknown"
+
+    def log_audit(self) -> None:
+        path = urlparse(self.path).path
+        logging.getLogger("myn.audit").info(
+            "action user=%s ip=%s method=%s path=%s",
+            self.auth.admin_username,
+            self.client_key(),
+            self.command,
+            path,
+        )
 
     def handle_login(self) -> None:
+        client_key = self.client_key()
+        audit = logging.getLogger("myn.audit")
+        remaining = self.auth.lockout_remaining(client_key)
+        if remaining > 0:
+            audit.warning("login blocked (locked out) ip=%s", client_key)
+            self.send_json(
+                {"error": f"too many failed attempts, try again in {remaining}s"},
+                status=429,
+                headers=[("Retry-After", str(remaining))],
+            )
+            return
         try:
             payload = self.read_payload()
         except ValueError as exc:
@@ -219,10 +260,14 @@ class RequestHandler(BaseHTTPRequestHandler):
         username = str(payload.get("username", ""))
         password = str(payload.get("password", ""))
         if not self.auth.verify_credentials(username, password):
+            self.auth.register_failure(client_key)
+            audit.warning("login failed ip=%s user=%s", client_key, username)
             self.send_json({"error": "invalid username or password"}, status=401)
             return
+        self.auth.register_success(client_key)
+        audit.info("login success ip=%s user=%s", client_key, username)
         token = self.auth.issue_session()
-        self.send_json({"ok": True}, headers=[self.session_cookie(token)])
+        self.send_json({"ok": True}, headers=[("Set-Cookie", self.session_cookie(token))])
 
     def require_auth(self, path: str) -> bool:
         if self.is_public_path(path):
@@ -254,13 +299,15 @@ class RequestHandler(BaseHTTPRequestHandler):
         return morsel.value if morsel else ""
 
     def session_cookie(self, token: str) -> str:
+        secure = "; Secure" if self.cookie_secure else ""
         return (
             f"{self.auth.cookie_name}={token}; Path=/; "
-            f"Max-Age={self.auth.session_seconds}; HttpOnly; SameSite=Strict"
+            f"Max-Age={self.auth.session_seconds}; HttpOnly; SameSite=Strict{secure}"
         )
 
     def clear_session_cookie(self) -> str:
-        return f"{self.auth.cookie_name}=; Path=/; Max-Age=0; HttpOnly; SameSite=Strict"
+        secure = "; Secure" if self.cookie_secure else ""
+        return f"{self.auth.cookie_name}=; Path=/; Max-Age=0; HttpOnly; SameSite=Strict{secure}"
 
     def redirect(self, location: str) -> None:
         self.send_response(HTTPStatus.SEE_OTHER)
@@ -273,6 +320,8 @@ class RequestHandler(BaseHTTPRequestHandler):
             length = int(self.headers.get("content-length", "0"))
         except ValueError as exc:
             raise ValueError("invalid content length") from exc
+        if length > self.max_body_bytes:
+            raise ValueError("request body too large")
         if length == 0:
             return {}
         raw = self.rfile.read(length)
@@ -294,6 +343,8 @@ class RequestHandler(BaseHTTPRequestHandler):
             length = int(self.headers.get("content-length", "0"))
         except ValueError as exc:
             raise ValueError("invalid content length") from exc
+        if length > self.max_body_bytes:
+            raise ValueError("request body too large")
         if length == 0:
             return {}
         raw = self.rfile.read(length)
@@ -306,23 +357,33 @@ class RequestHandler(BaseHTTPRequestHandler):
         except json.JSONDecodeError as exc:
             raise ValueError("invalid json") from exc
 
-    def send_json(self, data, status: int = 200, headers: list[str] | None = None) -> None:
+    def send_json(
+        self,
+        data,
+        status: int = 200,
+        headers: list[tuple[str, str]] | None = None,
+    ) -> None:
         raw = json.dumps(data, ensure_ascii=False).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(raw)))
-        for header in headers or []:
-            self.send_header("Set-Cookie", header)
+        for name, value in headers or []:
+            self.send_header(name, value)
         self.end_headers()
         self.wfile.write(raw)
 
-    def send_text(self, data: str, status: int = 200, headers: list[str] | None = None) -> None:
+    def send_text(
+        self,
+        data: str,
+        status: int = 200,
+        headers: list[tuple[str, str]] | None = None,
+    ) -> None:
         raw = data.encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "text/plain; charset=utf-8")
         self.send_header("Content-Length", str(len(raw)))
-        for header in headers or []:
-            self.send_header("Set-Cookie", header)
+        for name, value in headers or []:
+            self.send_header(name, value)
         self.end_headers()
         self.wfile.write(raw)
 
@@ -359,9 +420,23 @@ class RequestHandler(BaseHTTPRequestHandler):
 
 
 def main() -> None:
-    settings = load_settings()
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s %(message)s",
+    )
+    try:
+        settings = load_settings()
+    except ConfigError as exc:
+        print(f"Configuration error:\n{exc}", flush=True)
+        raise SystemExit(1) from exc
+
     db = Database(settings.db_path)
     services = AppServices(db, SecretBox(settings.app_secret))
+    recovered = services.recover_orphaned_jobs()
+    if recovered:
+        logging.getLogger("myn").warning(
+            "Marked %d orphaned running job(s) as failed after restart", recovered
+        )
     auth = AuthManager(
         settings.app_secret,
         settings.admin_username,
@@ -371,9 +446,20 @@ def main() -> None:
     handler = type(
         "ManageNodeRequestHandler",
         (RequestHandler,),
-        {"auth": auth, "services": services, "static_dir": settings.static_dir},
+        {
+            "auth": auth,
+            "services": services,
+            "static_dir": settings.static_dir,
+            "cookie_secure": settings.cookie_secure,
+            "max_body_bytes": settings.max_body_bytes,
+            "trust_x_forwarded_for": settings.trust_x_forwarded_for,
+        },
     )
     server = ThreadingHTTPServer((settings.host, settings.port), handler)
+    if settings.allow_insecure:
+        logging.getLogger("myn").warning(
+            "Running in INSECURE mode (development). Do not expose this to the public internet."
+        )
     print(f"Manage Your Node running at http://{settings.host}:{settings.port}", flush=True)
     server.serve_forever()
 
