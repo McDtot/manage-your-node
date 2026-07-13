@@ -1,6 +1,9 @@
+from pathlib import Path
+
 import pytest
 
 from app.config import ConfigError, load_settings
+from app.services import DEFAULT_REALITY_DEST
 
 SECRET_VARS = [
     "APP_SECRET",
@@ -132,3 +135,10 @@ def test_file_backed_secrets(monkeypatch, tmp_path):
     settings = load_settings()
     assert settings.app_secret == "a-file-backed-application-secret"
     assert settings.admin_password == "a-file-backed-password"
+
+
+def test_compose_reality_default_matches_application():
+    compose = (Path(__file__).parents[1] / "docker-compose.yml").read_text(encoding="utf-8")
+    assert '"${BIND_ADDRESS:-0.0.0.0}:${PANEL_PORT:-8787}:8787"' in compose
+    assert "REALITY_CANDIDATES: ${REALITY_CANDIDATES:-}" in compose
+    assert f"REALITY_DEST: ${{REALITY_DEST:-{DEFAULT_REALITY_DEST}}}" in compose

@@ -24,7 +24,12 @@ from .ssh_tunnel import SshTunnel
 from .xui_api import XuiApiClient
 
 
-DEFAULT_REALITY_DEST = "www.microsoft.com:443"
+DEFAULT_REALITY_DEST = "www.yahoo.com:443"
+DEFAULT_REALITY_CANDIDATES = (
+    DEFAULT_REALITY_DEST,
+    "www.apple.com:443",
+    "www.amazon.com:443",
+)
 CHAIN_PROTOCOL_VLESS_REALITY = "vless_reality"
 CHAIN_PROTOCOL_SHADOWSOCKS_2022 = "shadowsocks_2022"
 CHAIN_PROTOCOLS = {
@@ -36,9 +41,98 @@ MAX_JOB_LOG_ENTRIES = 2000
 MAX_JOB_LOG_LINE = 4096
 
 
+def _redact_native_install_log(line: str, panel_password: str) -> str:
+    """Remove credentials emitted by both plain and colorized 3x-ui output."""
+    clean = str(line)
+    if panel_password:
+        clean = clean.replace(panel_password, "[redacted]")
+    clean = re.sub(
+        r"(?i)(XUI_(?:PASSWORD|API_TOKEN)=)[^\s\x1b]+",
+        r"\1[redacted]",
+        clean,
+    )
+    clean = re.sub(
+        r"(?i)((?:API\s+Token|Password)\s*:\s*)[^\s\x1b]+",
+        r"\1[redacted]",
+        clean,
+    )
+    return clean
+
+
+def _normalize_client_share_link_host(link: str, host: str) -> str:
+    """Replace 3x-ui's loopback link host with the managed server address."""
+    parsed = urlparse(link)
+    if parsed.scheme.lower() != "vless" or not parsed.hostname:
+        return link
+    userinfo, separator, _ = parsed.netloc.rpartition("@")
+    prefix = f"{userinfo}@" if separator else ""
+    try:
+        port = parsed.port
+    except ValueError:
+        return link
+    suffix = f":{port}" if port else ""
+    return parsed._replace(netloc=f"{prefix}{url_host(host)}{suffix}").geturl()
+
+
 def reality_dest() -> str:
     """REALITY handshake target (``host:port``). Configurable via REALITY_DEST."""
     return (os.getenv("REALITY_DEST") or DEFAULT_REALITY_DEST).strip()
+
+
+def parse_reality_destination(value: str, key: str = "realityDest") -> tuple[str, str]:
+    """Validate a REALITY target and return normalized ``host:port`` plus host."""
+    raw = str(value or "").strip()
+    if not raw or "://" in raw or any(char.isspace() for char in raw):
+        raise ValueError(f"{key} must use host:port format")
+    try:
+        parsed = urlparse(f"//{raw}")
+        host = parsed.hostname
+        port = parsed.port
+    except ValueError as exc:
+        raise ValueError(f"{key} must use host:port format") from exc
+    if (
+        not host
+        or port is None
+        or not 1 <= port <= 65535
+        or parsed.username
+        or parsed.password
+        or parsed.path
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise ValueError(f"{key} must use host:port format")
+    normalized_host = host_field({"host": host})
+    return f"{url_host(normalized_host)}:{port}", normalized_host
+
+
+def reality_candidates() -> list[tuple[str, str]]:
+    """Return configured auto-selection candidates as ``(target, SNI)`` pairs."""
+    configured = (os.getenv("REALITY_CANDIDATES") or "").strip()
+    configured_dest = (os.getenv("REALITY_DEST") or "").strip()
+    configured_sni = (os.getenv("REALITY_SNI") or "").strip()
+    if configured:
+        raw_candidates = [item.strip() for item in configured.split(",") if item.strip()]
+    elif configured_dest and (
+        configured_dest != DEFAULT_REALITY_DEST or configured_sni
+    ):
+        raw_candidates = [reality_dest()]
+    else:
+        raw_candidates = list(DEFAULT_REALITY_CANDIDATES)
+    if not raw_candidates:
+        raise ValueError("REALITY_CANDIDATES must contain at least one host:port target")
+
+    pairs: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for index, raw in enumerate(raw_candidates):
+        target, target_host = parse_reality_destination(raw, "REALITY_CANDIDATES")
+        sni = target_host
+        if index == 0 and not configured and configured_sni:
+            sni = host_field({"sni": os.environ["REALITY_SNI"]}, "sni")
+        if target in seen:
+            continue
+        pairs.append((target, sni))
+        seen.add(target)
+    return pairs
 
 
 def reality_server_name() -> str:
@@ -46,7 +140,19 @@ def reality_server_name() -> str:
     override = (os.getenv("REALITY_SNI") or "").strip()
     if override:
         return override
-    return reality_dest().split(":", 1)[0]
+    return parse_reality_destination(reality_dest(), "REALITY_DEST")[1]
+
+
+def _deployment_reality_settings(deployment: dict[str, Any]) -> tuple[str, str]:
+    stored_target = str(deployment.get("reality_dest") or "").strip()
+    target, target_host = parse_reality_destination(
+        stored_target or reality_dest(),
+        "realityDest",
+    )
+    stored_sni = str(deployment.get("reality_sni") or "").strip()
+    if stored_sni:
+        return target, stored_sni
+    return target, target_host if stored_target else reality_server_name()
 
 
 def now_iso() -> str:
@@ -66,6 +172,8 @@ def require_text(payload: dict[str, Any], key: str) -> str:
 
 def int_field(payload: dict[str, Any], key: str, default: int) -> int:
     value = payload.get(key, default)
+    if value is None or (isinstance(value, str) and not value.strip()):
+        value = default
     try:
         return int(value)
     except (TypeError, ValueError) as exc:
@@ -421,7 +529,8 @@ class AppServices:
             SELECT d.id, d.server_id, s.name AS server_name, s.host,
                    d.engine, d.protocol, d.install_method, d.panel_scheme, d.panel_port,
                    d.panel_path, d.panel_username, d.encrypted_panel_password,
-                   d.encrypted_api_token, d.proxy_port, d.xui_inbound_id, d.status,
+                   d.encrypted_api_token, d.proxy_port, d.reality_mode,
+                   d.reality_dest, d.reality_sni, d.xui_inbound_id, d.status,
                    d.subscription_url, d.last_error, d.created_at, d.updated_at,
                    COUNT(c.id) AS client_count,
                    (
@@ -458,6 +567,24 @@ class AppServices:
         install_method = str(payload.get("installMethod", "dry-run")).strip()
         if install_method not in {"dry-run", "native"}:
             raise ValueError("installMethod must be dry-run or native")
+        reality_mode = str(payload.get("realityMode", "auto")).strip().lower()
+        if reality_mode not in {"auto", "manual"}:
+            raise ValueError("realityMode must be auto or manual")
+        if reality_mode == "manual":
+            selected_reality_dest, target_host = parse_reality_destination(
+                require_text(payload, "realityDest")
+            )
+            selected_reality_sni = str(payload.get("realitySni", "")).strip()
+            selected_reality_sni = host_field(
+                {"realitySni": selected_reality_sni or target_host},
+                "realitySni",
+            )
+        else:
+            candidates = reality_candidates()
+            if install_method == "dry-run":
+                selected_reality_dest, selected_reality_sni = candidates[0]
+            else:
+                selected_reality_dest, selected_reality_sni = "", ""
         if install_method == "native" and server["status"] != "reachable":
             raise ValueError("test SSH successfully before starting a native deployment")
         if install_method == "native":
@@ -486,8 +613,9 @@ class AppServices:
                 INSERT INTO deployments (
                     id, server_id, engine, protocol, install_method, panel_scheme, panel_port, panel_path,
                     panel_username, encrypted_panel_password, encrypted_api_token,
-                    proxy_port, subscription_configured, status, subscription_url, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    proxy_port, reality_mode, reality_dest, reality_sni,
+                    subscription_configured, status, subscription_url, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     deployment_id,
@@ -502,6 +630,9 @@ class AppServices:
                     self.secret_box.seal(panel_password),
                     self.secret_box.seal(api_token),
                     proxy_port,
+                    reality_mode,
+                    selected_reality_dest,
+                    selected_reality_sni,
                     1,
                     "provisioning",
                     subscription_url,
@@ -643,13 +774,10 @@ class AppServices:
                 server_host=server["host"],
             )
             def safe_remote_log(line: str) -> None:
-                if line.startswith("XUI_PASSWORD="):
-                    clean = "XUI_PASSWORD=[redacted]"
-                elif line.startswith("XUI_API_TOKEN="):
-                    clean = "XUI_API_TOKEN=[redacted]"
-                else:
-                    clean = line.replace(panel_password, "[redacted]")
-                self._append_job_log(job_id, clean)
+                self._append_job_log(
+                    job_id,
+                    _redact_native_install_log(line, panel_password),
+                )
 
             self._append_job_log(job_id, "Starting real SSH deployment with official 3x-ui installer")
             lines = self.ssh.run_script(
@@ -663,6 +791,13 @@ class AppServices:
                 self._apply_install_result(deployment_id, result)
                 install_applied = True
             deployment = self.get_deployment(deployment_id)
+            selected_reality_dest, selected_reality_sni = self._resolve_reality_target(
+                job_id,
+                deployment_id,
+                server,
+                deployment,
+            )
+            deployment = self.get_deployment(deployment_id)
             self._append_job_log(job_id, "Waiting for 3x-ui API to become ready over SSH tunnel")
             with self._xui_session(deployment) as xui:
                 xui.wait_ready()
@@ -671,8 +806,8 @@ class AppServices:
                 inbound = xui.create_vless_reality_inbound(
                     port=deployment["proxy_port"],
                     remark=f"myn-{server['name']}-{deployment['proxy_port']}",
-                    target=reality_dest(),
-                    server_names=[reality_server_name()],
+                    target=selected_reality_dest,
+                    server_names=[selected_reality_sni],
                 )
                 self.db.execute(
                     "UPDATE deployments SET xui_inbound_id = ?, updated_at = ? WHERE id = ?",
@@ -709,13 +844,9 @@ class AppServices:
 
             self._finish_job(job_id, "success", None)
         except Exception as exc:  # noqa: BLE001
-            error_text = str(exc)
-            if "panel_password" in locals():
-                error_text = error_text.replace(panel_password, "[redacted]")
-            error_text = re.sub(
-                r"XUI_(?:PASSWORD|API_TOKEN)=[^\s]+",
-                "XUI_SECRET=[redacted]",
-                error_text,
+            error_text = _redact_native_install_log(
+                str(exc),
+                panel_password if "panel_password" in locals() else "",
             )
             self.db.execute(
                 "UPDATE deployments SET status = ?, last_error = ?, updated_at = ? "
@@ -799,6 +930,104 @@ class AppServices:
             tuple(params),
         )
 
+    def _resolve_reality_target(
+        self,
+        job_id: str,
+        deployment_id: str,
+        server: dict[str, Any],
+        deployment: dict[str, Any],
+    ) -> tuple[str, str]:
+        mode = deployment.get("reality_mode") or "manual"
+        if mode == "manual":
+            target, target_host = parse_reality_destination(
+                deployment.get("reality_dest") or reality_dest(),
+                "realityDest",
+            )
+            manual_sni = host_field(
+                {"realitySni": deployment.get("reality_sni") or target_host},
+                "realitySni",
+            )
+            candidates = [(target, manual_sni)]
+            self._append_job_log(job_id, f"Validating manual REALITY target {target}")
+        else:
+            candidates = reality_candidates()
+            self._append_job_log(
+                job_id,
+                f"Auto-selecting a REALITY target from {len(candidates)} candidates",
+            )
+
+        lines = self.ssh.run_script(
+            server,
+            self._reality_probe_script(candidates),
+            lambda line: self._append_job_log(job_id, line),
+            timeout=max(60, len(candidates) * 45),
+        )
+        selected_index: int | None = None
+        marker = "__MYN_REALITY_SELECTED__="
+        for line in lines:
+            if line.strip().startswith(marker):
+                try:
+                    selected_index = int(line.strip()[len(marker) :])
+                except ValueError:
+                    selected_index = None
+        if selected_index is None or not 0 <= selected_index < len(candidates):
+            raise ValueError(
+                "no REALITY camouflage target passed two TLS 1.3 certificate checks"
+            )
+
+        target, sni = candidates[selected_index]
+        self.db.execute(
+            """
+            UPDATE deployments
+            SET reality_dest = ?, reality_sni = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            (target, sni, now_iso(), deployment_id),
+        )
+        self._append_job_log(job_id, f"Selected REALITY target {target} (SNI {sni})")
+        return target, sni
+
+    def _reality_probe_script(self, candidates: list[tuple[str, str]]) -> str:
+        probes = []
+        for index, (target, sni) in enumerate(candidates):
+            probes.append(
+                f"probe {shell_quote(index)} {shell_quote(target)} {shell_quote(sni)}"
+            )
+        return r"""#!/usr/bin/env bash
+set -u
+export LC_ALL=C
+if ! command -v openssl >/dev/null 2>&1; then
+  echo "OpenSSL is required to test REALITY targets"
+  exit 41
+fi
+if ! command -v timeout >/dev/null 2>&1; then
+  echo "The timeout command is required to test REALITY targets"
+  exit 42
+fi
+probe() {
+  INDEX="$1"
+  TARGET="$2"
+  SNI="$3"
+  echo "Testing REALITY target $TARGET (SNI $SNI)"
+  ATTEMPT=1
+  while [ "$ATTEMPT" -le 2 ]; do
+    if OUTPUT="$(timeout 18 openssl s_client -connect "$TARGET" -servername "$SNI" \
+        -tls1_3 -verify_hostname "$SNI" -verify_return_error -brief </dev/null 2>&1)" \
+        && printf '%s\n' "$OUTPUT" | grep -Eq 'Protocol( version)?[[:space:]]*:[[:space:]]*TLSv1\.3'; then
+      ATTEMPT=$((ATTEMPT + 1))
+      continue
+    fi
+    echo "Rejected REALITY target $TARGET"
+    return 1
+  done
+  echo "__MYN_REALITY_SELECTED__=$INDEX"
+  return 0
+}
+""" + "\n".join(f"{probe} && exit 0" for probe in probes) + r"""
+echo "No REALITY target passed validation"
+exit 43
+"""
+
     def _append_job_log(self, job_id: str, line: str) -> None:
         job = self.db.query_one("SELECT logs FROM jobs WHERE id = ?", (job_id,))
         if not job:
@@ -833,7 +1062,8 @@ class AppServices:
             SELECT d.id, d.server_id, s.name AS server_name, s.host,
                    d.engine, d.protocol, d.install_method, d.panel_scheme, d.panel_port,
                    d.panel_path, d.panel_username, d.encrypted_panel_password,
-                   d.encrypted_api_token, d.proxy_port, d.xui_inbound_id, d.status,
+                   d.encrypted_api_token, d.proxy_port, d.reality_mode,
+                   d.reality_dest, d.reality_sni, d.xui_inbound_id, d.status,
                    d.subscription_url, d.last_error, d.created_at, d.updated_at,
                    (
                        SELECT COUNT(*)
@@ -858,6 +1088,11 @@ class AppServices:
         return row
 
     def _attach_deployment_secrets(self, row: dict[str, Any], reveal: bool = True) -> None:
+        auto_selection_pending = (
+            row.get("reality_mode") == "auto" and not row.get("reality_dest")
+        )
+        if not auto_selection_pending:
+            row["reality_dest"], row["reality_sni"] = _deployment_reality_settings(row)
         row["panel_url"] = f"{row['panel_scheme']}://{url_host(row['host'])}:{row['panel_port']}{row['panel_path']}/"
         row["subscription_url"] = self._deployment_subscription_url(row["id"])
         encrypted_password = row.pop("encrypted_panel_password", "")
@@ -1322,10 +1557,16 @@ class AppServices:
         public_key = ""
         for line in lines:
             text = line.strip()
-            if text.lower().startswith("private key:"):
-                private_key = text.split(":", 1)[1].strip()
-            if text.lower().startswith("public key:"):
-                public_key = text.split(":", 1)[1].strip()
+            label, separator, value = text.partition(":")
+            if not separator:
+                continue
+            normalized_label = re.sub(r"[^a-z0-9]", "", label.lower())
+            if normalized_label == "privatekey":
+                private_key = value.strip()
+            elif "publickey" in normalized_label:
+                # Xray 26.5.9 labels this value as ``Password (PublicKey)``;
+                # older releases used ``Public key``.
+                public_key = value.strip()
         if not private_key or not public_key:
             raise ValueError(f"could not generate X25519 keypair on {node['server_name']}")
         return private_key, public_key
@@ -1441,24 +1682,25 @@ XRAY="$(find_xray)" || {{ echo "xray binary not found" >&2; exit 42; }}
 SERVICE_NAME={shell_quote(service_name)}
 INSTALL_DIR="/opt/manage-node/chains/$SERVICE_NAME"
 CONFIG_FILE="$INSTALL_DIR/config.json"
+TMP_CONFIG="$INSTALL_DIR/config.tmp.json"
 UNIT_FILE="/etc/systemd/system/$SERVICE_NAME.service"
 CONFIG_B64={shell_quote(encoded_config)}
 
 echo "Using Xray: $XRAY"
 $SUDO install -d -m 0755 "$INSTALL_DIR"
-printf '%s' "$CONFIG_B64" | base64 -d | $SUDO tee "$CONFIG_FILE.tmp" >/dev/null
-$SUDO chmod 0644 "$CONFIG_FILE.tmp"
+printf '%s' "$CONFIG_B64" | base64 -d | $SUDO tee "$TMP_CONFIG" >/dev/null
+$SUDO chmod 0644 "$TMP_CONFIG"
 
-if $SUDO "$XRAY" run -test -config "$CONFIG_FILE.tmp" >/tmp/"$SERVICE_NAME".test.log 2>&1; then
+if $SUDO "$XRAY" run -test -config "$TMP_CONFIG" >/tmp/"$SERVICE_NAME".test.log 2>&1; then
   true
-elif $SUDO "$XRAY" -test -config "$CONFIG_FILE.tmp" >/tmp/"$SERVICE_NAME".test.log 2>&1; then
+elif $SUDO "$XRAY" -test -config "$TMP_CONFIG" >/tmp/"$SERVICE_NAME".test.log 2>&1; then
   true
 else
   cat /tmp/"$SERVICE_NAME".test.log >&2 || true
   exit 43
 fi
 
-$SUDO mv "$CONFIG_FILE.tmp" "$CONFIG_FILE"
+$SUDO mv "$TMP_CONFIG" "$CONFIG_FILE"
 $SUDO tee "$UNIT_FILE" >/dev/null <<EOF
 [Unit]
 Description=Manage Your Node proxy chain $SERVICE_NAME
@@ -1519,7 +1761,6 @@ echo "Service $SERVICE_NAME is active"
                 raise ValueError(f"Shadowsocks password is missing for {node['server_name']}")
             return {
                 "tag": "myn-chain-in",
-                "listen": "",
                 "port": int(node["inbound_port"]),
                 "protocol": "shadowsocks",
                 "settings": {
@@ -1532,14 +1773,12 @@ echo "Service $SERVICE_NAME is active"
 
         if protocol != CHAIN_PROTOCOL_VLESS_REALITY:
             raise ValueError(f"unsupported chain protocol on {node['server_name']}: {protocol}")
-        dest = reality_dest()
-        server_name = reality_server_name()
+        dest, server_name = _deployment_reality_settings(node)
         encrypted_private_key = node.get("encrypted_private_key")
         if not encrypted_private_key:
             raise ValueError(f"REALITY private key is missing for {node['server_name']}")
         return {
             "tag": "myn-chain-in",
-            "listen": "",
             "port": int(node["inbound_port"]),
             "protocol": "vless",
             "settings": {
@@ -1553,12 +1792,11 @@ echo "Service $SERVICE_NAME is active"
                 "decryption": "none",
             },
             "streamSettings": {
-                "network": "tcp",
-                "tcpSettings": {"header": {"type": "none"}},
+                "network": "raw",
                 "security": "reality",
                 "realitySettings": {
                     "show": False,
-                    "dest": dest,
+                    "target": dest,
                     "xver": 0,
                     "serverNames": [server_name],
                     "privateKey": self.secret_box.open(encrypted_private_key),
@@ -1583,15 +1821,19 @@ echo "Service $SERVICE_NAME is active"
                 "tag": "myn-chain-next",
                 "protocol": "shadowsocks",
                 "settings": {
-                    "address": next_node["host"],
-                    "port": int(next_node["inbound_port"]),
-                    "method": next_node.get("ss_method") or CHAIN_SS_METHOD,
-                    "password": self.secret_box.open(encrypted_password),
+                    "servers": [
+                        {
+                            "address": next_node["host"],
+                            "port": int(next_node["inbound_port"]),
+                            "method": next_node.get("ss_method") or CHAIN_SS_METHOD,
+                            "password": self.secret_box.open(encrypted_password),
+                        }
+                    ],
                 },
             }
 
         if protocol == CHAIN_PROTOCOL_VLESS_REALITY:
-            server_name = reality_server_name()
+            _, server_name = _deployment_reality_settings(next_node)
             return {
                 "tag": "myn-chain-next",
                 "protocol": "vless",
@@ -1611,13 +1853,12 @@ echo "Service $SERVICE_NAME is active"
                     ]
                 },
                 "streamSettings": {
-                    "network": "tcp",
-                    "tcpSettings": {"header": {"type": "none"}},
+                    "network": "raw",
                     "security": "reality",
                     "realitySettings": {
                         "serverName": server_name,
                         "fingerprint": "chrome",
-                        "publicKey": next_node["public_key"],
+                        "password": next_node["public_key"],
                         "shortId": next_node["short_id"],
                         "spiderX": "/",
                     },
@@ -1637,7 +1878,7 @@ echo "Service $SERVICE_NAME is active"
             "flow": "xtls-rprx-vision",
             "pbk": entry["public_key"],
             "fp": "chrome",
-            "sni": reality_server_name(),
+            "sni": _deployment_reality_settings(entry)[1],
             "sid": entry["short_id"],
             "spx": "/",
         }
@@ -1714,6 +1955,7 @@ echo "Removed $SERVICE_NAME"
                    pcn.remote_service_name, pcn.status AS node_status,
                    d.id AS deployment_id, d.install_method,
                    d.status AS deployment_status, d.protocol, d.proxy_port,
+                   d.reality_mode, d.reality_dest, d.reality_sni,
                    s.id AS server_id, s.name AS server_name, s.host, s.ssh_port,
                    s.ssh_user, s.auth_type, s.encrypted_secret, s.secret_label
             FROM proxy_chain_nodes pcn
@@ -1811,7 +2053,10 @@ echo "Removed $SERVICE_NAME"
                     expires_ms=self._expires_ms(expires_at),
                 )
             if links:
-                share_link = links[0]
+                share_link = _normalize_client_share_link_host(
+                    links[0],
+                    deployment["host"],
+                )
         stamp = now_iso()
         with self.db.transaction():
             self.db.execute(
@@ -1927,7 +2172,10 @@ echo "Removed $SERVICE_NAME"
                 try:
                     links = xui.client_links(name)
                     if links:
-                        share_link = links[0]
+                        share_link = _normalize_client_share_link_host(
+                            links[0],
+                            deployment["host"],
+                        )
                 except Exception:  # noqa: BLE001
                     pass
                 try:

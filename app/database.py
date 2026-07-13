@@ -60,6 +60,9 @@ class Database:
                     encrypted_panel_password TEXT NOT NULL,
                     encrypted_api_token TEXT NOT NULL,
                     proxy_port INTEGER NOT NULL,
+                    reality_mode TEXT NOT NULL DEFAULT 'manual',
+                    reality_dest TEXT NOT NULL DEFAULT '',
+                    reality_sni TEXT NOT NULL DEFAULT '',
                     xui_inbound_id INTEGER,
                     subscription_configured INTEGER NOT NULL DEFAULT 0,
                     status TEXT NOT NULL,
@@ -223,6 +226,13 @@ class Database:
             self._ensure_column("deployments", "panel_scheme", "TEXT NOT NULL DEFAULT 'http'")
             self._ensure_column("deployments", "xui_inbound_id", "INTEGER")
             self._ensure_column("deployments", "subscription_configured", "INTEGER NOT NULL DEFAULT 0")
+            self._ensure_column(
+                "deployments",
+                "reality_mode",
+                "TEXT NOT NULL DEFAULT 'manual'",
+            )
+            self._ensure_column("deployments", "reality_dest", "TEXT NOT NULL DEFAULT ''")
+            self._ensure_column("deployments", "reality_sni", "TEXT NOT NULL DEFAULT ''")
             self._ensure_column("jobs", "chain_id", "TEXT")
             self._ensure_column("proxy_chains", "last_error", "TEXT")
             self._ensure_column(

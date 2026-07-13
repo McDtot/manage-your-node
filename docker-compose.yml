@@ -5,7 +5,7 @@ services:
     ports:
       # Public by default. Once a local reverse proxy is installed, set
       # BIND_ADDRESS=127.0.0.1 and expose only the proxy's HTTPS port.
-      - "${BIND_ADDRESS:-0.0.0.0}:8787:8787"
+      - "${BIND_ADDRESS:-0.0.0.0}:${PANEL_PORT:-8787}:8787"
     environment:
       APP_DATA_DIR: /data
       HOST: 0.0.0.0
@@ -19,7 +19,8 @@ services:
       SUBSCRIPTION_RATE_LIMIT: ${SUBSCRIPTION_RATE_LIMIT:-120}
       TRUST_X_FORWARDED_FOR: ${TRUST_X_FORWARDED_FOR:-0}
       TRUSTED_PROXY_IPS: ${TRUSTED_PROXY_IPS:-127.0.0.1,::1}
-      REALITY_DEST: ${REALITY_DEST:-www.microsoft.com:443}
+      REALITY_CANDIDATES: ${REALITY_CANDIDATES:-}
+      REALITY_DEST: ${REALITY_DEST:-www.yahoo.com:443}
       REALITY_SNI: ${REALITY_SNI:-}
     secrets:
       - app_secret

@@ -6,7 +6,12 @@ from app.services import (
     CHAIN_PROTOCOL_SHADOWSOCKS_2022,
     CHAIN_PROTOCOL_VLESS_REALITY,
     CHAIN_SS_METHOD,
+    DEFAULT_REALITY_CANDIDATES,
     AppServices,
+    _normalize_client_share_link_host,
+    _redact_native_install_log,
+    parse_reality_destination,
+    reality_candidates,
     reality_dest,
     reality_server_name,
 )
@@ -184,7 +189,7 @@ def test_recover_orphaned_jobs(services):
 def test_reality_defaults(monkeypatch):
     monkeypatch.delenv("REALITY_DEST", raising=False)
     monkeypatch.delenv("REALITY_SNI", raising=False)
-    assert ":" in reality_dest()
+    assert reality_dest() == "www.yahoo.com:443"
     assert reality_server_name() == reality_dest().split(":", 1)[0]
 
 
@@ -195,6 +200,171 @@ def test_reality_overrides(monkeypatch):
     assert reality_server_name() == "example.org"
     monkeypatch.setenv("REALITY_SNI", "cdn.example.org")
     assert reality_server_name() == "cdn.example.org"
+
+
+def test_reality_auto_candidates_and_validation(monkeypatch):
+    monkeypatch.delenv("REALITY_CANDIDATES", raising=False)
+    monkeypatch.delenv("REALITY_DEST", raising=False)
+    monkeypatch.delenv("REALITY_SNI", raising=False)
+    assert [target for target, _ in reality_candidates()] == list(
+        DEFAULT_REALITY_CANDIDATES
+    )
+
+    monkeypatch.setenv(
+        "REALITY_CANDIDATES",
+        "Example.org:443, www.example.net:8443,example.org:443",
+    )
+    assert reality_candidates() == [
+        ("example.org:443", "example.org"),
+        ("www.example.net:8443", "www.example.net"),
+    ]
+    assert parse_reality_destination("[2001:db8::1]:443") == (
+        "[2001:db8::1]:443",
+        "2001:db8::1",
+    )
+    with pytest.raises(ValueError, match="host:port"):
+        parse_reality_destination("https://example.org")
+
+
+def test_deployment_persists_auto_and_manual_reality_settings(services, monkeypatch):
+    server = services.create_server(
+        {
+            "name": "edge",
+            "host": "203.0.113.50",
+            "sshPort": 22,
+            "sshUser": "deploy",
+            "authType": "agent",
+        }
+    )
+
+    def finish_without_worker(job_id, deployment_id, _server, _payload):
+        services.db.execute(
+            "UPDATE deployments SET status = 'ready' WHERE id = ?",
+            (deployment_id,),
+        )
+        services._finish_job(job_id, "success", None)
+        services._release_operation_locks(job_id)
+
+    monkeypatch.setattr(services, "_run_deployment", finish_without_worker)
+    monkeypatch.setenv("REALITY_CANDIDATES", "auto.example:443,backup.example:443")
+
+    automatic = services.start_deployment(
+        server["id"],
+        {
+            "installMethod": "dry-run",
+            "panelPort": "",
+            "realityMode": "auto",
+        },
+    )["deployment"]
+    assert automatic["reality_mode"] == "auto"
+    assert automatic["reality_dest"] == "auto.example:443"
+    assert automatic["reality_sni"] == "auto.example"
+    assert services.wait_for_workers()
+
+    manual = services.start_deployment(
+        server["id"],
+        {
+            "installMethod": "dry-run",
+            "realityMode": "manual",
+            "realityDest": "Manual.Example:8443",
+            "realitySni": "Cover.Example",
+        },
+    )["deployment"]
+    assert manual["reality_mode"] == "manual"
+    assert manual["reality_dest"] == "manual.example:8443"
+    assert manual["reality_sni"] == "cover.example"
+    assert services.wait_for_workers()
+
+
+def test_native_reality_target_probe_is_persisted(services, monkeypatch):
+    deployment_id = _create_ready_deployment(services, "probe", "203.0.113.60")
+    services.db.execute(
+        "UPDATE deployments SET reality_mode = 'auto', reality_dest = '', reality_sni = '' "
+        "WHERE id = ?",
+        (deployment_id,),
+    )
+    services.db.execute(
+        "INSERT INTO jobs (id,type,status,logs,created_at,updated_at) "
+        "VALUES ('probe-job','deploy_3xui','running','[]','now','now')"
+    )
+    monkeypatch.setenv("REALITY_CANDIDATES", "first.example:443,second.example:443")
+
+    def choose_second(_server, script, log, timeout):
+        assert "-tls1_3" in script
+        assert "-verify_hostname" in script
+        assert timeout >= 90
+        log("Rejected REALITY target first.example:443")
+        log("__MYN_REALITY_SELECTED__=1")
+        return ["Rejected REALITY target first.example:443", "__MYN_REALITY_SELECTED__=1"]
+
+    monkeypatch.setattr(services.ssh, "run_script", choose_second)
+    deployment = services.get_deployment(deployment_id)
+    selected = services._resolve_reality_target(
+        "probe-job",
+        deployment_id,
+        {"host": "203.0.113.60"},
+        deployment,
+    )
+    assert selected == ("second.example:443", "second.example")
+    stored = services.get_deployment(deployment_id)
+    assert stored["reality_dest"] == "second.example:443"
+    assert stored["reality_sni"] == "second.example"
+
+
+def test_native_installer_logs_redact_colorized_credentials():
+    api_line = "\x1b[0;32mAPI Token: leaked-token\x1b[0m"
+    password_line = "\x1b[0;32mPassword: leaked-password\x1b[0m"
+    result_line = "XUI_API_TOKEN=leaked-result-token"
+
+    assert "leaked-token" not in _redact_native_install_log(api_line, "panel-password")
+    assert "leaked-password" not in _redact_native_install_log(password_line, "panel-password")
+    assert "leaked-result-token" not in _redact_native_install_log(
+        result_line,
+        "panel-password",
+    )
+
+
+def test_native_client_link_uses_managed_server_host():
+    link = (
+        "vless://client-id@127.0.0.1:443"
+        "?security=reality&pbk=example#client"
+    )
+    normalized = _normalize_client_share_link_host(link, "2001:db8::10")
+
+    assert normalized.startswith("vless://client-id@[2001:db8::10]:443?")
+    assert normalized.endswith("#client")
+
+
+@pytest.mark.parametrize(
+    ("lines", "expected"),
+    [
+        (
+            ["Private key: old-private", "Public key: old-public"],
+            ("old-private", "old-public"),
+        ),
+        (
+            [
+                "PrivateKey: new-private",
+                "Password (PublicKey): new-public",
+                "Hash32: ignored",
+            ],
+            ("new-private", "new-public"),
+        ),
+    ],
+)
+def test_x25519_keypair_accepts_old_and_new_xray_output(
+    services,
+    monkeypatch,
+    lines,
+    expected,
+):
+    monkeypatch.setattr(
+        services.ssh,
+        "run_script",
+        lambda server, script, log, timeout: lines,
+    )
+
+    assert services._remote_x25519_keypair({"server_name": "edge"}) == expected
 
 
 def test_proxy_chain_failure_triggers_cleanup(services, monkeypatch):
@@ -230,6 +400,16 @@ def test_mixed_proxy_chain_uses_ss2022_between_overseas_nodes(services):
         _create_ready_deployment(services, "jp", "198.51.100.20"),
         _create_ready_deployment(services, "us", "198.51.100.30"),
     ]
+    services.db.execute(
+        "UPDATE deployments SET reality_dest = 'entry.example:443', "
+        "reality_sni = 'entry.example' WHERE id = ?",
+        (deployment_ids[0],),
+    )
+    services.db.execute(
+        "UPDATE deployments SET reality_dest = 'exit.example:8443', "
+        "reality_sni = 'cover.exit.example' WHERE id = ?",
+        (deployment_ids[2],),
+    )
     chain = services.create_proxy_chain(
         {
             "name": "mixed-chain",
@@ -266,18 +446,39 @@ def test_mixed_proxy_chain_uses_ss2022_between_overseas_nodes(services):
 
     entry_config = services._chain_xray_config(nodes[0], nodes[1])
     assert entry_config["inbounds"][0]["protocol"] == "vless"
+    assert "listen" not in entry_config["inbounds"][0]
+    assert entry_config["inbounds"][0]["streamSettings"]["network"] == "raw"
+    assert (
+        entry_config["inbounds"][0]["streamSettings"]["realitySettings"]["target"]
+        == "entry.example:443"
+    )
     assert entry_config["outbounds"][0]["protocol"] == "shadowsocks"
-    assert entry_config["outbounds"][0]["settings"]["address"] == "198.51.100.20"
+    assert entry_config["outbounds"][0]["settings"]["servers"] == [
+        {
+            "address": "198.51.100.20",
+            "port": nodes[1]["inbound_port"],
+            "method": CHAIN_SS_METHOD,
+            "password": services.secret_box.open(nodes[1]["encrypted_ss_password"]),
+        }
+    ]
 
     relay_config = services._chain_xray_config(nodes[1], nodes[2])
     assert relay_config["inbounds"][0]["protocol"] == "shadowsocks"
+    assert "listen" not in relay_config["inbounds"][0]
     assert relay_config["inbounds"][0]["settings"]["network"] == "tcp,udp"
     assert relay_config["outbounds"][0]["protocol"] == "vless"
+    assert relay_config["outbounds"][0]["streamSettings"]["network"] == "raw"
+    reality = relay_config["outbounds"][0]["streamSettings"]["realitySettings"]
+    assert reality["password"] == nodes[2]["public_key"]
+    assert reality["serverName"] == "cover.exit.example"
+    assert "publicKey" not in reality
 
     exit_config = services._chain_xray_config(nodes[2], None)
     assert exit_config["inbounds"][0]["protocol"] == "vless"
     assert exit_config["outbounds"][0]["protocol"] == "freedom"
-    assert services.get_proxy_chain(chain["id"])["share_link"].startswith("vless://")
+    share_link = services.get_proxy_chain(chain["id"])["share_link"]
+    assert share_link.startswith("vless://")
+    assert "sni=entry.example" in share_link
 
 
 def test_proxy_chain_protocol_validation_and_legacy_default(services):
@@ -314,5 +515,8 @@ def test_ss2022_chain_install_script_opens_udp_firewall_rules(services):
         {"inbounds": [], "outbounds": []},
         allow_udp=True,
     )
+    # Xray 26.5.9 infers the config format from the final extension.
+    assert 'TMP_CONFIG="$INSTALL_DIR/config.tmp.json"' in install_script
+    assert 'run -test -config "$TMP_CONFIG"' in install_script
     assert "ufw allow 45000/udp" in install_script
     assert "--add-port=45000/udp" in install_script

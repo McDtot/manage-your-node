@@ -20,7 +20,51 @@
 
 ---
 
-## 快速开始
+## 用户一键部署
+
+要求：一台 Linux 服务器，已安装 Docker Engine 与 Docker Compose 插件。
+
+```bash
+git clone https://github.com/McDtot/manage-your-node.git
+cd manage-your-node
+sudo bash install.sh
+```
+
+脚本会自动完成：
+
+- 检查 Docker 与 Compose 权限
+- 生成 `.env`、应用主密钥和随机管理员密码
+- 构建并启动容器
+- 等待健康检查通过
+- 输出访问地址、管理员用户名和首次密码
+
+默认通过 `0.0.0.0:8787` 提供临时公网 HTTP 访问。常用选项：
+
+```bash
+# 自定义端口和管理员用户名
+sudo bash install.sh --panel-port 8080 --admin-user operator
+
+# 已经配置好 HTTPS 反向代理时使用；会默认只绑定 127.0.0.1
+sudo bash install.sh --domain panel.example.com
+
+# 使用预先创建的密码文件，避免密码进入命令历史
+sudo bash install.sh --admin-password-file /root/manage-node-admin-password
+```
+
+重复执行脚本会保留已有 `.env`、密钥和 Docker 数据卷，用当前项目代码重新构建服务。脚本不会自动安装 Docker，也不会覆盖已有配置。
+
+升级已部署实例：
+
+```bash
+git pull --ff-only
+sudo bash install.sh
+```
+
+升级前建议按“备份”章节保存一次数据库与 `APP_SECRET`。
+
+---
+
+## 本地开发
 
 ```powershell
 pip install -r requirements.txt
@@ -34,7 +78,7 @@ python -m app.server
 
 本地若未设 `ADMIN_PASSWORD`，会回退为 `APP_SECRET`（仅 loopback / 开发模式）。非本地绑定会强制要求显式密钥，否则拒绝启动。
 
-### Docker
+### 手动使用 Docker
 
 ```powershell
 Copy-Item .env.example .env
@@ -55,7 +99,7 @@ Compose 默认把端口发布到宿主机 `0.0.0.0:8787`；密钥通过 Docker s
 ## 推荐使用流程
 
 1. **服务器** — 添加 VPS → 测试 SSH → 通过云厂商控制台核验并批准指纹 → 再测试
-2. **部署** — 创建 3x-ui 部署（先 dry-run 熟悉流程，再 native）  
+2. **部署** — 创建 3x-ui 部署；伪装目标建议选“自动检测并固定”（先 dry-run 熟悉流程，再 native）
 3. **客户端** — 部署成功后创建客户端  
 4. **订阅** — 配置并分发订阅链接  
 5. **代理链**（可选）— 选择 ready 的 native 节点排序 → 逐跳选择协议 → 保存 →「下发远端」
@@ -99,8 +143,9 @@ Compose 默认把端口发布到宿主机 `0.0.0.0:8787`；密钥通过 Docker s
 2. 安装固定的 3x-ui release，并按架构校验 release archive SHA-256
 3. 强制面板只监听远端 `127.0.0.1`
 4. 读 `/etc/x-ui/install-result.env`，敏感行不写任务日志
-5. 经 **SSH 隧道** 调面板 API，建默认 `VLESS + REALITY` inbound
-6. 可选创建首个 client 并拉真实分享链接
+5. 从目标 VPS 对候选伪装站连续执行两次 TLS 1.3 与证书校验，把首个通过的目标固定保存到该部署；手动模式也会先校验
+6. 经 **SSH 隧道** 调面板 API，使用该部署自己的伪装目标创建默认 `VLESS + REALITY` inbound
+7. 可选创建首个 client 并拉真实分享链接
 
 要求：
 
@@ -183,6 +228,7 @@ HOST=0.0.0.0
 | `PORT` | `8787` | 监听端口 |
 | `APP_ALLOW_INSECURE` | loopback 时为真 | 强制开发模式 |
 | `BIND_ADDRESS` | `0.0.0.0` | Docker 发布地址；配置本机反代后改为 `127.0.0.1` |
+| `PANEL_PORT` | `8787` | Docker 发布到宿主机的管理面板端口 |
 | `SESSION_COOKIE_SECURE` | HTTPS origin 时为真 | Cookie 是否带 `Secure` |
 | `TRUST_X_FORWARDED_FOR` | `0` | 是否采信 `X-Forwarded-For` |
 | `TRUSTED_PROXY_IPS` | `127.0.0.1,::1` | Uvicorn 可采信转发头的代理 IP/CIDR |
@@ -190,8 +236,9 @@ HOST=0.0.0.0
 | `ALLOWED_HOSTS` | 未配域名时允许当前 Host | 允许的 Host，逗号分隔；配置域名后应准确填写 |
 | `MAX_BODY_BYTES` | `1048576` | 请求体上限 |
 | `SUBSCRIPTION_RATE_LIMIT` | `120` | 单来源每分钟订阅请求上限 |
-| `REALITY_DEST` | `www.microsoft.com:443` | REALITY 回落目标 `host:port` |
-| `REALITY_SNI` | `REALITY_DEST` 的 host | REALITY SNI |
+| `REALITY_CANDIDATES` | Yahoo、Apple、Amazon | 自动模式按顺序从目标 VPS 检测的 `host:port` 列表，逗号分隔 |
+| `REALITY_DEST` | `www.yahoo.com:443` | 旧部署的全局回落目标；显式设置且未设置候选列表时，也作为唯一自动候选 |
+| `REALITY_SNI` | `REALITY_DEST` 的 host | 旧部署 / 单一全局目标的 SNI |
 
 更换已有数据的 `APP_SECRET` 后，旧的 SSH 密钥 / 面板密码 / API token 将无法解密。
 

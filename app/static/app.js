@@ -429,6 +429,7 @@ function deploymentItem(deployment, options = {}) {
       <div class="meta">面板：<span class="mono">127.0.0.1:${deployment.panel_port}${escapeHtml(deployment.panel_path)}</span>（仅 SSH 隧道）</div>
       <div class="meta">面板账号由控制器加密保管；面板仅允许通过 SSH 隧道访问</div>
       <div class="meta">入站 ID：<span class="mono">${escapeHtml(deployment.xui_inbound_id || "未同步")}</span></div>
+      <div class="meta">伪装目标：<span class="mono">${escapeHtml(deployment.reality_dest || (deployment.reality_mode === "auto" ? "自动检测中" : "-"))}</span> · ${deployment.reality_mode === "auto" ? "自动选择" : "手动指定"}</div>
       <div class="meta">默认订阅：<span class="mono">${escapeHtml(subscriptionUrl)}</span></div>
       <div class="item-actions">
         <button class="ghost" data-section-jump="subscriptions">管理订阅</button>
@@ -588,7 +589,15 @@ async function pollJob(jobId) {
   state.jobTimer = setInterval(tick, 800);
 }
 
+function syncRealityTargetFields() {
+  const manual = $("#realityMode").value === "manual";
+  $("#realityManualFields").hidden = !manual;
+  $("#deployForm").realityDest.required = manual;
+}
+
 function bindEvents() {
+  $("#realityMode").addEventListener("change", syncRealityTargetFields);
+  syncRealityTargetFields();
   $$(".nav-item").forEach((button) => {
     button.addEventListener("click", () => setSection(button.dataset.section));
   });
