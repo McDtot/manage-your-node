@@ -57,6 +57,8 @@ sudo bash install.sh --admin-password-file /root/manage-node-admin-password
 
 重复执行脚本会保留已有 `.env`、密钥和 Docker 数据卷，用当前项目代码重新构建服务；已有 Docker 不会被重复安装，也不会覆盖已有项目配置。其他 Linux 发行版需先按 [Docker 官方文档](https://docs.docker.com/engine/install/)安装 Docker。
 
+已经部署过时，请进入原项目目录执行升级，不要在项目目录里再次 `git clone` 出同名的嵌套目录。Docker 数据卷必须始终与原来的 `secrets/app_secret.txt` 配套；安装器会在启动前校验二者，发现旧数据卷但缺少原密钥或密钥不匹配时会安全停止，不会替换正在运行的服务。
+
 自动安装需要 root / sudo 权限，且不会主动卸载系统中可能冲突的 `containerd`、`runc` 等软件；若包管理器报告冲突，脚本会停止并保留现场供管理员处理。
 
 升级已部署实例：

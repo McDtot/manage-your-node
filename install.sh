@@ -154,6 +154,7 @@ Manage Your Node 一键部署脚本
   - 首次交互执行会生成 .env 和应用主密钥，并提示设置管理员密码。
   - 无交互终端且未指定密码文件时，会生成随机管理员密码。
   - 重复执行会保留已有配置、密码与 Docker 数据卷，并重新构建服务。
+  - 启动前会校验 APP_SECRET 与现有数据卷，不匹配时安全停止。
   - 未检测到 Docker 时，会从 Docker 官方软件源自动安装。
   - 自动安装支持 Ubuntu、Debian、Fedora、CentOS 和 RHEL。
 EOF
@@ -285,6 +286,26 @@ prompt_admin_password() {
   done
 }
 
+existing_data_volumes() {
+  {
+    "${DOCKER[@]}" volume ls --quiet \
+      --filter label=com.docker.compose.volume=manage-node-data 2>/dev/null || true
+    "${DOCKER[@]}" inspect manage-your-node \
+      --format '{{range .Mounts}}{{if eq .Destination "/data"}}{{.Name}}{{"\n"}}{{end}}{{end}}' \
+      2>/dev/null || true
+  } | awk 'NF && !seen[$0]++'
+}
+
+if [[ ! -s secrets/app_secret.txt ]]; then
+  EXISTING_DATA_VOLUMES="$(existing_data_volumes)"
+  if [[ -n "$EXISTING_DATA_VOLUMES" ]]; then
+    while IFS= read -r volume_name; do
+      info "检测到现有数据卷：$volume_name"
+    done <<< "$EXISTING_DATA_VOLUMES"
+    fail "当前目录缺少与现有数据卷配套的 secrets/app_secret.txt。请回到原项目目录执行升级，或从安全备份恢复原 APP_SECRET；为保护加密数据，脚本不会生成新密钥"
+  fi
+fi
+
 mkdir -p secrets
 chmod 700 secrets
 
@@ -358,8 +379,16 @@ else
 fi
 
 "${COMPOSE[@]}" config >/dev/null
-info "正在构建并启动服务"
-"${COMPOSE[@]}" up --build -d
+info "正在构建服务镜像"
+"${COMPOSE[@]}" build
+
+info "正在校验数据卷与应用主密钥"
+if ! "${COMPOSE[@]}" run --rm --no-deps manage-your-node python -m app.maintenance check; then
+  fail "数据卷校验失败。请确认当前 secrets/app_secret.txt 是该数据卷原先使用的密钥；脚本尚未替换正在运行的服务"
+fi
+
+info "正在启动服务"
+"${COMPOSE[@]}" up -d
 
 info "正在等待健康检查"
 READY=0
@@ -373,6 +402,7 @@ done
 
 if (( READY != 1 )); then
   "${COMPOSE[@]}" ps >&2 || true
+  "${COMPOSE[@]}" logs --no-color --tail=100 manage-your-node >&2 || true
   fail "服务未在预期时间内就绪；请运行 docker compose logs 查看原因"
 fi
 

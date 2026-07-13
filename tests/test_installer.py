@@ -14,10 +14,20 @@ def test_installer_has_safe_idempotent_defaults():
     assert "chmod 700 secrets" in script
     assert "chmod 0444 secrets/app_secret.txt secrets/admin_password.txt" in script
     assert "if [[ ! -f .env ]]" in script
-    assert '"${COMPOSE[@]}" up --build -d' in script
+    assert "existing_data_volumes()" in script
+    assert "label=com.docker.compose.volume=manage-node-data" in script
+    assert '"${COMPOSE[@]}" build' in script
+    assert "python -m app.maintenance check" in script
+    assert '"${COMPOSE[@]}" up -d' in script
     assert "api/health/ready" in script
+    assert 'logs --no-color --tail=100 manage-your-node' in script
     assert "docker compose down -v" not in script
     assert "rm -rf" not in script
+
+    build_at = script.index('"${COMPOSE[@]}" build')
+    check_at = script.index("python -m app.maintenance check")
+    start_at = script.index('"${COMPOSE[@]}" up -d')
+    assert build_at < check_at < start_at
 
 
 def test_installer_does_not_accept_password_on_command_line():

@@ -24,6 +24,17 @@ def check_database(db: Database, secret_box: SecretBox) -> None:
     if not result or next(iter(result.values())) != "ok":
         raise RuntimeError(f"database integrity check failed: {result}")
 
+    marker = db.query_one(
+        "SELECT value FROM app_metadata WHERE key = 'master_secret_check'"
+    )
+    if marker:
+        try:
+            marker_value = secret_box.open(marker["value"])
+        except ValueError as exc:
+            raise RuntimeError("configured APP_SECRET does not match this database") from exc
+        if marker_value != "manage-your-node/master-secret-check/v1":
+            raise RuntimeError("configured APP_SECRET does not match this database")
+
     encrypted_columns = [
         ("servers", "encrypted_secret"),
         ("deployments", "encrypted_panel_password"),
