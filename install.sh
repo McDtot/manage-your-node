@@ -12,6 +12,7 @@ DOMAIN=""
 BIND_ADDRESS_VALUE=""
 PASSWORD_FILE=""
 PASSWORD_CREATED=0
+ROOT=()
 
 info() {
   printf '[manage-your-node] %s\n' "$*"
@@ -20,6 +21,117 @@ info() {
 fail() {
   printf '[manage-your-node] 错误：%s\n' "$*" >&2
   exit 1
+}
+
+require_root() {
+  if (( EUID == 0 )); then
+    ROOT=()
+    return
+  fi
+  command -v sudo >/dev/null 2>&1 || fail "自动安装 Docker 需要 root 权限或 sudo"
+  info "安装 Docker 需要管理员权限"
+  sudo -v || fail "无法获取 sudo 权限"
+  ROOT=(sudo)
+}
+
+start_docker_service() {
+  if command -v systemctl >/dev/null 2>&1; then
+    "${ROOT[@]}" systemctl enable --now docker
+  elif command -v service >/dev/null 2>&1; then
+    "${ROOT[@]}" service docker start
+  else
+    fail "Docker 已安装，但系统没有 systemctl 或 service，无法启动守护进程"
+  fi
+}
+
+install_docker_apt() {
+  # https://docs.docker.com/engine/install/ubuntu/
+  # https://docs.docker.com/engine/install/debian/
+  local distro="$1"
+  local codename=""
+  local architecture=""
+
+  command -v apt-get >/dev/null 2>&1 || fail "未找到 apt-get"
+  command -v dpkg >/dev/null 2>&1 || fail "未找到 dpkg"
+  if [[ "$distro" == "ubuntu" ]]; then
+    codename="${UBUNTU_CODENAME:-${VERSION_CODENAME:-}}"
+  else
+    codename="${VERSION_CODENAME:-}"
+  fi
+  [[ "$codename" =~ ^[A-Za-z0-9._-]+$ ]] || fail "无法识别当前系统的软件源代号"
+  architecture="$(dpkg --print-architecture)"
+  [[ "$architecture" =~ ^[A-Za-z0-9._-]+$ ]] || fail "无法识别当前系统架构"
+
+  info "正在配置 Docker 官方 apt 软件源（$distro $codename）"
+  "${ROOT[@]}" apt-get update
+  "${ROOT[@]}" env DEBIAN_FRONTEND=noninteractive apt-get install -y ca-certificates curl
+  "${ROOT[@]}" install -m 0755 -d /etc/apt/keyrings
+  "${ROOT[@]}" curl -fsSL "https://download.docker.com/linux/$distro/gpg" -o /etc/apt/keyrings/docker.asc
+  "${ROOT[@]}" chmod a+r /etc/apt/keyrings/docker.asc
+  printf 'Types: deb\nURIs: https://download.docker.com/linux/%s\nSuites: %s\nComponents: stable\nArchitectures: %s\nSigned-By: /etc/apt/keyrings/docker.asc\n' "$distro" "$codename" "$architecture" | "${ROOT[@]}" tee /etc/apt/sources.list.d/docker.sources >/dev/null
+  "${ROOT[@]}" apt-get update
+  "${ROOT[@]}" env DEBIAN_FRONTEND=noninteractive apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+}
+
+install_docker_rpm() {
+  # https://docs.docker.com/engine/install/fedora/
+  # https://docs.docker.com/engine/install/centos/
+  # https://docs.docker.com/engine/install/rhel/
+  local distro="$1"
+  local repository=""
+
+  command -v dnf >/dev/null 2>&1 || fail "未找到 dnf"
+  case "$distro" in
+    fedora)
+      repository="https://download.docker.com/linux/fedora/docker-ce.repo"
+      ;;
+    centos)
+      repository="https://download.docker.com/linux/centos/docker-ce.repo"
+      ;;
+    rhel)
+      repository="https://download.docker.com/linux/rhel/docker-ce.repo"
+      ;;
+    *)
+      fail "不支持的 RPM 发行版：$distro"
+      ;;
+  esac
+
+  info "正在配置 Docker 官方 dnf 软件源（$distro）"
+  "${ROOT[@]}" dnf -y install dnf-plugins-core
+  if [[ ! -f /etc/yum.repos.d/docker-ce.repo ]]; then
+    if [[ "$distro" == "fedora" ]]; then
+      "${ROOT[@]}" dnf config-manager addrepo --from-repofile "$repository"
+    else
+      "${ROOT[@]}" dnf config-manager --add-repo "$repository"
+    fi
+  fi
+  "${ROOT[@]}" dnf -y install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+}
+
+install_docker() {
+  [[ "$(uname -s)" == "Linux" ]] || fail "自动安装 Docker 仅支持 Linux"
+  [[ -r /etc/os-release ]] || fail "无法读取 /etc/os-release，不能识别 Linux 发行版"
+  # shellcheck disable=SC1091
+  . /etc/os-release
+  require_root
+
+  case "${ID:-}" in
+    ubuntu|debian)
+      install_docker_apt "$ID"
+      ;;
+    fedora|centos|rhel)
+      install_docker_rpm "$ID"
+      ;;
+    *)
+      fail "暂不支持在 ${PRETTY_NAME:-该发行版} 上自动安装 Docker；请先按 Docker 官方文档安装"
+      ;;
+  esac
+
+  start_docker_service
+  hash -r
+  command -v docker >/dev/null 2>&1 || fail "Docker 安装完成后仍未找到 docker 命令"
+  docker --version
+  info "Docker Engine 与 Compose 插件安装完成"
 }
 
 usage() {
@@ -41,7 +153,8 @@ Manage Your Node 一键部署脚本
 说明：
   - 首次执行会生成 .env、应用主密钥和管理员密码。
   - 重复执行会保留已有配置、密码与 Docker 数据卷，并重新构建服务。
-  - 脚本要求 Docker Engine 与 Docker Compose 已安装。
+  - 未检测到 Docker 时，会从 Docker 官方软件源自动安装。
+  - 自动安装支持 Ubuntu、Debian、Fedora、CentOS 和 RHEL。
 EOF
 }
 
@@ -112,7 +225,10 @@ if [[ -n "$PASSWORD_FILE" ]]; then
   [[ -f "$PASSWORD_FILE" && -r "$PASSWORD_FILE" ]] || fail "管理员密码文件不存在或不可读：$PASSWORD_FILE"
 fi
 
-command -v docker >/dev/null 2>&1 || fail "未检测到 Docker。请先安装 Docker Engine 与 Compose 插件：https://docs.docker.com/engine/install/"
+if ! command -v docker >/dev/null 2>&1; then
+  info "未检测到 Docker，准备自动安装"
+  install_docker
+fi
 
 DOCKER=(docker)
 if ! docker info >/dev/null 2>&1; then

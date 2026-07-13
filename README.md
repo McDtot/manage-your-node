@@ -22,7 +22,7 @@
 
 ## 用户一键部署
 
-要求：一台 Linux 服务器，已安装 Docker Engine 与 Docker Compose 插件。
+要求：一台使用 Ubuntu、Debian、Fedora、CentOS 或 RHEL 的 Linux 服务器。若未安装 Docker，脚本会通过 Docker 官方软件源自动安装 Engine、CLI、Buildx 和 Compose 插件。
 
 ```bash
 git clone https://github.com/McDtot/manage-your-node.git
@@ -33,6 +33,7 @@ sudo bash install.sh
 脚本会自动完成：
 
 - 检查 Docker 与 Compose 权限
+- 未安装时从 Docker 官方软件源安装并启动 Docker
 - 生成 `.env`、应用主密钥和随机管理员密码
 - 构建并启动容器
 - 等待健康检查通过
@@ -51,7 +52,9 @@ sudo bash install.sh --domain panel.example.com
 sudo bash install.sh --admin-password-file /root/manage-node-admin-password
 ```
 
-重复执行脚本会保留已有 `.env`、密钥和 Docker 数据卷，用当前项目代码重新构建服务。脚本不会自动安装 Docker，也不会覆盖已有配置。
+重复执行脚本会保留已有 `.env`、密钥和 Docker 数据卷，用当前项目代码重新构建服务；已有 Docker 不会被重复安装，也不会覆盖已有项目配置。其他 Linux 发行版需先按 [Docker 官方文档](https://docs.docker.com/engine/install/)安装 Docker。
+
+自动安装需要 root / sudo 权限，且不会主动卸载系统中可能冲突的 `containerd`、`runc` 等软件；若包管理器报告冲突，脚本会停止并保留现场供管理员处理。
 
 升级已部署实例：
 

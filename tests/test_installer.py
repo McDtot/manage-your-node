@@ -23,3 +23,15 @@ def test_installer_does_not_accept_password_on_command_line():
 
     assert "--admin-password-file" in script
     assert "--admin-password " not in script
+
+
+def test_installer_uses_official_docker_repositories():
+    script = (ROOT / "install.sh").read_text(encoding="utf-8")
+
+    assert 'if ! command -v docker >/dev/null 2>&1' in script
+    assert 'ubuntu|debian)' in script
+    assert 'fedora|centos|rhel)' in script
+    assert "https://download.docker.com/linux/$distro/gpg" in script
+    assert "docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin" in script
+    assert "systemctl enable --now docker" in script
+    assert "https://get.docker.com" not in script
