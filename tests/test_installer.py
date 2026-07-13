@@ -11,6 +11,8 @@ def test_installer_has_safe_idempotent_defaults():
     assert "umask 077" in script
     assert "if [[ ! -s secrets/app_secret.txt ]]" in script
     assert "if [[ ! -s secrets/admin_password.txt ]]" in script
+    assert "chmod 700 secrets" in script
+    assert "chmod 0444 secrets/app_secret.txt secrets/admin_password.txt" in script
     assert "if [[ ! -f .env ]]" in script
     assert '"${COMPOSE[@]}" up --build -d' in script
     assert "api/health/ready" in script

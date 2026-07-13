@@ -289,6 +289,11 @@ ADMIN_PASSWORD_CHECK="$(<secrets/admin_password.txt)"
 (( ${#ADMIN_PASSWORD_CHECK} >= 12 )) || fail "管理员密码至少需要 12 个字符"
 [[ "$APP_SECRET_VALUE" != "$ADMIN_PASSWORD_CHECK" ]] || fail "管理员密码不能与应用主密钥相同"
 
+# Docker Compose implements file-backed secrets as bind mounts and preserves
+# the source file mode. The parent directory remains private (0700), while the
+# mounted files must be readable by the non-root UID/GID 10001 in the container.
+chmod 0444 secrets/app_secret.txt secrets/admin_password.txt
+
 if [[ ! -f .env ]]; then
   PUBLIC_ORIGIN_VALUE=""
   ALLOWED_HOSTS_VALUE=""

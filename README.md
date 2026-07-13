@@ -95,7 +95,10 @@ docker compose up --build -d
 
 Compose 默认把端口发布到宿主机 `0.0.0.0:8787`；密钥通过 Docker secrets
 挂载，应用以 UID/GID `10001` 非 root 运行，数据保存在命名卷
-`manage-node-data`。配置本机反向代理后，应把 `BIND_ADDRESS` 改成 `127.0.0.1`。
+`manage-node-data`。在 Linux 上，一键脚本会把 `secrets/` 目录保持为 `0700`，
+并把两个密钥文件设为 `0444`，使 Compose 绑定挂载后的文件可由容器内的非 root
+进程读取；其他宿主机用户仍无法穿过私有目录读取密钥。配置本机反向代理后，
+应把 `BIND_ADDRESS` 改成 `127.0.0.1`。
 
 ---
 
