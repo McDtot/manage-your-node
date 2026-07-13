@@ -626,13 +626,43 @@ function bindEvents() {
     const form = event.currentTarget;
     const data = formData(form);
     if (!data.serverId) return toast("请选择服务器");
-    data.installMethod = "native";
-    const result = await api(`/api/servers/${data.serverId}/deploy`, {
-      method: "POST",
-      body: JSON.stringify(data),
-    });
-    toast("部署任务已创建");
-    await pollJob(result.job.id);
+    const server = state.servers.find((item) => item.id === data.serverId);
+    if (!server) return toast("服务器不存在，请刷新后重试");
+    const existingDeployment = state.deployments.find(
+      (item) => item.server_id === server.id && item.install_method === "native",
+    );
+    if (existingDeployment) {
+      return toast("该服务器已有原生 3x-ui 部署记录，请先删除旧部署后再创建");
+    }
+    if (server.status !== "reachable") {
+      return toast("请先在服务器页面测试 SSH 连接");
+    }
+    if (!server.host_key_trusted) {
+      return toast(
+        server.host_key_fingerprint
+          ? "请先在服务器页面核验并信任 SSH 主机指纹"
+          : "请先在服务器页面测试连接并核验 SSH 主机指纹",
+      );
+    }
+
+    const button = form.querySelector('button[type="submit"]');
+    const originalText = button.textContent;
+    button.disabled = true;
+    button.textContent = "正在创建部署…";
+    try {
+      data.installMethod = "native";
+      const result = await api(`/api/servers/${data.serverId}/deploy`, {
+        method: "POST",
+        body: JSON.stringify(data),
+      });
+      toast("部署任务已创建");
+      await pollJob(result.job.id);
+    } catch (error) {
+      toast(error instanceof Error ? error.message : "创建部署失败");
+    } finally {
+      button.disabled = false;
+      button.textContent = originalText;
+    }
   });
 
   $("#clientForm").addEventListener("submit", async (event) => {
