@@ -182,7 +182,9 @@ class SshRunner:
             capture = _CaptureHostKeyPolicy()
             client.set_missing_host_key_policy(capture)
         else:
-            client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+            raise SshError(
+                "SSH host-key verification requires a database-backed server record."
+            )
 
         auth_type = str(server.get("auth_type") or "key")
         secret = self.secret_box.open(server.get("encrypted_secret") or "").strip()
