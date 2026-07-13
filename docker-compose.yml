@@ -3,15 +3,51 @@ services:
     build: .
     container_name: manage-your-node
     ports:
-      - "8787:8787"
-    # Secrets (APP_SECRET, ADMIN_USERNAME, ADMIN_PASSWORD, ...) are read from
-    # .env. Copy .env.example to .env and fill in real values first.
-    env_file:
-      - .env
+      # Public by default. Once a local reverse proxy is installed, set
+      # BIND_ADDRESS=127.0.0.1 and expose only the proxy's HTTPS port.
+      - "${BIND_ADDRESS:-0.0.0.0}:8787:8787"
     environment:
       APP_DATA_DIR: /data
       HOST: 0.0.0.0
       PORT: 8787
+      APP_SECRET_FILE: /run/secrets/app_secret
+      ADMIN_PASSWORD_FILE: /run/secrets/admin_password
+      ADMIN_USERNAME: ${ADMIN_USERNAME:-admin}
+      PUBLIC_ORIGIN: ${PUBLIC_ORIGIN:-}
+      ALLOWED_HOSTS: ${ALLOWED_HOSTS:-}
+      SESSION_HOURS: ${SESSION_HOURS:-12}
+      SUBSCRIPTION_RATE_LIMIT: ${SUBSCRIPTION_RATE_LIMIT:-120}
+      TRUST_X_FORWARDED_FOR: ${TRUST_X_FORWARDED_FOR:-0}
+      TRUSTED_PROXY_IPS: ${TRUSTED_PROXY_IPS:-127.0.0.1,::1}
+      REALITY_DEST: ${REALITY_DEST:-www.microsoft.com:443}
+      REALITY_SNI: ${REALITY_SNI:-}
+    secrets:
+      - app_secret
+      - admin_password
     volumes:
-      - ./data:/data
+      - manage-node-data:/data
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,noexec,nosuid,nodev
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    init: true
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8787/api/health/ready', timeout=3).read()"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    stop_grace_period: 30s
     restart: unless-stopped
+
+secrets:
+  app_secret:
+    file: ./secrets/app_secret.txt
+  admin_password:
+    file: ./secrets/admin_password.txt
+
+volumes:
+  manage-node-data:

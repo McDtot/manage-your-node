@@ -4,72 +4,106 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Manage Your Node</title>
-    <link rel="stylesheet" href="/static/styles.css" />
+    <link rel="stylesheet" href="/static/styles.css?v=ios-20260713" />
   </head>
   <body>
     <div class="shell">
       <aside class="sidebar">
         <div class="brand">
-          <span class="brand-mark">MYN</span>
-          <div>
+          <span class="brand-mark" aria-hidden="true">
+            <span></span><span></span><span></span>
+          </span>
+          <div class="brand-copy">
             <strong>Manage Your Node</strong>
-            <small>3x-ui v0.1</small>
+            <small>Control Center</small>
           </div>
         </div>
-        <nav class="nav">
-          <button class="nav-item is-active" data-section="overview">总览</button>
-          <button class="nav-item" data-section="subscriptions">订阅</button>
-          <button class="nav-item" data-section="servers">服务器</button>
-          <button class="nav-item" data-section="deployments">部署</button>
-          <button class="nav-item" data-section="chains">代理链</button>
-          <button class="nav-item" data-section="clients">客户端</button>
-          <button class="nav-item" data-section="logs">日志</button>
+        <nav class="nav" aria-label="主导航">
+          <button class="nav-item is-active" data-section="overview">
+            <span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 13h6V4H4v9Zm0 7h6v-4H4v4Zm10 0h6v-9h-6v9Zm0-16v4h6V4h-6Z"/></svg></span>
+            <span>总览</span>
+          </button>
+          <button class="nav-item" data-section="subscriptions">
+            <span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M6.5 5.5a2 2 0 1 1 0 4 2 2 0 0 1 0-4Zm11 0a2 2 0 1 1 0 4 2 2 0 0 1 0-4ZM12 14a2 2 0 1 1 0 4 2 2 0 0 1 0-4ZM8.2 8.8l2.5 5.4m5.1-5.4-2.5 5.4"/></svg></span>
+            <span>订阅</span>
+          </button>
+          <button class="nav-item" data-section="servers">
+            <span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M5 4h14a2 2 0 0 1 2 2v3a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2Zm0 9h14a2 2 0 0 1 2 2v3a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-3a2 2 0 0 1 2-2Zm2-6h.01M7 16h.01"/></svg></span>
+            <span>服务器</span>
+          </button>
+          <button class="nav-item" data-section="deployments">
+            <span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="m12 3 4 4-4 4-4-4 4-4Zm5 10 4 4-4 4-4-4 4-4ZM7 13l4 4-4 4-4-4 4-4Z"/></svg></span>
+            <span>部署</span>
+          </button>
+          <button class="nav-item" data-section="chains">
+            <span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M10 13a5 5 0 0 0 7.5.5l2-2a5 5 0 0 0-7-7l-1.1 1.1M14 11a5 5 0 0 0-7.5-.5l-2 2a5 5 0 0 0 7 7l1.1-1.1"/></svg></span>
+            <span>代理链</span>
+          </button>
+          <button class="nav-item" data-section="clients">
+            <span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M8 3h8a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2Zm3 15h2"/></svg></span>
+            <span>客户端</span>
+          </button>
+          <button class="nav-item" data-section="logs">
+            <span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M5 4h14v16H5V4Zm3 4h8M8 12h8m-8 4h5"/></svg></span>
+            <span>日志</span>
+          </button>
         </nav>
+        <div class="sidebar-footer">
+          <span class="status-dot" aria-hidden="true"></span>
+          <span><strong>Control Plane</strong><small>服务运行中</small></span>
+        </div>
       </aside>
 
       <main class="workspace">
-        <header class="topbar">
-          <div>
-            <h1>节点部署器</h1>
-            <p id="statusLine">加载中</p>
-          </div>
-          <div class="top-actions">
-            <button class="secondary" id="refreshBtn">刷新</button>
-            <button class="secondary" id="logoutBtn">退出</button>
-            <button class="primary" id="topAddServerBtn" data-section-jump="servers" hidden>添加服务器</button>
-          </div>
-        </header>
+        <div class="workspace-inner">
+          <div class="security-warning" id="securityWarning" role="alert" hidden></div>
+          <header class="topbar">
+            <div class="page-heading">
+              <span class="eyebrow" id="pageEyebrow">CONTROL CENTER</span>
+              <h1 id="pageTitle">总览</h1>
+              <p id="statusLine">加载中</p>
+            </div>
+            <div class="top-actions">
+              <button class="secondary icon-label" id="refreshBtn"><span aria-hidden="true">↻</span>刷新</button>
+              <button class="secondary" id="logoutBtn">退出</button>
+              <button class="primary" id="topAddServerBtn" data-section-jump="servers" hidden>＋ 添加服务器</button>
+            </div>
+          </header>
 
         <section class="section is-active" id="overview">
           <div class="metrics">
-            <article class="metric">
-              <span>服务器</span>
+            <article class="metric metric-blue">
+              <div class="metric-top"><span class="metric-icon" aria-hidden="true">◫</span><span>服务器</span></div>
               <strong id="metricServers">0</strong>
+              <small>已纳入管理</small>
             </article>
-            <article class="metric">
-              <span>可用部署</span>
+            <article class="metric metric-green">
+              <div class="metric-top"><span class="metric-icon" aria-hidden="true">◇</span><span>可用部署</span></div>
               <strong id="metricDeployments">0</strong>
+              <small>当前可用节点</small>
             </article>
-            <article class="metric">
-              <span>客户端</span>
+            <article class="metric metric-purple">
+              <div class="metric-top"><span class="metric-icon" aria-hidden="true">▣</span><span>客户端</span></div>
               <strong id="metricClients">0</strong>
+              <small>已签发配置</small>
             </article>
-            <article class="metric warn">
-              <span>7 天内到期</span>
+            <article class="metric metric-orange warn">
+              <div class="metric-top"><span class="metric-icon" aria-hidden="true">◷</span><span>即将到期</span></div>
               <strong id="metricExpiring">0</strong>
+              <small>未来 7 天</small>
             </article>
           </div>
 
           <div class="grid two">
             <section class="panel">
               <div class="panel-head">
-                <h2>最近服务器</h2>
+                <div><h2>最近服务器</h2><p>连接状态与主机信任</p></div>
               </div>
               <div id="overviewServers" class="list"></div>
             </section>
             <section class="panel">
               <div class="panel-head">
-                <h2>部署状态</h2>
+                <div><h2>部署状态</h2><p>节点安装与运行概况</p></div>
               </div>
               <div id="overviewDeployments" class="list"></div>
             </section>
@@ -284,6 +318,7 @@
             <pre id="jobLog" class="log"></pre>
           </section>
         </section>
+        </div>
       </main>
     </div>
 
@@ -333,6 +368,6 @@
     </dialog>
 
     <div class="toast" id="toast" hidden></div>
-    <script src="/static/app.js"></script>
+    <script src="/static/app.js?v=ios-20260713"></script>
   </body>
 </html>

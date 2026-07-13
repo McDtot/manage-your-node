@@ -47,6 +47,12 @@ class SshError(RuntimeError):
     pass
 
 
+class _HostKeyApprovalRequired(RuntimeError):
+    def __init__(self, key: paramiko.PKey):
+        super().__init__("SSH host key approval required")
+        self.key = key
+
+
 class _CaptureHostKeyPolicy(paramiko.MissingHostKeyPolicy):
     """Trust-on-first-use policy that records the presented key for later storage.
 
@@ -59,6 +65,7 @@ class _CaptureHostKeyPolicy(paramiko.MissingHostKeyPolicy):
 
     def missing_host_key(self, client, hostname, key):  # noqa: ANN001
         self.captured = key
+        raise _HostKeyApprovalRequired(key)
 
 
 class SshRunner:
@@ -122,24 +129,25 @@ class SshRunner:
         if not self.db or not server_id:
             return None
         return self.db.query_one(
-            "SELECT key_type, key_base64, fingerprint FROM ssh_host_keys WHERE server_id = ?",
+            "SELECT key_type, key_base64, fingerprint, trusted FROM ssh_host_keys WHERE server_id = ?",
             (server_id,),
         )
 
-    def _store_host_key(self, server_id: str, key: paramiko.PKey) -> None:
+    def _store_host_key(self, server_id: str, key: paramiko.PKey, trusted: bool = False) -> None:
         if not self.db or not server_id:
             return
         self.db.execute(
             """
             INSERT OR REPLACE INTO ssh_host_keys (
-                server_id, key_type, key_base64, fingerprint, created_at
-            ) VALUES (?, ?, ?, ?, ?)
+                server_id, key_type, key_base64, fingerprint, trusted, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?)
             """,
             (
                 server_id,
                 key.get_name(),
                 key.get_base64(),
                 _fingerprint(key),
+                1 if trusted else 0,
                 datetime.now(timezone.utc).isoformat(timespec="seconds"),
             ),
         )
@@ -153,6 +161,11 @@ class SshRunner:
 
         capture: _CaptureHostKeyPolicy | None = None
         if stored:
+            if not bool(stored.get("trusted")):
+                raise SshError(
+                    "SSH host key is awaiting approval: "
+                    f"{stored['fingerprint']}. Verify it out of band, then approve it in the panel."
+                )
             entry_name = self._hostkey_name(hostname, port)
             try:
                 key_cls = _HOST_KEY_CLASSES.get(stored["key_type"])
@@ -206,6 +219,14 @@ class SshRunner:
 
         try:
             client.connect(**connect_kwargs)
+        except _HostKeyApprovalRequired as exc:
+            client.close()
+            self._store_host_key(server_id, exc.key, trusted=False)
+            raise SshError(
+                "New SSH host key requires approval: "
+                f"{_fingerprint(exc.key)}. Verify this fingerprint through your VPS provider "
+                "before approving it in the panel."
+            ) from exc
         except paramiko.BadHostKeyException as exc:
             client.close()
             expected_fp = _fingerprint(exc.expected_key)
@@ -226,8 +247,6 @@ class SshRunner:
             client.close()
             raise SshError(f"SSH connection failed: {exc}") from exc
 
-        if capture is not None and capture.captured is not None:
-            self._store_host_key(server_id, capture.captured)
         return client
 
     def _parse_private_key(self, secret: str) -> paramiko.PKey:

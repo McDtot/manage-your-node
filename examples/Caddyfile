@@ -5,13 +5,14 @@
 #   1. Point your domain's A/AAAA record at this host.
 #   2. Replace panel.example.com with your domain.
 #   3. Run the app bound to 127.0.0.1:8787 (default HOST/PORT).
-#   4. Export TRUST_X_FORWARDED_FOR=1 so login lockout uses the real client IP.
-#   5. caddy run --config ./Caddyfile
+#   4. Set PUBLIC_ORIGIN=https://panel.example.com and ALLOWED_HOSTS=panel.example.com.
+#   5. Only enable TRUST_X_FORWARDED_FOR after setting TRUSTED_PROXY_IPS to
+#      Caddy's actual source address as seen by the app.
+#   6. caddy run --config ./Caddyfile
 
 panel.example.com {
     encode gzip
 
-    # The app only trusts X-Forwarded-For when TRUST_X_FORWARDED_FOR=1.
     reverse_proxy 127.0.0.1:8787 {
         header_up X-Forwarded-For {remote_host}
         header_up X-Forwarded-Proto {scheme}

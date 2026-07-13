@@ -2,7 +2,7 @@
 
 本地 Web 面板：录入 VPS、部署并管理 3x-ui 节点、发放客户端/订阅，以及把多台机器编排成链式代理。
 
-面向自用 / 小规模运维。核心流程已可跑；公网暴露前请按下文完成密钥、SSH 校验与反向代理。
+面向自用 / 小规模运维。Docker 默认可通过公网 IP 访问；未配置域名与 HTTPS 时，WebUI 会持续显示安全提示。
 
 ---
 
@@ -10,8 +10,8 @@
 
 | 能力 | 说明 |
 | --- | --- |
-| 控制台 | 本地 HTTP 面板，默认 `127.0.0.1:8787`，登录鉴权 |
-| 服务器 | 录入 VPS，SSH 连通性检测，主机密钥 TOFU |
+| 控制台 | 本机运行默认 `127.0.0.1:8787`；Docker 默认发布 `0.0.0.0:8787`，带登录鉴权 |
+| 服务器 | 录入 VPS，SSH 连通性检测，首次指纹需人工核验与批准 |
 | 部署 | dry-run 演练，或 native 真实安装 3x-ui + 默认 `VLESS + REALITY` |
 | 客户端 | 创建、启停、重置流量、改额度与到期 |
 | 订阅 | 默认订阅与自定义订阅链接分发 |
@@ -38,17 +38,23 @@ python -m app.server
 
 ```powershell
 Copy-Item .env.example .env
-# 编辑 .env：至少填写 APP_SECRET、ADMIN_PASSWORD
-docker compose up --build
+New-Item -ItemType Directory -Force secrets
+python -c "from pathlib import Path; import secrets; Path('secrets/app_secret.txt').write_text(secrets.token_urlsafe(48))"
+# 手工写入一个强管理员密码，不要复用 APP_SECRET
+Set-Content -NoNewline secrets/admin_password.txt 'replace-with-a-strong-password'
+# 域名与 HTTPS 可稍后配置；未配置时 WebUI 会提示
+docker compose up --build -d
 ```
 
-容器内 `HOST=0.0.0.0`，进入安全模式；密钥从 `.env` 读取（已在 `.gitignore`）。
+Compose 默认把端口发布到宿主机 `0.0.0.0:8787`；密钥通过 Docker secrets
+挂载，应用以 UID/GID `10001` 非 root 运行，数据保存在命名卷
+`manage-node-data`。配置本机反向代理后，应把 `BIND_ADDRESS` 改成 `127.0.0.1`。
 
 ---
 
 ## 推荐使用流程
 
-1. **服务器** — 添加 VPS → 测试 SSH  
+1. **服务器** — 添加 VPS → 测试 SSH → 通过云厂商控制台核验并批准指纹 → 再测试
 2. **部署** — 创建 3x-ui 部署（先 dry-run 熟悉流程，再 native）  
 3. **客户端** — 部署成功后创建客户端  
 4. **订阅** — 配置并分发订阅链接  
@@ -86,10 +92,12 @@ docker compose up --build
 
 经 SSH 在目标机上：
 
-1. 跑 3x-ui 官方 unattended 安装脚本  
-2. 读 `/etc/x-ui/install-result.env`  
-3. 经 **SSH 隧道** 调面板 API，建默认 `VLESS + REALITY` inbound  
-4. 可选创建首个 client 并拉真实分享链接  
+1. 下载固定 commit 的 3x-ui unattended 安装器并校验 SHA-256
+2. 安装固定的 3x-ui release，并按架构校验 release archive SHA-256
+3. 强制面板只监听远端 `127.0.0.1`
+4. 读 `/etc/x-ui/install-result.env`，敏感行不写任务日志
+5. 经 **SSH 隧道** 调面板 API，建默认 `VLESS + REALITY` inbound
+6. 可选创建首个 client 并拉真实分享链接
 
 要求：
 
@@ -110,28 +118,48 @@ docker compose up --build
 | --- | --- | --- |
 | 默认 | `APP_ALLOW_INSECURE` 自动为真 | 强制校验密钥 |
 | `APP_SECRET` | 可用内置开发默认值 | 必须显式设置，且 ≥ 16 字符，不能是内置默认 |
-| `ADMIN_PASSWORD` | 未设则回退 `APP_SECRET` | 必须显式设置 |
+| `ADMIN_PASSWORD` | 未设则回退 `APP_SECRET` | 必须显式设置、≥ 12 字符，且不能等于 `APP_SECRET` |
+| `PUBLIC_ORIGIN` | 自动使用本地地址 | 可暂不设置；WebUI 会提示缺少域名/HTTPS |
 
-可用 `APP_ALLOW_INSECURE=1` 强制开发模式——**切勿对公网使用**。
+`APP_ALLOW_INSECURE=1` 只允许与 loopback 监听地址一起使用；非本地绑定会拒绝启动。
+
+### 默认公网访问与域名提示
+
+Docker Compose 默认把 `8787` 发布到 `0.0.0.0`，部署后可以先通过公网 IP 直接访问，不需要额外开关。未设置 HTTPS 域名时，登录后的 WebUI 顶部会显示黄色安全提示；强 `APP_SECRET`、强管理员密码、CSRF、登录限流与审计仍然启用。
+
+非容器运行若也要对外监听，只需设置：
+
+```text
+HOST=0.0.0.0
+```
+
+以后配置好反向代理后，设置 `PUBLIC_ORIGIN=https://域名`、`ALLOWED_HOSTS=域名`，并把 `BIND_ADDRESS` 改为 `127.0.0.1`，黄色提示会自动消失，Session Cookie 也会自动启用 `Secure`。
+
+未配置 HTTPS 时仍是明文 HTTP，传输中的登录信息、SSH 密码或私钥可能被链路监听，因此只建议作为部署初期的过渡状态。
 
 ### 已内置
 
 - 敏感数据（SSH 密钥、面板密码、API token）用 Fernet + scrypt 加密；旧 `v1` 密文可读，下次写入升为 `v2`  
-- 登录失败限流：默认 5 分钟内失败 5 次 → 锁定 15 分钟（429）  
-- SSH 主机密钥 TOFU：首次记录指纹，之后校验；指纹变化拒绝连接（重装机器则删服务器记录后重加）  
-- 3x-ui API 一律经 SSH 隧道访问 `127.0.0.1`，面板凭据不走公网明文  
-- Session Cookie：`HttpOnly`、`SameSite=Strict`；非本地默认 `Secure`  
-- `X-Forwarded-For` **默认不信任**；仅在受信反向代理后设 `TRUST_X_FORWARDED_FOR=1`  
+- Starlette + Uvicorn 提供 ASGI Web 服务；请求 Host 白名单、请求体上限与就绪检查
+- 登录失败限流持久化到 SQLite：默认 5 分钟内失败 5 次 → 锁定完整 15 分钟（429）
+- SSH 首次主机密钥只记录为待批准；必须带外核验后才能认证和 native 部署；变化时拒绝连接
+- 3x-ui 面板强制绑定远端 `127.0.0.1`，API 一律经固定主机指纹的 SSH 隧道访问
+- 写 API 使用与 session 绑定的 CSRF 双提交令牌，并校验 Origin / Fetch Metadata
+- Session Cookie：`HttpOnly`、`SameSite=Strict`；生产环境使用 `Secure` 与 `__Host-` 前缀
+- CSP、HSTS、`nosniff`、拒绝 framing、无 Referrer 等安全响应头
+- `X-Forwarded-For` 默认不信任；启用时还必须用 `TRUSTED_PROXY_IPS` 限制来源
+- 公开订阅接口按来源地址限流，订阅与代理链 token 可在 UI 中轮换
 - 500 对外只回通用信息，细节进服务端日志  
-- 管理变更操作写入 `myn.audit` 进程日志（非持久化审计表）  
-- 启动时把上次遗留的 `running` 任务、卡住的部署/链路标为 `failed`  
+- 管理变更同时写进程日志和持久化 `audit_events` 表，可经 `/api/audit` 查询
+- 部署使用数据库互斥锁；启动时恢复孤儿任务并清理遗留锁
 
-### 公网前还要做的
+### 正式公网前还要做的
 
 - 前面加反向代理终结 TLS（应用本身不提供 HTTPS）  
 - 绑定 `127.0.0.1`，只让代理访问面板  
-- 设 `TRUST_X_FORWARDED_FOR=1`  
-- 定期备份 `data/`，并保管好 `APP_SECRET`（丢了旧密文解不开）  
+- 设置准确的 `PUBLIC_ORIGIN`、`ALLOWED_HOSTS`
+- 只有确认反向代理来源地址后才启用 `TRUST_X_FORWARDED_FOR`
+- 定期执行一致性备份与恢复演练，并离线保管 `APP_SECRET`
 
 `examples/Caddyfile` 与 `examples/nginx.conf` 有现成示例。
 
@@ -143,15 +171,22 @@ docker compose up --build
 | --- | --- | --- |
 | `APP_DATA_DIR` | `data` | SQLite 目录 |
 | `APP_SECRET` | `development-only-secret` | 加密与 session 签名；安全模式必填且足够强 |
+| `APP_SECRET_FILE` | （无） | 从文件读取主密钥；优先于 `APP_SECRET` |
 | `ADMIN_USERNAME` | `admin` | 管理员用户名 |
 | `ADMIN_PASSWORD` | （无） | 管理员密码；安全模式必填 |
+| `ADMIN_PASSWORD_FILE` | （无） | 从文件读取管理员密码；优先于环境变量 |
 | `SESSION_HOURS` | `12` | Session 有效小时数 |
 | `HOST` | `127.0.0.1` | 监听地址 |
 | `PORT` | `8787` | 监听端口 |
 | `APP_ALLOW_INSECURE` | loopback 时为真 | 强制开发模式 |
-| `SESSION_COOKIE_SECURE` | 非 loopback 时为真 | Cookie 是否带 `Secure` |
+| `BIND_ADDRESS` | `0.0.0.0` | Docker 发布地址；配置本机反代后改为 `127.0.0.1` |
+| `SESSION_COOKIE_SECURE` | HTTPS origin 时为真 | Cookie 是否带 `Secure` |
 | `TRUST_X_FORWARDED_FOR` | `0` | 是否采信 `X-Forwarded-For` |
+| `TRUSTED_PROXY_IPS` | `127.0.0.1,::1` | Uvicorn 可采信转发头的代理 IP/CIDR |
+| `PUBLIC_ORIGIN` | 自动使用监听地址 | 配置 HTTPS 域名后启用安全 Cookie 并关闭 WebUI 提示 |
+| `ALLOWED_HOSTS` | 未配域名时允许当前 Host | 允许的 Host，逗号分隔；配置域名后应准确填写 |
 | `MAX_BODY_BYTES` | `1048576` | 请求体上限 |
+| `SUBSCRIPTION_RATE_LIMIT` | `120` | 单来源每分钟订阅请求上限 |
 | `REALITY_DEST` | `www.microsoft.com:443` | REALITY 回落目标 `host:port` |
 | `REALITY_SNI` | `REALITY_DEST` 的 host | REALITY SNI |
 
@@ -161,12 +196,20 @@ docker compose up --build
 
 ## 备份
 
-整目录备份 `data/`（含 `manage_node.db` 与 WAL）。备份本身建议再加密存放。
+备份本身应加密并复制到另一台机器；`APP_SECRET` 必须独立离线保管。
 
 一致性在线备份示例：
 
 ```powershell
-python -c "import sqlite3; sqlite3.connect('data/manage_node.db').backup(sqlite3.connect('backup.db'))"
+python -m app.maintenance backup
+python -m app.maintenance check
+```
+
+Docker 中可先写到数据卷，再复制出来：
+
+```powershell
+docker compose exec manage-your-node python -m app.maintenance backup /data/manage-node-backup.db
+docker cp manage-your-node:/data/manage-node-backup.db ./backups/manage-node-backup.db
 ```
 
 ---
@@ -178,7 +221,9 @@ pip install -r requirements-dev.txt
 pytest
 ```
 
-覆盖：密文（含旧 `v1`）、session / 登录限流、安全模式配置、`X-Forwarded-For` 开关、业务逻辑片段、孤儿任务恢复、代理链失败回滚触发。
+覆盖：密文（含旧 `v1`）、session / CSRF、持久化登录限流、安全模式配置、
+ASGI 路由与安全响应头、事务回滚、在线备份、订阅令牌轮换、SSH 指纹批准、
+孤儿任务恢复、安装器固定与校验、代理链失败回滚触发。
 
 ---
 
@@ -191,9 +236,10 @@ app/
   database.py       SQLite schema / 迁移（WAL）
   provisioning.py   3x-ui 安装脚本生成
   security.py       密文封装（Fernet + scrypt）
-  server.py         HTTP 路由与静态资源
+  server.py         Starlette 路由、中间件与 Uvicorn 启动
+  maintenance.py    备份与数据库/主密钥检查
   services.py       业务逻辑、部署、代理链下发与回滚
-  ssh_runner.py     Paramiko + 主机密钥 TOFU
+  ssh_runner.py     Paramiko + SSH 主机密钥捕获/批准/固定
   ssh_tunnel.py     SSH 本地端口转发（面板 API）
   xui_api.py        3x-ui API 客户端
   static/           前端 HTML/CSS/JS
@@ -207,9 +253,9 @@ examples/           Caddy / Nginx 反向代理示例
 ## 已知限制
 
 - 单管理员，无多用户 / RBAC  
-- 审计仅为进程日志，无独立审计表  
 - 代理链 Xray 服务不出现在 3x-ui 面板里  
 - 远端失败清理是 best-effort  
 - 订阅 token 泄露即可读取对应订阅内容  
 - 暂不支持带 passphrase 的 SSH 私钥粘贴  
-- 主密钥仍来自环境变量，未接 OS keychain / KMS  
+- 无内置 MFA；正式环境应再通过 VPN、访问控制或支持 MFA 的身份代理保护管理面
+- 支持文件型 secret，但未直接集成云 KMS / Vault，也未提供在线主密钥轮换

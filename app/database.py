@@ -1,12 +1,14 @@
 import sqlite3
 import threading
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 
 class Database:
     def __init__(self, db_path: Path):
         self._lock = threading.RLock()
+        self._state = threading.local()
         self._conn = sqlite3.connect(db_path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA foreign_keys = ON")
@@ -158,6 +160,37 @@ class Database:
                     FOREIGN KEY(deployment_id) REFERENCES deployments(id) ON DELETE CASCADE
                 );
 
+                CREATE TABLE IF NOT EXISTS login_rate_limits (
+                    client_key TEXT PRIMARY KEY,
+                    failures TEXT NOT NULL,
+                    locked_until REAL NOT NULL DEFAULT 0,
+                    updated_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS audit_events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    at TEXT NOT NULL,
+                    actor TEXT NOT NULL,
+                    client_ip TEXT NOT NULL,
+                    method TEXT NOT NULL,
+                    path TEXT NOT NULL,
+                    status INTEGER NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS operation_locks (
+                    resource_type TEXT NOT NULL,
+                    resource_id TEXT NOT NULL,
+                    job_id TEXT NOT NULL,
+                    acquired_at TEXT NOT NULL,
+                    PRIMARY KEY(resource_type, resource_id)
+                );
+
+                CREATE TABLE IF NOT EXISTS app_metadata (
+                    key TEXT PRIMARY KEY,
+                    value TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+
                 CREATE TRIGGER IF NOT EXISTS trg_proxy_chain_node_delete
                 AFTER DELETE ON proxy_chain_nodes
                 BEGIN
@@ -176,9 +209,14 @@ class Database:
                     ON jobs(server_id);
                 CREATE INDEX IF NOT EXISTS idx_proxy_chain_nodes_deployment
                     ON proxy_chain_nodes(deployment_id);
+                CREATE INDEX IF NOT EXISTS idx_audit_events_at
+                    ON audit_events(at);
+                CREATE INDEX IF NOT EXISTS idx_operation_locks_job
+                    ON operation_locks(job_id);
                 """
             )
             self._ensure_column("deployments", "install_method", "TEXT NOT NULL DEFAULT 'dry-run'")
+            self._ensure_column("ssh_host_keys", "trusted", "INTEGER NOT NULL DEFAULT 1")
             self._ensure_column("deployments", "panel_scheme", "TEXT NOT NULL DEFAULT 'http'")
             self._ensure_column("deployments", "xui_inbound_id", "INTEGER")
             self._ensure_column("deployments", "subscription_configured", "INTEGER NOT NULL DEFAULT 0")
@@ -252,14 +290,53 @@ class Database:
     def execute(self, sql: str, params: tuple[Any, ...] = ()) -> None:
         with self._lock:
             self._conn.execute(sql, params)
-            self._conn.commit()
+            if not self._in_transaction():
+                self._conn.commit()
 
     def executemany(self, sql: str, params: list[tuple[Any, ...]]) -> None:
         with self._lock:
             self._conn.executemany(sql, params)
-            self._conn.commit()
+            if not self._in_transaction():
+                self._conn.commit()
 
     def executescript(self, sql: str) -> None:
         with self._lock:
             self._conn.executescript(sql)
-            self._conn.commit()
+            if not self._in_transaction():
+                self._conn.commit()
+
+    def _in_transaction(self) -> bool:
+        return bool(getattr(self._state, "transaction_depth", 0))
+
+    @contextmanager
+    def transaction(self) -> Iterator[None]:
+        """Serialize and atomically commit a group of local database changes."""
+        with self._lock:
+            depth = int(getattr(self._state, "transaction_depth", 0))
+            if depth == 0:
+                self._conn.execute("BEGIN IMMEDIATE")
+            self._state.transaction_depth = depth + 1
+            try:
+                yield
+                if depth == 0:
+                    self._conn.commit()
+            except Exception:
+                if depth == 0:
+                    self._conn.rollback()
+                raise
+            finally:
+                self._state.transaction_depth = depth
+
+    def ping(self) -> bool:
+        with self._lock:
+            return self._conn.execute("SELECT 1").fetchone()[0] == 1
+
+    def backup_to(self, target: Path) -> None:
+        """Create a consistent online SQLite backup, including WAL contents."""
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with self._lock, sqlite3.connect(target) as destination:
+            self._conn.backup(destination)
+
+    def close(self) -> None:
+        with self._lock:
+            self._conn.close()

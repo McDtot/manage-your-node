@@ -1,7 +1,10 @@
 import base64
+import ipaddress
 import json
+import math
 import os
 import random
+import re
 import secrets
 import socket
 import threading
@@ -22,6 +25,8 @@ from .xui_api import XuiApiClient
 
 
 DEFAULT_REALITY_DEST = "www.microsoft.com:443"
+MAX_JOB_LOG_ENTRIES = 2000
+MAX_JOB_LOG_LINE = 4096
 
 
 def reality_dest() -> str:
@@ -60,11 +65,148 @@ def int_field(payload: dict[str, Any], key: str, default: int) -> int:
         raise ValueError(f"{key} must be a number") from exc
 
 
+def port_field(payload: dict[str, Any], key: str, default: int) -> int:
+    value = int_field(payload, key, default)
+    if not 1 <= value <= 65535:
+        raise ValueError(f"{key} must be between 1 and 65535")
+    return value
+
+
+def host_field(payload: dict[str, Any], key: str = "host") -> str:
+    value = require_text(payload, key).rstrip(".")
+    try:
+        return ipaddress.ip_address(value).compressed
+    except ValueError:
+        pass
+    try:
+        ascii_host = value.encode("idna").decode("ascii")
+    except UnicodeError as exc:
+        raise ValueError(f"{key} must be a valid IP address or hostname") from exc
+    labels = ascii_host.split(".")
+    if (
+        len(ascii_host) > 253
+        or not labels
+        or any(
+            not label
+            or len(label) > 63
+            or label.startswith("-")
+            or label.endswith("-")
+            or not all(char.isalnum() or char == "-" for char in label)
+            for label in labels
+        )
+    ):
+        raise ValueError(f"{key} must be a valid IP address or hostname")
+    return ascii_host.lower()
+
+
+def url_host(value: str) -> str:
+    return f"[{value}]" if ":" in value and not value.startswith("[") else value
+
+
 class AppServices:
     def __init__(self, db: Database, secret_box: SecretBox):
         self.db = db
         self.secret_box = secret_box
+        self._verify_master_secret()
         self.ssh = SshRunner(secret_box, db)
+        self._workers: set[threading.Thread] = set()
+        self._workers_lock = threading.Lock()
+
+    def _track_worker(self, worker: threading.Thread) -> None:
+        with self._workers_lock:
+            self._workers.add(worker)
+
+    def _forget_current_worker(self) -> None:
+        with self._workers_lock:
+            self._workers.discard(threading.current_thread())
+
+    def wait_for_workers(self, timeout: float = 25.0) -> bool:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            with self._workers_lock:
+                workers = [worker for worker in self._workers if worker.is_alive()]
+            if not workers:
+                return True
+            remaining = max(0.0, deadline - time.monotonic())
+            workers[0].join(min(0.25, remaining))
+        return False
+
+    def _verify_master_secret(self) -> None:
+        marker = self.db.query_one(
+            "SELECT value FROM app_metadata WHERE key = 'master_secret_check'"
+        )
+        expected = "manage-your-node/master-secret-check/v1"
+        if marker:
+            try:
+                if self.secret_box.open(marker["value"]) != expected:
+                    raise ValueError("marker mismatch")
+            except ValueError as exc:
+                raise RuntimeError(
+                    "APP_SECRET does not match this database; refusing to mix encryption keys"
+                ) from exc
+            return
+
+        encrypted_columns = [
+            ("servers", "encrypted_secret"),
+            ("deployments", "encrypted_panel_password"),
+            ("deployments", "encrypted_api_token"),
+            ("proxy_chain_nodes", "encrypted_private_key"),
+        ]
+        try:
+            for table, column in encrypted_columns:
+                rows = self.db.query_all(
+                    f"SELECT {column} AS value FROM {table} WHERE {column} <> ''"
+                )
+                for row in rows:
+                    self.secret_box.open(row["value"])
+        except ValueError as exc:
+            raise RuntimeError(
+                "APP_SECRET cannot decrypt existing data; refusing to write with a different key"
+            ) from exc
+
+        self.db.execute(
+            """
+            INSERT INTO app_metadata (key, value, updated_at)
+            VALUES ('master_secret_check', ?, ?)
+            """,
+            (self.secret_box.seal(expected), now_iso()),
+        )
+
+    def _acquire_operation_locks(
+        self,
+        job_id: str,
+        resources: list[tuple[str, str]],
+    ) -> None:
+        for resource_type, resource_id in resources:
+            existing = self.db.query_one(
+                "SELECT job_id FROM operation_locks WHERE resource_type = ? AND resource_id = ?",
+                (resource_type, resource_id),
+            )
+            if existing:
+                raise ValueError(
+                    f"{resource_type} is busy with job {existing['job_id']}; wait for it to finish"
+                )
+        self.db.executemany(
+            """
+            INSERT INTO operation_locks (resource_type, resource_id, job_id, acquired_at)
+            VALUES (?, ?, ?, ?)
+            """,
+            [
+                (resource_type, resource_id, job_id, now_iso())
+                for resource_type, resource_id in resources
+            ],
+        )
+
+    def _release_operation_locks(self, job_id: str) -> None:
+        self.db.execute("DELETE FROM operation_locks WHERE job_id = ?", (job_id,))
+
+    def _assert_not_busy(self, resource_type: str, resource_id: str) -> None:
+        lock = self.db.query_one(
+            "SELECT job_id FROM operation_locks WHERE resource_type = ? AND resource_id = ?",
+            (resource_type, resource_id),
+        )
+        if lock:
+            raise ValueError(f"resource is busy with job {lock['job_id']}")
 
     def recover_orphaned_jobs(self) -> int:
         """Fail jobs/records left ``running`` by a previous process.
@@ -76,32 +218,34 @@ class AppServices:
         stamp = now_iso()
         orphaned = self.db.query_all("SELECT id FROM jobs WHERE status = 'running'")
         message = "Process restarted before this job finished; marked as failed."
-        for row in orphaned:
-            self._append_job_log(row["id"], message)
-        self.db.execute(
-            """
-            UPDATE jobs
-            SET status = 'failed', error = ?, updated_at = ?, finished_at = ?
-            WHERE status = 'running'
-            """,
-            (message, stamp, stamp),
-        )
-        self.db.execute(
-            """
-            UPDATE deployments
-            SET status = 'failed', last_error = ?, updated_at = ?
-            WHERE status = 'provisioning'
-            """,
-            ("Deployment interrupted by a process restart.", stamp),
-        )
-        self.db.execute(
-            """
-            UPDATE proxy_chains
-            SET status = 'failed', last_error = ?, updated_at = ?
-            WHERE status = 'deploying'
-            """,
-            ("Proxy chain deployment interrupted by a process restart.", stamp),
-        )
+        with self.db.transaction():
+            for row in orphaned:
+                self._append_job_log(row["id"], message)
+            self.db.execute(
+                """
+                UPDATE jobs
+                SET status = 'failed', error = ?, updated_at = ?, finished_at = ?
+                WHERE status = 'running'
+                """,
+                (message, stamp, stamp),
+            )
+            self.db.execute(
+                """
+                UPDATE deployments
+                SET status = 'failed', last_error = ?, updated_at = ?
+                WHERE status = 'provisioning'
+                """,
+                ("Deployment interrupted by a process restart.", stamp),
+            )
+            self.db.execute(
+                """
+                UPDATE proxy_chains
+                SET status = 'failed', last_error = ?, updated_at = ?
+                WHERE status = 'deploying'
+                """,
+                ("Proxy chain deployment interrupted by a process restart.", stamp),
+            )
+            self.db.execute("DELETE FROM operation_locks")
         return len(orphaned)
 
     def summary(self) -> dict[str, Any]:
@@ -131,11 +275,29 @@ class AppServices:
             "expiringClients": expiring,
         }
 
+    def list_audit_events(self, limit: int = 100) -> list[dict[str, Any]]:
+        safe_limit = max(1, min(int(limit), 500))
+        return self.db.query_all(
+            """
+            SELECT id, at, actor, client_ip, method, path, status
+            FROM audit_events
+            ORDER BY id DESC
+            LIMIT ?
+            """,
+            (safe_limit,),
+        )
+
     def list_servers(self) -> list[dict[str, Any]]:
         rows = self.db.query_all(
-            "SELECT id, name, host, ssh_port, ssh_user, auth_type, secret_label, "
-            "os, arch, status, last_check_at, created_at, updated_at "
-            "FROM servers ORDER BY created_at DESC"
+            """
+            SELECT s.id, s.name, s.host, s.ssh_port, s.ssh_user, s.auth_type,
+                   s.secret_label, s.os, s.arch, s.status, s.last_check_at,
+                   s.created_at, s.updated_at, hk.fingerprint AS host_key_fingerprint,
+                   COALESCE(hk.trusted, 0) AS host_key_trusted
+            FROM servers s
+            LEFT JOIN ssh_host_keys hk ON hk.server_id = s.id
+            ORDER BY s.created_at DESC
+            """
         )
         return rows
 
@@ -143,6 +305,9 @@ class AppServices:
         server_id = new_id("srv")
         stamp = now_iso()
         secret = str(payload.get("secret", ""))
+        auth_type = require_text(payload, "authType")
+        if auth_type not in {"key", "password", "agent"}:
+            raise ValueError("authType must be key, password, or agent")
         self.db.execute(
             """
             INSERT INTO servers (
@@ -153,10 +318,10 @@ class AppServices:
             (
                 server_id,
                 require_text(payload, "name"),
-                require_text(payload, "host"),
-                int_field(payload, "sshPort", 22),
+                host_field(payload),
+                port_field(payload, "sshPort", 22),
                 require_text(payload, "sshUser"),
-                require_text(payload, "authType"),
+                auth_type,
                 self.secret_box.seal(secret),
                 "saved" if secret else "not_saved",
                 "new",
@@ -168,14 +333,46 @@ class AppServices:
 
     def get_server(self, server_id: str) -> dict[str, Any]:
         row = self.db.query_one(
-            "SELECT id, name, host, ssh_port, ssh_user, auth_type, secret_label, "
-            "os, arch, status, last_check_at, created_at, updated_at "
-            "FROM servers WHERE id = ?",
+            """
+            SELECT s.id, s.name, s.host, s.ssh_port, s.ssh_user, s.auth_type,
+                   s.secret_label, s.os, s.arch, s.status, s.last_check_at,
+                   s.created_at, s.updated_at, hk.fingerprint AS host_key_fingerprint,
+                   COALESCE(hk.trusted, 0) AS host_key_trusted
+            FROM servers s
+            LEFT JOIN ssh_host_keys hk ON hk.server_id = s.id
+            WHERE s.id = ?
+            """,
             (server_id,),
         )
         if not row:
             raise ValueError("server not found")
         return row
+
+    def approve_server_host_key(self, server_id: str) -> dict[str, Any]:
+        self.get_server(server_id)
+        row = self.db.query_one(
+            "SELECT fingerprint, trusted FROM ssh_host_keys WHERE server_id = ?",
+            (server_id,),
+        )
+        if not row:
+            raise ValueError("test SSH once to capture the host key before approving it")
+        if not row["fingerprint"]:
+            raise ValueError("captured SSH host key is invalid")
+        self.db.execute(
+            "UPDATE ssh_host_keys SET trusted = 1 WHERE server_id = ?",
+            (server_id,),
+        )
+        return self.get_server(server_id)
+
+    def reset_server_host_key(self, server_id: str) -> dict[str, Any]:
+        self.get_server(server_id)
+        self._assert_not_busy("server", server_id)
+        self.db.execute("DELETE FROM ssh_host_keys WHERE server_id = ?", (server_id,))
+        self.db.execute(
+            "UPDATE servers SET status = 'new', updated_at = ? WHERE id = ?",
+            (now_iso(), server_id),
+        )
+        return self.get_server(server_id)
 
     def _get_server_row(self, server_id: str) -> dict[str, Any]:
         row = self.db.query_one("SELECT * FROM servers WHERE id = ?", (server_id,))
@@ -232,7 +429,7 @@ class AppServices:
             """
         )
         for row in rows:
-            self._attach_deployment_secrets(row)
+            self._attach_deployment_secrets(row, reveal=False)
         return rows
 
     def start_deployment(self, server_id: str, payload: dict[str, Any]) -> dict[str, Any]:
@@ -243,76 +440,110 @@ class AppServices:
         deployment_id = new_id("dep")
         job_id = new_id("job")
         stamp = now_iso()
-        proxy_port = int_field(payload, "proxyPort", 443)
-        panel_port = int_field(payload, "panelPort", random.randint(32000, 39000))
+        proxy_port = port_field(payload, "proxyPort", 443)
+        panel_port = port_field(payload, "panelPort", random.randint(32000, 39000))
+        if proxy_port == panel_port:
+            raise ValueError("proxyPort and panelPort must be different")
         protocol = str(payload.get("protocol", "VLESS + REALITY")).strip()
+        if protocol != "VLESS + REALITY":
+            raise ValueError("only VLESS + REALITY is currently supported")
         install_method = str(payload.get("installMethod", "dry-run")).strip()
         if install_method not in {"dry-run", "native"}:
             raise ValueError("installMethod must be dry-run or native")
+        if install_method == "native" and server["status"] != "reachable":
+            raise ValueError("test SSH successfully before starting a native deployment")
+        if install_method == "native":
+            host_key = self.db.query_one(
+                "SELECT trusted FROM ssh_host_keys WHERE server_id = ?",
+                (server_id,),
+            )
+            if not host_key or not bool(host_key["trusted"]):
+                raise ValueError("verify and approve the SSH host key before native deployment")
+            existing = self.db.query_one(
+                "SELECT id FROM deployments WHERE server_id = ? AND install_method = 'native'",
+                (server_id,),
+            )
+            if existing:
+                raise ValueError("this server already has a native 3x-ui deployment")
         panel_path = "/" + secrets.token_urlsafe(8)
         panel_username = "myn_" + secrets.token_urlsafe(5).replace("-", "A").replace("_", "B")
         panel_password = secrets.token_urlsafe(18).replace("-", "A").replace("_", "B")
-        api_token = secrets.token_urlsafe(28)
+        api_token = secrets.token_urlsafe(28) if install_method == "dry-run" else ""
         subscription_url = self._deployment_subscription_url(deployment_id)
 
-        self.db.execute(
-            """
-            INSERT INTO deployments (
-                id, server_id, engine, protocol, install_method, panel_scheme, panel_port, panel_path,
-                panel_username, encrypted_panel_password, encrypted_api_token,
-                proxy_port, subscription_configured, status, subscription_url, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                deployment_id,
-                server_id,
-                "3x-ui",
-                protocol,
-                install_method,
-                "http",
-                panel_port,
-                panel_path,
-                panel_username,
-                self.secret_box.seal(panel_password),
-                self.secret_box.seal(api_token),
-                proxy_port,
-                1,
-                "provisioning",
-                subscription_url,
-                stamp,
-                stamp,
-            ),
-        )
-        self._ensure_deployment_subscription(deployment_id, server["name"], stamp)
-        self.db.execute(
-            """
-            INSERT INTO jobs (
-                id, type, server_id, deployment_id, status, logs,
-                created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                job_id,
-                "deploy_3xui",
-                server_id,
-                deployment_id,
-                "running",
-                json.dumps([], ensure_ascii=False),
-                stamp,
-                stamp,
-            ),
-        )
+        with self.db.transaction():
+            self._acquire_operation_locks(job_id, [("server", server_id)])
+            self.db.execute(
+                """
+                INSERT INTO deployments (
+                    id, server_id, engine, protocol, install_method, panel_scheme, panel_port, panel_path,
+                    panel_username, encrypted_panel_password, encrypted_api_token,
+                    proxy_port, subscription_configured, status, subscription_url, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    deployment_id,
+                    server_id,
+                    "3x-ui",
+                    protocol,
+                    install_method,
+                    "http",
+                    panel_port,
+                    panel_path,
+                    panel_username,
+                    self.secret_box.seal(panel_password),
+                    self.secret_box.seal(api_token),
+                    proxy_port,
+                    1,
+                    "provisioning",
+                    subscription_url,
+                    stamp,
+                    stamp,
+                ),
+            )
+            self._ensure_deployment_subscription(deployment_id, server["name"], stamp)
+            self.db.execute(
+                """
+                INSERT INTO jobs (
+                    id, type, server_id, deployment_id, status, logs,
+                    created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    job_id,
+                    "deploy_3xui",
+                    server_id,
+                    deployment_id,
+                    "running",
+                    json.dumps([], ensure_ascii=False),
+                    stamp,
+                    stamp,
+                ),
+            )
 
         thread = threading.Thread(
             target=self._run_deployment,
             args=(job_id, deployment_id, server, payload),
             daemon=True,
         )
-        thread.start()
+        self._track_worker(thread)
+        try:
+            thread.start()
+        except Exception:
+            with self._workers_lock:
+                self._workers.discard(thread)
+            with self.db.transaction():
+                self._release_operation_locks(job_id)
+                self._finish_job(job_id, "failed", "could not start deployment worker")
+                self.db.execute(
+                    "UPDATE deployments SET status = 'failed', last_error = ?, updated_at = ? WHERE id = ?",
+                    ("Could not start deployment worker.", now_iso(), deployment_id),
+                )
+            raise
 
         return {
             "job": self.get_job(job_id),
-            "deployment": self.get_deployment(deployment_id),
+            "deployment": self.get_deployment(deployment_id, reveal_secrets=False),
         }
 
     def _run_deployment(
@@ -322,10 +553,14 @@ class AppServices:
         server: dict[str, Any],
         payload: dict[str, Any],
     ) -> None:
-        if str(payload.get("installMethod", "dry-run")) == "native":
-            self._run_native_deployment(job_id, deployment_id, server, payload)
-            return
-        self._run_dry_deployment(job_id, deployment_id, server, payload)
+        try:
+            if str(payload.get("installMethod", "dry-run")) == "native":
+                self._run_native_deployment(job_id, deployment_id, server, payload)
+                return
+            self._run_dry_deployment(job_id, deployment_id, server, payload)
+        finally:
+            self._release_operation_locks(job_id)
+            self._forget_current_worker()
 
     def _run_dry_deployment(
         self,
@@ -399,11 +634,20 @@ class AppServices:
                 panel_password=panel_password,
                 server_host=server["host"],
             )
+            def safe_remote_log(line: str) -> None:
+                if line.startswith("XUI_PASSWORD="):
+                    clean = "XUI_PASSWORD=[redacted]"
+                elif line.startswith("XUI_API_TOKEN="):
+                    clean = "XUI_API_TOKEN=[redacted]"
+                else:
+                    clean = line.replace(panel_password, "[redacted]")
+                self._append_job_log(job_id, clean)
+
             self._append_job_log(job_id, "Starting real SSH deployment with official 3x-ui installer")
             lines = self.ssh.run_script(
                 server,
                 script,
-                lambda line: self._append_job_log(job_id, line),
+                safe_remote_log,
                 timeout=1200,
             )
             result = self._parse_install_result(lines)
@@ -457,12 +701,20 @@ class AppServices:
 
             self._finish_job(job_id, "success", None)
         except Exception as exc:  # noqa: BLE001
+            error_text = str(exc)
+            if "panel_password" in locals():
+                error_text = error_text.replace(panel_password, "[redacted]")
+            error_text = re.sub(
+                r"XUI_(?:PASSWORD|API_TOKEN)=[^\s]+",
+                "XUI_SECRET=[redacted]",
+                error_text,
+            )
             self.db.execute(
                 "UPDATE deployments SET status = ?, last_error = ?, updated_at = ? "
                 "WHERE id = ?",
-                ("failed", str(exc), now_iso(), deployment_id),
+                ("failed", error_text, now_iso(), deployment_id),
             )
-            self._append_job_log(job_id, f"Deployment failed: {exc}")
+            self._append_job_log(job_id, f"Deployment failed: {error_text}")
             if install_applied:
                 self._append_job_log(
                     job_id,
@@ -477,7 +729,7 @@ class AppServices:
                         job_id,
                         f"Rollback uninstall failed (manual cleanup may be needed): {cleanup_exc}",
                     )
-            self._finish_job(job_id, "failed", str(exc))
+            self._finish_job(job_id, "failed", error_text)
 
     def _parse_install_result(self, lines: list[str]) -> dict[str, str]:
         capture = False
@@ -544,7 +796,10 @@ class AppServices:
         if not job:
             return
         logs = json.loads(job["logs"])
-        logs.append({"at": now_iso(), "line": line})
+        clean = str(line).replace("\x00", "")[:MAX_JOB_LOG_LINE]
+        logs.append({"at": now_iso(), "line": clean})
+        if len(logs) > MAX_JOB_LOG_ENTRIES:
+            logs = logs[-MAX_JOB_LOG_ENTRIES:]
         self.db.execute(
             "UPDATE jobs SET logs = ?, updated_at = ? WHERE id = ?",
             (json.dumps(logs, ensure_ascii=False), now_iso(), job_id),
@@ -560,7 +815,11 @@ class AppServices:
             (status, error, now_iso(), now_iso(), job_id),
         )
 
-    def get_deployment(self, deployment_id: str) -> dict[str, Any]:
+    def get_deployment(
+        self,
+        deployment_id: str,
+        reveal_secrets: bool = True,
+    ) -> dict[str, Any]:
         row = self.db.query_one(
             """
             SELECT d.id, d.server_id, s.name AS server_name, s.host,
@@ -581,7 +840,7 @@ class AppServices:
         )
         if not row:
             raise ValueError("deployment not found")
-        self._attach_deployment_secrets(row)
+        self._attach_deployment_secrets(row, reveal=reveal_secrets)
         return row
 
     def _get_deployment_row(self, deployment_id: str) -> dict[str, Any]:
@@ -590,11 +849,14 @@ class AppServices:
             raise ValueError("deployment not found")
         return row
 
-    def _attach_deployment_secrets(self, row: dict[str, Any]) -> None:
-        row["panel_url"] = f"{row['panel_scheme']}://{row['host']}:{row['panel_port']}{row['panel_path']}/"
+    def _attach_deployment_secrets(self, row: dict[str, Any], reveal: bool = True) -> None:
+        row["panel_url"] = f"{row['panel_scheme']}://{url_host(row['host'])}:{row['panel_port']}{row['panel_path']}/"
         row["subscription_url"] = self._deployment_subscription_url(row["id"])
-        row["panel_password"] = self.secret_box.open(row.pop("encrypted_panel_password", ""))
-        row["api_token"] = self.secret_box.open(row.pop("encrypted_api_token", ""))
+        encrypted_password = row.pop("encrypted_panel_password", "")
+        encrypted_token = row.pop("encrypted_api_token", "")
+        if reveal:
+            row["panel_password"] = self.secret_box.open(encrypted_password)
+            row["api_token"] = self.secret_box.open(encrypted_token)
 
     def _deployment_subscription_url(self, deployment_id: str) -> str:
         return f"/sub/deployments/{deployment_id}"
@@ -646,6 +908,7 @@ class AppServices:
                 username=deployment["panel_username"],
                 password=deployment["panel_password"],
                 api_token=deployment.get("api_token") or "",
+                verify_tls=False,  # endpoint is authenticated by the pinned SSH tunnel
             )
 
     def list_clients(self) -> list[dict[str, Any]]:
@@ -712,28 +975,29 @@ class AppServices:
             name = " -> ".join(deployments[deployment_id]["server_name"] for deployment_id in ordered_ids)
 
         chain_id = new_id("chn")
-        token = secrets.token_urlsafe(14)
+        token = secrets.token_urlsafe(24)
         client_uuid = str(uuid.uuid4())
         stamp = now_iso()
-        self.db.execute(
-            """
-            INSERT INTO proxy_chains (
-                id, name, token, client_uuid, status, share_link, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (chain_id, name, token, client_uuid, "planned", "", stamp, stamp),
-        )
-        self.db.executemany(
-            """
-            INSERT INTO proxy_chain_nodes (
-                chain_id, deployment_id, position, created_at
-            ) VALUES (?, ?, ?, ?)
-            """,
-            [
-                (chain_id, deployment_id, index, stamp)
-                for index, deployment_id in enumerate(ordered_ids)
-            ],
-        )
+        with self.db.transaction():
+            self.db.execute(
+                """
+                INSERT INTO proxy_chains (
+                    id, name, token, client_uuid, status, share_link, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (chain_id, name, token, client_uuid, "planned", "", stamp, stamp),
+            )
+            self.db.executemany(
+                """
+                INSERT INTO proxy_chain_nodes (
+                    chain_id, deployment_id, position, created_at
+                ) VALUES (?, ?, ?, ?)
+                """,
+                [
+                    (chain_id, deployment_id, index, stamp)
+                    for index, deployment_id in enumerate(ordered_ids)
+                ],
+            )
         return self.get_proxy_chain(chain_id)
 
     def get_proxy_chain(self, chain_id: str) -> dict[str, Any]:
@@ -743,50 +1007,87 @@ class AppServices:
         return rows[0]
 
     def delete_proxy_chain(self, chain_id: str) -> dict[str, Any]:
+        self._assert_not_busy("chain", chain_id)
         logs = self._cleanup_proxy_chain_services(chain_id)
         self.db.execute("DELETE FROM proxy_chains WHERE id = ?", (chain_id,))
         return {"deleted": chain_id, "remoteLogs": logs[-20:]}
 
+    def rotate_proxy_chain_token(self, chain_id: str) -> dict[str, Any]:
+        self.get_proxy_chain(chain_id)
+        self._assert_not_busy("chain", chain_id)
+        self.db.execute(
+            "UPDATE proxy_chains SET token = ?, updated_at = ? WHERE id = ?",
+            (secrets.token_urlsafe(24), now_iso(), chain_id),
+        )
+        return self.get_proxy_chain(chain_id)
+
     def start_proxy_chain_deployment(self, chain_id: str) -> dict[str, Any]:
         self.get_proxy_chain(chain_id)
+        nodes = self._proxy_chain_full_nodes(chain_id)
         job_id = new_id("job")
         stamp = now_iso()
-        self.db.execute(
-            """
-            INSERT INTO jobs (
-                id, type, chain_id, status, logs, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                job_id,
-                "deploy_proxy_chain",
-                chain_id,
-                "running",
-                json.dumps([], ensure_ascii=False),
-                stamp,
-                stamp,
-            ),
-        )
-        self.db.execute(
-            """
-            UPDATE proxy_chains
-            SET status = ?, last_error = NULL, updated_at = ?
-            WHERE id = ?
-            """,
-            ("deploying", stamp, chain_id),
-        )
+        resources = [("chain", chain_id)] + [
+            ("server", server_id)
+            for server_id in dict.fromkeys(node["server_id"] for node in nodes)
+        ]
+        with self.db.transaction():
+            self._acquire_operation_locks(job_id, resources)
+            self.db.execute(
+                """
+                INSERT INTO jobs (
+                    id, type, chain_id, status, logs, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    job_id,
+                    "deploy_proxy_chain",
+                    chain_id,
+                    "running",
+                    json.dumps([], ensure_ascii=False),
+                    stamp,
+                    stamp,
+                ),
+            )
+            self.db.execute(
+                """
+                UPDATE proxy_chains
+                SET status = ?, last_error = NULL, updated_at = ?
+                WHERE id = ?
+                """,
+                ("deploying", stamp, chain_id),
+            )
         thread = threading.Thread(
             target=self._run_proxy_chain_deployment,
             args=(job_id, chain_id),
             daemon=True,
         )
-        thread.start()
+        self._track_worker(thread)
+        try:
+            thread.start()
+        except Exception:
+            with self._workers_lock:
+                self._workers.discard(thread)
+            with self.db.transaction():
+                self._release_operation_locks(job_id)
+                self._finish_job(job_id, "failed", "could not start proxy-chain worker")
+                self.db.execute(
+                    "UPDATE proxy_chains SET status = 'failed', last_error = ?, updated_at = ? WHERE id = ?",
+                    ("Could not start proxy-chain worker.", now_iso(), chain_id),
+                )
+            raise
         return {
             "job": self.get_job(job_id),
             "chain": self.get_proxy_chain(chain_id),
         }
 
     def _run_proxy_chain_deployment(self, job_id: str, chain_id: str) -> None:
+        try:
+            self._run_proxy_chain_deployment_locked(job_id, chain_id)
+        finally:
+            self._release_operation_locks(job_id)
+            self._forget_current_worker()
+
+    def _run_proxy_chain_deployment_locked(self, job_id: str, chain_id: str) -> None:
         try:
             chain = self.get_proxy_chain(chain_id)
             nodes = self._proxy_chain_full_nodes(chain_id)
@@ -1206,7 +1507,7 @@ echo "Service $SERVICE_NAME is active"
         }
         tag = quote(name)
         return (
-            f"vless://{entry['node_client_uuid']}@{entry['host']}:{entry['inbound_port']}"
+            f"vless://{entry['node_client_uuid']}@{url_host(entry['host'])}:{entry['inbound_port']}"
             f"?{urlencode(params)}#{tag}"
         )
 
@@ -1332,15 +1633,26 @@ echo "Removed $SERVICE_NAME"
         deployment = self.get_deployment(deployment_id)
         client_id = new_id("cli")
         client_uuid = str(uuid.uuid4())
-        quota_gb = float(payload.get("quotaGb", 100))
+        try:
+            quota_gb = float(payload.get("quotaGb", 100))
+        except (TypeError, ValueError) as exc:
+            raise ValueError("quotaGb must be a number") from exc
+        if not math.isfinite(quota_gb) or not 0 <= quota_gb <= 1_000_000:
+            raise ValueError("quotaGb must be between 0 and 1000000")
         quota_bytes = int(quota_gb * 1024 * 1024 * 1024)
         expires_at = str(payload.get("expiresAt", "")).strip()
         if not expires_at:
             expires_at = (datetime.now(timezone.utc) + timedelta(days=30)).date().isoformat()
+        try:
+            date.fromisoformat(expires_at)
+        except ValueError as exc:
+            raise ValueError("expiresAt must be an ISO date (YYYY-MM-DD)") from exc
         name = require_text(payload, "name")
+        if len(name) > 128:
+            raise ValueError("name must be 128 characters or fewer")
         tag = quote(name)
         share_link = (
-            f"vless://{client_uuid}@{deployment['host']}:{deployment['proxy_port']}"
+            f"vless://{client_uuid}@{url_host(deployment['host'])}:{deployment['proxy_port']}"
             f"?security=reality&type=tcp&flow=xtls-rprx-vision#{tag}"
         )
         sub_id = client_id[-12:]
@@ -1363,51 +1675,52 @@ echo "Removed $SERVICE_NAME"
             if links:
                 share_link = links[0]
         stamp = now_iso()
-        self.db.execute(
-            """
-            INSERT INTO clients (
-                id, deployment_id, name, uuid, quota_bytes, used_bytes,
-                expires_at, enabled, share_link, subscription_url,
-                created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                client_id,
-                deployment_id,
-                name,
-                client_uuid,
-                quota_bytes,
-                0,
-                expires_at,
-                1,
-                share_link,
-                deployment["subscription_url"],
-                stamp,
-                stamp,
-            ),
-        )
-        self.db.execute(
-            """
-            INSERT OR IGNORE INTO subscription_nodes (
-                subscription_id, node_client_id, created_at
-            ) VALUES (?, ?, ?)
-            """,
-            (deployment_id, client_id, stamp),
-        )
-        self.db.execute(
-            """
-            INSERT OR IGNORE INTO subscription_entries (
-                subscription_id, node_client_id, quota_bytes, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?)
-            """,
-            (f"sub_{deployment_id}", client_id, quota_bytes, stamp, stamp),
-        )
+        with self.db.transaction():
+            self.db.execute(
+                """
+                INSERT INTO clients (
+                    id, deployment_id, name, uuid, quota_bytes, used_bytes,
+                    expires_at, enabled, share_link, subscription_url,
+                    created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    client_id,
+                    deployment_id,
+                    name,
+                    client_uuid,
+                    quota_bytes,
+                    0,
+                    expires_at,
+                    1,
+                    share_link,
+                    deployment["subscription_url"],
+                    stamp,
+                    stamp,
+                ),
+            )
+            self.db.execute(
+                """
+                INSERT OR IGNORE INTO subscription_nodes (
+                    subscription_id, node_client_id, created_at
+                ) VALUES (?, ?, ?)
+                """,
+                (deployment_id, client_id, stamp),
+            )
+            self.db.execute(
+                """
+                INSERT OR IGNORE INTO subscription_entries (
+                    subscription_id, node_client_id, quota_bytes, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?)
+                """,
+                (f"sub_{deployment_id}", client_id, quota_bytes, stamp, stamp),
+            )
         return self.get_client(client_id)
 
     def _default_share_link(self, deployment: dict[str, Any], client_uuid: str, name: str) -> str:
         tag = quote(name)
         return (
-            f"vless://{client_uuid}@{deployment['host']}:{deployment['proxy_port']}"
+            f"vless://{client_uuid}@{url_host(deployment['host'])}:{deployment['proxy_port']}"
             f"?security=reality&type=tcp&flow=xtls-rprx-vision#{tag}"
         )
 
@@ -1430,11 +1743,20 @@ echo "Removed $SERVICE_NAME"
         name = str(payload.get("name", client["name"])).strip()
         if not name:
             raise ValueError("name is required")
-        quota_gb = float(payload.get("quotaGb", client["quota_bytes"] / 1024 / 1024 / 1024))
-        if quota_gb < 0:
-            raise ValueError("quotaGb must be zero or greater")
+        try:
+            quota_gb = float(
+                payload.get("quotaGb", client["quota_bytes"] / 1024 / 1024 / 1024)
+            )
+        except (TypeError, ValueError) as exc:
+            raise ValueError("quotaGb must be a number") from exc
+        if not math.isfinite(quota_gb) or not 0 <= quota_gb <= 1_000_000:
+            raise ValueError("quotaGb must be between 0 and 1000000")
         quota_bytes = int(quota_gb * 1024 * 1024 * 1024)
         expires_at = str(payload.get("expiresAt", client["expires_at"]))
+        try:
+            date.fromisoformat(expires_at)
+        except ValueError as exc:
+            raise ValueError("expiresAt must be an ISO date (YYYY-MM-DD)") from exc
         enabled = 1 if bool(payload.get("enabled", client["enabled"])) else 0
         share_link = client["share_link"]
         if (
@@ -1497,6 +1819,7 @@ echo "Removed $SERVICE_NAME"
 
     def delete_deployment(self, deployment_id: str) -> dict[str, Any]:
         deployment = self.get_deployment(deployment_id)
+        self._assert_not_busy("server", deployment["server_id"])
         chain_logs = self._cleanup_proxy_chains_for_deployments([deployment_id])
         other_native = self.db.query_one(
             """
@@ -1517,6 +1840,7 @@ echo "Removed $SERVICE_NAME"
         }
 
     def delete_server(self, server_id: str) -> dict[str, Any]:
+        self._assert_not_busy("server", server_id)
         server = self._get_server_row(server_id)
         deployments = self.db.query_all(
             "SELECT id, install_method FROM deployments WHERE server_id = ?",
@@ -1528,17 +1852,19 @@ echo "Removed $SERVICE_NAME"
         remote_logs: list[str] = []
         if any(row["install_method"] == "native" for row in deployments):
             remote_logs = self._uninstall_remote_xui(server)
-        for deployment in deployments:
-            self._delete_default_subscription(deployment["id"])
-        self.db.execute("DELETE FROM servers WHERE id = ?", (server_id,))
+        with self.db.transaction():
+            for deployment in deployments:
+                self._delete_default_subscription(deployment["id"])
+            self.db.execute("DELETE FROM servers WHERE id = ?", (server_id,))
         return {
             "deleted": server_id,
             "remoteLogs": (chain_logs + remote_logs)[-20:],
         }
 
     def _delete_deployment_records(self, deployment_id: str) -> None:
-        self._delete_default_subscription(deployment_id)
-        self.db.execute("DELETE FROM deployments WHERE id = ?", (deployment_id,))
+        with self.db.transaction():
+            self._delete_default_subscription(deployment_id)
+            self.db.execute("DELETE FROM deployments WHERE id = ?", (deployment_id,))
 
     def _delete_default_subscription(self, deployment_id: str) -> None:
         self.db.execute(
@@ -1626,7 +1952,7 @@ echo "3x-ui cleanup completed"
         stamp = now_iso()
         subscription_id = new_id("sub")
         name = str(payload.get("name", "")).strip() or "新订阅"
-        token = secrets.token_urlsafe(14)
+        token = secrets.token_urlsafe(24)
         self.db.execute(
             """
             INSERT INTO subscriptions (
@@ -1728,37 +2054,46 @@ echo "3x-ui cleanup completed"
             )
 
         stamp = now_iso()
-        if name:
+        with self.db.transaction():
+            if name:
+                self.db.execute(
+                    "UPDATE subscriptions SET name = ?, updated_at = ? WHERE id = ?",
+                    (name, stamp, subscription_id),
+                )
+            else:
+                self.db.execute(
+                    "UPDATE subscriptions SET updated_at = ? WHERE id = ?",
+                    (stamp, subscription_id),
+                )
             self.db.execute(
-                "UPDATE subscriptions SET name = ?, updated_at = ? WHERE id = ?",
-                (name, stamp, subscription_id),
+                "DELETE FROM subscription_entries WHERE subscription_id = ?",
+                (subscription_id,),
             )
-        else:
-            self.db.execute(
-                "UPDATE subscriptions SET updated_at = ? WHERE id = ?",
-                (stamp, subscription_id),
+            self.db.executemany(
+                """
+                INSERT INTO subscription_entries (
+                    subscription_id, node_client_id, quota_bytes, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?)
+                """,
+                [
+                    (subscription_id, node_id, quota_bytes, stamp, stamp)
+                    for node_id, quota_bytes in selected
+                ],
             )
-        self.db.execute(
-            "DELETE FROM subscription_entries WHERE subscription_id = ?",
-            (subscription_id,),
-        )
-        self.db.executemany(
-            """
-            INSERT INTO subscription_entries (
-                subscription_id, node_client_id, quota_bytes, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?)
-            """,
-            [
-                (subscription_id, node_id, quota_bytes, stamp, stamp)
-                for node_id, quota_bytes in selected
-            ],
-        )
         return self.get_managed_subscription_config(subscription_id)
 
     def delete_subscription(self, subscription_id: str) -> dict[str, str]:
         self.get_subscription(subscription_id)
         self.db.execute("DELETE FROM subscriptions WHERE id = ?", (subscription_id,))
         return {"deleted": subscription_id}
+
+    def rotate_subscription_token(self, subscription_id: str) -> dict[str, Any]:
+        self.get_subscription(subscription_id)
+        self.db.execute(
+            "UPDATE subscriptions SET token = ?, updated_at = ? WHERE id = ?",
+            (secrets.token_urlsafe(24), now_iso(), subscription_id),
+        )
+        return self.get_subscription(subscription_id)
 
     def render_managed_subscription(self, token: str) -> str:
         subscription = self.db.query_one(
@@ -1826,23 +2161,27 @@ echo "3x-ui cleanup completed"
                 raise ValueError("selected node not found")
 
         stamp = now_iso()
-        self.db.execute("DELETE FROM subscription_nodes WHERE subscription_id = ?", (deployment_id,))
-        self.db.executemany(
-            """
-            INSERT INTO subscription_nodes (
-                subscription_id, node_client_id, created_at
-            ) VALUES (?, ?, ?)
-            """,
-            [(deployment_id, node_id, stamp) for node_id in ordered_ids],
-        )
-        self.db.execute(
-            """
-            UPDATE deployments
-            SET subscription_configured = 1, updated_at = ?
-            WHERE id = ?
-            """,
-            (stamp, deployment_id),
-        )
+        with self.db.transaction():
+            self.db.execute(
+                "DELETE FROM subscription_nodes WHERE subscription_id = ?",
+                (deployment_id,),
+            )
+            self.db.executemany(
+                """
+                INSERT INTO subscription_nodes (
+                    subscription_id, node_client_id, created_at
+                ) VALUES (?, ?, ?)
+                """,
+                [(deployment_id, node_id, stamp) for node_id in ordered_ids],
+            )
+            self.db.execute(
+                """
+                UPDATE deployments
+                SET subscription_configured = 1, updated_at = ?
+                WHERE id = ?
+                """,
+                (stamp, deployment_id),
+            )
         return self.get_subscription_config(deployment_id)
 
     def render_deployment_subscription(self, deployment_id: str) -> str:

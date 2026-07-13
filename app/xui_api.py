@@ -20,6 +20,7 @@ class XuiApiClient:
         password: str,
         api_token: str = "",
         timeout: int = 20,
+        verify_tls: bool = True,
     ):
         self.base_url = base_url.rstrip("/") + "/"
         self.username = username
@@ -28,8 +29,11 @@ class XuiApiClient:
         self.timeout = timeout
         self.cookie_jar = CookieJar()
         context = ssl.create_default_context()
-        context.check_hostname = False
-        context.verify_mode = ssl.CERT_NONE
+        if not verify_tls:
+            # Only use this while the connection itself is carried inside the
+            # authenticated SSH tunnel to 127.0.0.1.
+            context.check_hostname = False
+            context.verify_mode = ssl.CERT_NONE
         self.opener = build_opener(HTTPCookieProcessor(self.cookie_jar), HTTPSHandler(context=context))
         self._csrf_token = ""
 

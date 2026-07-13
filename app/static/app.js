@@ -13,8 +13,20 @@ const state = {
 const $ = (selector) => document.querySelector(selector);
 const $$ = (selector) => Array.from(document.querySelectorAll(selector));
 
+function csrfToken() {
+  const cookies = document.cookie.split(";").map((item) => item.trim());
+  const entry = cookies.find((item) =>
+    item.startsWith("myn_csrf=") || item.startsWith("__Host-myn_csrf="),
+  );
+  return entry ? decodeURIComponent(entry.split("=", 2)[1]) : "";
+}
+
 async function api(path, options = {}) {
   const headers = { "Content-Type": "application/json", ...(options.headers || {}) };
+  const method = String(options.method || "GET").toUpperCase();
+  if (!["GET", "HEAD", "OPTIONS"].includes(method)) {
+    headers["X-CSRF-Token"] = csrfToken();
+  }
   const response = await fetch(path, {
     credentials: "same-origin",
     ...options,
@@ -32,10 +44,8 @@ async function api(path, options = {}) {
 }
 
 async function logout() {
-  await fetch("/api/auth/logout", {
+  await api("/api/auth/logout", {
     method: "POST",
-    credentials: "same-origin",
-    headers: { "Content-Type": "application/json" },
     body: "{}",
   });
   window.location.href = "/login";
@@ -60,12 +70,24 @@ function toast(message) {
 }
 
 function setSection(id) {
+  const meta = {
+    overview: ["CONTROL CENTER", "总览"],
+    subscriptions: ["DISTRIBUTION", "订阅"],
+    servers: ["INFRASTRUCTURE", "服务器"],
+    deployments: ["PROVISIONING", "部署"],
+    chains: ["ROUTING", "代理链"],
+    clients: ["ACCESS", "客户端"],
+    logs: ["ACTIVITY", "任务日志"],
+  };
   $$(".section").forEach((section) => {
     section.classList.toggle("is-active", section.id === id);
   });
   $$(".nav-item").forEach((button) => {
     button.classList.toggle("is-active", button.dataset.section === id);
   });
+  const [eyebrow, title] = meta[id] || meta.overview;
+  $("#pageEyebrow").textContent = eyebrow;
+  $("#pageTitle").textContent = title;
   $("#topAddServerBtn").hidden = id !== "servers";
 }
 
@@ -84,7 +106,21 @@ function statusBadge(status) {
     failed: "bad",
     planned: "warn",
   };
-  return `<span class="badge ${map[status] || ""}">${status || "new"}</span>`;
+  const labels = {
+    ready: "可用",
+    reachable: "可达",
+    enabled: "已启用",
+    success: "已完成",
+    deploying: "部署中",
+    provisioning: "配置中",
+    running: "运行中",
+    auth_failed: "认证失败",
+    unreachable: "不可达",
+    disabled: "已停用",
+    failed: "失败",
+    planned: "待部署",
+  };
+  return `<span class="badge ${map[status] || ""}">${escapeHtml(labels[status] || status || "新建")}</span>`;
 }
 
 function bytes(value) {
@@ -181,10 +217,13 @@ function serverItem(server, options = {}) {
         ${statusBadge(server.status)}
       </div>
       <div class="meta">认证：${escapeHtml(server.auth_type)} · 密钥：${escapeHtml(server.secret_label)}</div>
+      ${server.host_key_fingerprint ? `<div class="meta">SSH 指纹：<span class="mono">${escapeHtml(server.host_key_fingerprint)}</span> · ${server.host_key_trusted ? "已信任" : "等待核验"}</div>` : ""}
       <div class="item-actions">
         <button class="secondary" data-test-server="${server.id}">测试连接</button>
+        ${server.host_key_fingerprint && !server.host_key_trusted ? `<button class="primary" data-approve-host-key="${server.id}">核验后信任</button>` : ""}
+        ${server.host_key_trusted ? `<button class="ghost" data-reset-host-key="${server.id}">重置指纹</button>` : ""}
         <button class="primary" data-deploy-server="${server.id}">部署</button>
-        ${options.allowDelete ? `<button class="ghost" data-delete-server="${server.id}">删除</button>` : ""}
+        ${options.allowDelete ? `<button class="danger" data-delete-server="${server.id}">删除</button>` : ""}
       </div>
     </article>
   `;
@@ -227,8 +266,9 @@ function chainItem(chain) {
           ${chain.status === "ready" ? "重新下发" : "下发远端"}
         </button>
         <button class="secondary" data-copy="${escapeHtml(subscriptionUrl)}">复制订阅</button>
+        <button class="secondary" data-rotate-chain-token="${chain.id}">轮换订阅令牌</button>
         ${chain.share_link ? `<button class="secondary" data-copy="${escapeHtml(chain.share_link)}">复制入口节点</button>` : ""}
-        <button class="ghost" data-delete-chain="${chain.id}">删除</button>
+        <button class="danger" data-delete-chain="${chain.id}">删除</button>
       </div>
     </article>
   `;
@@ -328,16 +368,13 @@ function deploymentItem(deployment, options = {}) {
         </div>
         ${statusBadge(deployment.status)}
       </div>
-      <div class="meta">面板：<span class="mono">${escapeHtml(deployment.panel_url || `${deployment.host}:${deployment.panel_port}${deployment.panel_path}`)}</span></div>
-      <div class="meta">账号：<span class="mono">${escapeHtml(deployment.panel_username)}</span> / <span class="mono">${escapeHtml(deployment.panel_password || "")}</span></div>
+      <div class="meta">面板：<span class="mono">127.0.0.1:${deployment.panel_port}${escapeHtml(deployment.panel_path)}</span>（仅 SSH 隧道）</div>
+      <div class="meta">面板账号由控制器加密保管；面板仅允许通过 SSH 隧道访问</div>
       <div class="meta">入站 ID：<span class="mono">${escapeHtml(deployment.xui_inbound_id || "未同步")}</span></div>
       <div class="meta">默认订阅：<span class="mono">${escapeHtml(subscriptionUrl)}</span></div>
       <div class="item-actions">
-        <button class="secondary" data-copy="${escapeHtml(deployment.panel_url || "")}">复制面板</button>
-        <button class="secondary" data-copy="${escapeHtml(deployment.panel_password || "")}">复制密码</button>
-        <button class="secondary" data-copy="${escapeHtml(deployment.api_token || "")}">复制 Token</button>
         <button class="ghost" data-section-jump="subscriptions">管理订阅</button>
-        ${options.allowDelete ? `<button class="ghost" data-delete-deployment="${deployment.id}">删除</button>` : ""}
+        ${options.allowDelete ? `<button class="danger" data-delete-deployment="${deployment.id}">删除</button>` : ""}
       </div>
     </article>
   `;
@@ -361,7 +398,8 @@ function subscriptionItem(subscription) {
       <div class="meta">节点总流量：${bytes(subscription.quota_bytes)}</div>
       <div class="item-actions">
         <button class="primary" data-edit-subscription="${subscription.id}">分发和调整</button>
-        <button class="ghost" data-delete-subscription="${subscription.id}">删除</button>
+        <button class="secondary" data-rotate-subscription-token="${subscription.id}">轮换令牌</button>
+        <button class="danger" data-delete-subscription="${subscription.id}">删除</button>
       </div>
     </article>
   `;
@@ -706,6 +744,27 @@ function bindEvents() {
       await refresh();
     }
 
+    if (target.dataset.approveHostKey) {
+      const server = state.servers.find((item) => item.id === target.dataset.approveHostKey);
+      if (!confirm(`请先通过 VPS 控制台核对 SSH 指纹：\n${server?.host_key_fingerprint || ""}\n\n确认完全一致后再信任。`)) return;
+      await api(`/api/servers/${target.dataset.approveHostKey}/host-key/approve`, {
+        method: "POST",
+        body: "{}",
+      });
+      toast("SSH 主机指纹已信任，请重新测试连接");
+      await refresh();
+    }
+
+    if (target.dataset.resetHostKey) {
+      if (!confirm("仅在 VPS 已确认重装或更换 SSH 主机密钥后重置。继续吗？")) return;
+      await api(`/api/servers/${target.dataset.resetHostKey}/host-key/reset`, {
+        method: "POST",
+        body: "{}",
+      });
+      toast("已清除 SSH 主机指纹，请重新测试并核验");
+      await refresh();
+    }
+
     if (target.dataset.deployServer) {
       setSection("deployments");
       $("#deployServerSelect").value = target.dataset.deployServer;
@@ -744,6 +803,16 @@ function bindEvents() {
       await refresh();
     }
 
+    if (target.dataset.rotateSubscriptionToken) {
+      if (!confirm("轮换后旧订阅链接会立即失效，继续吗？")) return;
+      await api(`/api/subscriptions/${target.dataset.rotateSubscriptionToken}/rotate-token`, {
+        method: "POST",
+        body: "{}",
+      });
+      toast("订阅令牌已轮换");
+      await refresh();
+    }
+
     if (target.dataset.deleteChain) {
       const chain = state.chains.find((item) => item.id === target.dataset.deleteChain);
       if (!confirm(`删除代理链 ${chain?.name || ""}？`)) return;
@@ -751,6 +820,16 @@ function bindEvents() {
         method: "DELETE",
       });
       toast("代理链已删除");
+      await refresh();
+    }
+
+    if (target.dataset.rotateChainToken) {
+      if (!confirm("轮换后旧代理链订阅链接会立即失效，继续吗？")) return;
+      await api(`/api/chains/${target.dataset.rotateChainToken}/rotate-token`, {
+        method: "POST",
+        body: "{}",
+      });
+      toast("代理链订阅令牌已轮换");
       await refresh();
     }
 
@@ -794,4 +873,11 @@ function bindEvents() {
 }
 
 bindEvents();
-refresh().catch((error) => toast(error.message));
+api("/api/auth/session")
+  .then((session) => {
+    const warning = $("#securityWarning");
+    warning.textContent = session.securityWarning || "";
+    warning.hidden = !session.securityWarning;
+    return refresh();
+  })
+  .catch((error) => toast(error.message));
