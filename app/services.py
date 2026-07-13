@@ -1974,6 +1974,8 @@ echo "Removed $SERVICE_NAME"
         )
         if not row:
             raise ValueError("proxy chain not found")
+        if not row["share_link"]:
+            raise ValueError("proxy chain is not ready")
         return base64.b64encode(row["share_link"].encode("utf-8")).decode("ascii")
 
     def _proxy_chain_nodes(self, chain_id: str) -> list[dict[str, Any]]:

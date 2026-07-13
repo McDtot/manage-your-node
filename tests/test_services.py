@@ -1,3 +1,5 @@
+import base64
+
 import pytest
 
 from app.database import Database
@@ -506,6 +508,24 @@ def test_proxy_chain_protocol_validation_and_legacy_default(services):
         CHAIN_PROTOCOL_VLESS_REALITY,
         CHAIN_PROTOCOL_VLESS_REALITY,
     ]
+
+
+def test_proxy_chain_subscription_is_unavailable_until_deployed(services):
+    deployment_ids = [
+        _create_ready_deployment(services, "entry", "203.0.113.21"),
+        _create_ready_deployment(services, "exit", "203.0.113.22"),
+    ]
+    chain = services.create_proxy_chain({"deploymentIds": deployment_ids})
+
+    with pytest.raises(ValueError, match="proxy chain is not ready"):
+        services.render_proxy_chain_subscription(chain["token"])
+
+    services.db.execute(
+        "UPDATE proxy_chains SET share_link = ? WHERE id = ?",
+        ("vless://ready-chain", chain["id"]),
+    )
+    rendered = services.render_proxy_chain_subscription(chain["token"])
+    assert base64.b64decode(rendered).decode("utf-8") == "vless://ready-chain"
 
 
 def test_ss2022_chain_install_script_opens_udp_firewall_rules(services):
