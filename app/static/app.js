@@ -151,17 +151,60 @@ function escapeHtml(value) {
     .replaceAll('"', "&quot;");
 }
 
-function copy(text) {
-  navigator.clipboard.writeText(text).then(
-    () => toast("已复制"),
-    () => toast("复制失败")
-  );
+function legacyCopy(text) {
+  const input = document.createElement("textarea");
+  input.value = text;
+  input.setAttribute("readonly", "");
+  input.style.position = "fixed";
+  input.style.left = "-9999px";
+  document.body.appendChild(input);
+  try {
+    input.select();
+    input.setSelectionRange(0, input.value.length);
+    return document.execCommand("copy");
+  } finally {
+    input.remove();
+  }
+}
+
+async function copy(text) {
+  const value = String(text || "");
+  if (!value) {
+    toast("没有可复制的内容");
+    return;
+  }
+
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(value);
+    } else if (!legacyCopy(value)) {
+      throw new Error("clipboard unavailable");
+    }
+    toast("已复制");
+  } catch (_error) {
+    // Clipboard permissions can still be denied in a secure context.
+    try {
+      if (legacyCopy(value)) {
+        toast("已复制");
+        return;
+      }
+    } catch (_fallbackError) {
+      // Fall through to the actionable error below.
+    }
+    toast("复制失败，请长按链接手动复制");
+  }
 }
 
 function absoluteUrl(value) {
   const text = String(value || "");
   if (!text || /^https?:\/\//i.test(text)) return text;
   return `${window.location.origin}${text.startsWith("/") ? "" : "/"}${text}`;
+}
+
+function subscriptionUrlFor(value, format) {
+  const url = new URL(absoluteUrl(value));
+  url.searchParams.set("format", format);
+  return url.toString();
 }
 
 async function refresh() {
@@ -251,7 +294,9 @@ function renderChains() {
 }
 
 function chainItem(chain) {
-  const subscriptionUrl = absoluteUrl(chain.subscription_url);
+  const subscriptionUrl = subscriptionUrlFor(chain.subscription_url, "mihomo");
+  const base64SubscriptionUrl = subscriptionUrlFor(chain.subscription_url, "base64");
+  const subscriptionReady = Boolean(chain.share_link);
   const hopSummary = (chain.hops || [])
     .map((hop) => `${hop.fromServerName} — ${chainProtocolLabel(hop.protocol)} → ${hop.toServerName}`)
     .join(" · ");
@@ -267,13 +312,14 @@ function chainItem(chain) {
       <div class="meta">入口：${escapeHtml(chain.entry_server_name || "-")} · 出口：${escapeHtml(chain.exit_server_name || "-")}</div>
       ${hopSummary ? `<div class="chain-route-summary">${escapeHtml(hopSummary)}</div>` : ""}
       ${chain.last_error ? `<div class="meta bad-text">错误：${escapeHtml(chain.last_error)}</div>` : ""}
-      <div class="meta">订阅：<span class="mono">${escapeHtml(subscriptionUrl)}</span></div>
+      <div class="meta">Mihomo / Clash 订阅：<span class="mono">${subscriptionReady ? escapeHtml(subscriptionUrl) : "下发成功后可用"}</span></div>
       <div class="mono">${chain.share_link ? escapeHtml(chain.share_link) : "下发成功后生成入口节点链接"}</div>
       <div class="item-actions">
         <button class="primary" data-deploy-chain="${chain.id}">
           ${chain.status === "ready" ? "重新下发" : "下发远端"}
         </button>
-        <button class="secondary" data-copy="${escapeHtml(subscriptionUrl)}">复制订阅</button>
+        <button class="secondary" ${subscriptionReady ? `data-copy="${escapeHtml(subscriptionUrl)}"` : "disabled title=\"请先下发远端\""}>${subscriptionReady ? "复制 Mihomo / Clash 订阅" : "下发后可复制订阅"}</button>
+        ${subscriptionReady ? `<button class="secondary" data-copy="${escapeHtml(base64SubscriptionUrl)}">复制通用 Base64 订阅</button>` : ""}
         <button class="secondary" data-rotate-chain-token="${chain.id}">轮换订阅令牌</button>
         ${chain.share_link ? `<button class="secondary" data-copy="${escapeHtml(chain.share_link)}">复制入口节点</button>` : ""}
         <button class="danger" data-delete-chain="${chain.id}">删除</button>
@@ -626,13 +672,43 @@ function bindEvents() {
     const form = event.currentTarget;
     const data = formData(form);
     if (!data.serverId) return toast("请选择服务器");
-    data.installMethod = "native";
-    const result = await api(`/api/servers/${data.serverId}/deploy`, {
-      method: "POST",
-      body: JSON.stringify(data),
-    });
-    toast("部署任务已创建");
-    await pollJob(result.job.id);
+    const server = state.servers.find((item) => item.id === data.serverId);
+    if (!server) return toast("服务器不存在，请刷新后重试");
+    const existingDeployment = state.deployments.find(
+      (item) => item.server_id === server.id && item.install_method === "native",
+    );
+    if (existingDeployment) {
+      return toast("该服务器已有原生 3x-ui 部署记录，请先删除旧部署后再创建");
+    }
+    if (server.status !== "reachable") {
+      return toast("请先在服务器页面测试 SSH 连接");
+    }
+    if (!server.host_key_trusted) {
+      return toast(
+        server.host_key_fingerprint
+          ? "请先在服务器页面核验并信任 SSH 主机指纹"
+          : "请先在服务器页面测试连接并核验 SSH 主机指纹",
+      );
+    }
+
+    const button = form.querySelector('button[type="submit"]');
+    const originalText = button.textContent;
+    button.disabled = true;
+    button.textContent = "正在创建部署…";
+    try {
+      data.installMethod = "native";
+      const result = await api(`/api/servers/${data.serverId}/deploy`, {
+        method: "POST",
+        body: JSON.stringify(data),
+      });
+      toast("部署任务已创建");
+      await pollJob(result.job.id);
+    } catch (error) {
+      toast(error instanceof Error ? error.message : "创建部署失败");
+    } finally {
+      button.disabled = false;
+      button.textContent = originalText;
+    }
   });
 
   $("#clientForm").addEventListener("submit", async (event) => {

@@ -14,7 +14,9 @@ from contextlib import contextmanager
 from collections.abc import Iterator
 from datetime import date, datetime, time as datetime_time, timedelta, timezone
 from typing import Any
-from urllib.parse import quote, urlencode, urlparse
+from urllib.parse import parse_qs, quote, unquote, urlencode, urlparse
+
+import yaml
 
 from .database import Database
 from .provisioning import native_3xui_script, shell_quote
@@ -39,6 +41,116 @@ CHAIN_PROTOCOLS = {
 CHAIN_SS_METHOD = "2022-blake3-aes-256-gcm"
 MAX_JOB_LOG_ENTRIES = 2000
 MAX_JOB_LOG_LINE = 4096
+MIHOMO_SUBSCRIPTION_FORMATS = {"clash", "mihomo", "yaml"}
+BASE64_SUBSCRIPTION_FORMATS = {"base64", "v2ray"}
+
+
+def _mihomo_proxy_from_vless(
+    share_link: str,
+    index: int,
+    used_names: set[str],
+) -> dict[str, Any]:
+    parsed = urlparse(share_link)
+    if parsed.scheme.lower() != "vless":
+        raise ValueError("Mihomo subscriptions currently support VLESS links only")
+
+    client_uuid = unquote(parsed.username or "").strip()
+    server = parsed.hostname
+    try:
+        port = parsed.port
+    except ValueError as exc:
+        raise ValueError("invalid VLESS subscription port") from exc
+    if not client_uuid or not server or port is None:
+        raise ValueError("invalid VLESS subscription link")
+
+    query = {
+        key: values[-1]
+        for key, values in parse_qs(parsed.query, keep_blank_values=True).items()
+        if values
+    }
+    if query.get("security", "").lower() != "reality":
+        raise ValueError("Mihomo subscriptions currently require VLESS Reality links")
+    public_key = query.get("pbk", "").strip()
+    short_id = query.get("sid", "").strip()
+    if not public_key:
+        raise ValueError("VLESS Reality public key is missing")
+
+    base_name = unquote(parsed.fragment).strip() or f"节点 {index}"
+    name = base_name
+    suffix = 2
+    while name in used_names or name in {"AUTO", "DIRECT", "PROXY", "REJECT"}:
+        name = f"{base_name} {suffix}"
+        suffix += 1
+    used_names.add(name)
+
+    proxy: dict[str, Any] = {
+        "name": name,
+        "type": "vless",
+        "server": server,
+        "port": port,
+        "uuid": client_uuid,
+        "udp": True,
+    }
+    flow = query.get("flow", "").strip()
+    if flow:
+        proxy["flow"] = flow
+    proxy["packet-encoding"] = "xudp"
+    proxy["tls"] = True
+    server_name = query.get("sni", "").strip()
+    if server_name:
+        proxy["servername"] = server_name
+    fingerprint = query.get("fp", "").strip()
+    if fingerprint:
+        proxy["client-fingerprint"] = fingerprint
+    reality_opts = {"public-key": public_key}
+    if short_id:
+        reality_opts["short-id"] = short_id
+    proxy["reality-opts"] = reality_opts
+    proxy["encryption"] = ""
+    proxy["network"] = "tcp" if query.get("type", "tcp") in {"raw", "tcp"} else query["type"]
+    return proxy
+
+
+def _render_subscription_links(share_links: list[str], output_format: str = "base64") -> str:
+    normalized = str(output_format or "base64").strip().lower()
+    links = [str(link).strip() for link in share_links if str(link).strip()]
+    if normalized in BASE64_SUBSCRIPTION_FORMATS:
+        raw = "\n".join(links)
+        return base64.b64encode(raw.encode("utf-8")).decode("ascii")
+    if normalized not in MIHOMO_SUBSCRIPTION_FORMATS:
+        raise ValueError("unsupported subscription format; use mihomo or base64")
+
+    used_names: set[str] = set()
+    proxies = [
+        _mihomo_proxy_from_vless(link, index, used_names)
+        for index, link in enumerate(links, start=1)
+    ]
+    proxy_names = [proxy["name"] for proxy in proxies]
+    config: dict[str, Any] = {
+        "mode": "rule",
+        "log-level": "info",
+        "proxies": proxies,
+        "proxy-groups": [],
+        "rules": [],
+    }
+    if proxies:
+        config["proxy-groups"] = [
+            {
+                "name": "PROXY",
+                "type": "select",
+                "proxies": ["AUTO", "DIRECT", *proxy_names],
+            },
+            {
+                "name": "AUTO",
+                "type": "url-test",
+                "url": "https://www.gstatic.com/generate_204",
+                "interval": 300,
+                "tolerance": 50,
+                "proxies": proxy_names,
+            },
+        ]
+        config["rules"] = ["MATCH,PROXY"]
+    return yaml.safe_dump(config, allow_unicode=True, sort_keys=False)
 
 
 def _redact_native_install_log(line: str, panel_password: str) -> str:
@@ -1967,14 +2079,16 @@ echo "Removed $SERVICE_NAME"
             (chain_id,),
         )
 
-    def render_proxy_chain_subscription(self, token: str) -> str:
+    def render_proxy_chain_subscription(self, token: str, output_format: str = "base64") -> str:
         row = self.db.query_one(
             "SELECT share_link FROM proxy_chains WHERE token = ?",
             (token,),
         )
         if not row:
             raise ValueError("proxy chain not found")
-        return base64.b64encode(row["share_link"].encode("utf-8")).decode("ascii")
+        if not row["share_link"]:
+            raise ValueError("proxy chain is not ready")
+        return _render_subscription_links([row["share_link"]], output_format)
 
     def _proxy_chain_nodes(self, chain_id: str) -> list[dict[str, Any]]:
         return self.db.query_all(
@@ -2481,7 +2595,7 @@ echo "3x-ui cleanup completed"
         )
         return self.get_subscription(subscription_id)
 
-    def render_managed_subscription(self, token: str) -> str:
+    def render_managed_subscription(self, token: str, output_format: str = "base64") -> str:
         subscription = self.db.query_one(
             "SELECT id FROM subscriptions WHERE token = ?",
             (token,),
@@ -2498,8 +2612,8 @@ echo "3x-ui cleanup completed"
             """,
             (subscription["id"],),
         )
-        raw = "\n".join(row["share_link"] for row in rows if row.get("share_link"))
-        return base64.b64encode(raw.encode("utf-8")).decode("ascii")
+        links = [row["share_link"] for row in rows if row.get("share_link")]
+        return _render_subscription_links(links, output_format)
 
     def get_subscription_config(self, deployment_id: str) -> dict[str, Any]:
         deployment = self.get_deployment(deployment_id)
@@ -2570,7 +2684,11 @@ echo "3x-ui cleanup completed"
             )
         return self.get_subscription_config(deployment_id)
 
-    def render_deployment_subscription(self, deployment_id: str) -> str:
+    def render_deployment_subscription(
+        self,
+        deployment_id: str,
+        output_format: str = "base64",
+    ) -> str:
         self.get_deployment(deployment_id)
         rows = self.db.query_all(
             """
@@ -2582,8 +2700,8 @@ echo "3x-ui cleanup completed"
             """,
             (deployment_id,),
         )
-        raw = "\n".join(row["share_link"] for row in rows if row.get("share_link"))
-        return base64.b64encode(raw.encode("utf-8")).decode("ascii")
+        links = [row["share_link"] for row in rows if row.get("share_link")]
+        return _render_subscription_links(links, output_format)
 
     def get_job(self, job_id: str) -> dict[str, Any]:
         row = self.db.query_one("SELECT * FROM jobs WHERE id = ?", (job_id,))
