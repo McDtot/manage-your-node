@@ -127,7 +127,7 @@ Compose 默认把端口发布到宿主机 `0.0.0.0:8787`；密钥通过 Docker s
 - 客户端到入口固定为 `VLESS + REALITY`；节点间默认使用 `Shadowsocks 2022`，真正跨境的节点间链路可切回 Reality
 - SS2022 使用 `2022-blake3-aes-256-gcm` 与逐跳独立密钥；密钥经 `APP_SECRET` 加密存库，不下发给客户端
 - 固定发布包内的 Xray 目前可以运行 SS2022，但已输出未来可能移除 Shadowsocks 的兼容性警告；新建链路时可逐跳选择 Reality
-- 订阅 `/sub/chains/{token}` 返回入口链接  
+- 订阅 `/sub/chains/{token}?format=mihomo` 返回可直接导入 Mihomo / Clash 的 YAML；`format=base64` 返回传统 Base64 入口链接。无参数时会根据客户端 User-Agent 自动选择，其他客户端默认保持 Base64 兼容。
 
 链路不改写 3x-ui 主配置，而是在每台机上装独立服务：
 

@@ -201,6 +201,12 @@ function absoluteUrl(value) {
   return `${window.location.origin}${text.startsWith("/") ? "" : "/"}${text}`;
 }
 
+function subscriptionUrlFor(value, format) {
+  const url = new URL(absoluteUrl(value));
+  url.searchParams.set("format", format);
+  return url.toString();
+}
+
 async function refresh() {
   const [summary, servers, deployments, subscriptions, chains, clients] = await Promise.all([
     api("/api/summary"),
@@ -288,7 +294,8 @@ function renderChains() {
 }
 
 function chainItem(chain) {
-  const subscriptionUrl = absoluteUrl(chain.subscription_url);
+  const subscriptionUrl = subscriptionUrlFor(chain.subscription_url, "mihomo");
+  const base64SubscriptionUrl = subscriptionUrlFor(chain.subscription_url, "base64");
   const subscriptionReady = Boolean(chain.share_link);
   const hopSummary = (chain.hops || [])
     .map((hop) => `${hop.fromServerName} — ${chainProtocolLabel(hop.protocol)} → ${hop.toServerName}`)
@@ -305,13 +312,14 @@ function chainItem(chain) {
       <div class="meta">入口：${escapeHtml(chain.entry_server_name || "-")} · 出口：${escapeHtml(chain.exit_server_name || "-")}</div>
       ${hopSummary ? `<div class="chain-route-summary">${escapeHtml(hopSummary)}</div>` : ""}
       ${chain.last_error ? `<div class="meta bad-text">错误：${escapeHtml(chain.last_error)}</div>` : ""}
-      <div class="meta">订阅：<span class="mono">${subscriptionReady ? escapeHtml(subscriptionUrl) : "下发成功后可用"}</span></div>
+      <div class="meta">Mihomo / Clash 订阅：<span class="mono">${subscriptionReady ? escapeHtml(subscriptionUrl) : "下发成功后可用"}</span></div>
       <div class="mono">${chain.share_link ? escapeHtml(chain.share_link) : "下发成功后生成入口节点链接"}</div>
       <div class="item-actions">
         <button class="primary" data-deploy-chain="${chain.id}">
           ${chain.status === "ready" ? "重新下发" : "下发远端"}
         </button>
-        <button class="secondary" ${subscriptionReady ? `data-copy="${escapeHtml(subscriptionUrl)}"` : "disabled title=\"请先下发远端\""}>${subscriptionReady ? "复制订阅" : "下发后可复制订阅"}</button>
+        <button class="secondary" ${subscriptionReady ? `data-copy="${escapeHtml(subscriptionUrl)}"` : "disabled title=\"请先下发远端\""}>${subscriptionReady ? "复制 Mihomo / Clash 订阅" : "下发后可复制订阅"}</button>
+        ${subscriptionReady ? `<button class="secondary" data-copy="${escapeHtml(base64SubscriptionUrl)}">复制通用 Base64 订阅</button>` : ""}
         <button class="secondary" data-rotate-chain-token="${chain.id}">轮换订阅令牌</button>
         ${chain.share_link ? `<button class="secondary" data-copy="${escapeHtml(chain.share_link)}">复制入口节点</button>` : ""}
         <button class="danger" data-delete-chain="${chain.id}">删除</button>

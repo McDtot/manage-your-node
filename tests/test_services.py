@@ -1,6 +1,7 @@
 import base64
 
 import pytest
+import yaml
 
 from app.database import Database
 from app.security import SecretBox
@@ -526,6 +527,55 @@ def test_proxy_chain_subscription_is_unavailable_until_deployed(services):
     )
     rendered = services.render_proxy_chain_subscription(chain["token"])
     assert base64.b64decode(rendered).decode("utf-8") == "vless://ready-chain"
+
+
+def test_proxy_chain_subscription_renders_mihomo_yaml(services):
+    deployment_ids = [
+        _create_ready_deployment(services, "entry-yaml", "203.0.113.31"),
+        _create_ready_deployment(services, "exit-yaml", "203.0.113.32"),
+    ]
+    chain = services.create_proxy_chain({"deploymentIds": deployment_ids})
+    share_link = (
+        "vless://11111111-2222-3333-4444-555555555555@203.0.113.31:443"
+        "?security=reality&type=tcp&flow=xtls-rprx-vision"
+        "&pbk=dE8nfT3BBGpvTndPFXrdC3bSRHHQf5veZBKF31ZbWeo"
+        "&fp=chrome&sni=cover.example&sid=a1b2c3d4#测试代理链"
+    )
+    services.db.execute(
+        "UPDATE proxy_chains SET share_link = ? WHERE id = ?",
+        (share_link, chain["id"]),
+    )
+
+    config = yaml.safe_load(services.render_proxy_chain_subscription(chain["token"], "mihomo"))
+    proxy = config["proxies"][0]
+    assert proxy == {
+        "name": "测试代理链",
+        "type": "vless",
+        "server": "203.0.113.31",
+        "port": 443,
+        "uuid": "11111111-2222-3333-4444-555555555555",
+        "udp": True,
+        "flow": "xtls-rprx-vision",
+        "packet-encoding": "xudp",
+        "tls": True,
+        "servername": "cover.example",
+        "client-fingerprint": "chrome",
+        "reality-opts": {
+            "public-key": "dE8nfT3BBGpvTndPFXrdC3bSRHHQf5veZBKF31ZbWeo",
+            "short-id": "a1b2c3d4",
+        },
+        "encryption": "",
+        "network": "tcp",
+    }
+    assert config["proxy-groups"][0]["proxies"] == [
+        "AUTO",
+        "DIRECT",
+        "测试代理链",
+    ]
+    assert config["rules"] == ["MATCH,PROXY"]
+
+    with pytest.raises(ValueError, match="unsupported subscription format"):
+        services.render_proxy_chain_subscription(chain["token"], "sing-box")
 
 
 def test_ss2022_chain_install_script_opens_udp_firewall_rules(services):

@@ -1,3 +1,6 @@
+import base64
+
+import yaml
 from starlette.testclient import TestClient
 
 from app.config import load_settings
@@ -111,3 +114,37 @@ def test_public_http_warning_is_returned_to_web_ui(monkeypatch, tmp_path):
     assert response.status_code == 200
     session = client.get("/api/auth/session").json()
     assert "HTTPS 域名" in session["securityWarning"]
+
+
+def test_chain_subscription_supports_mihomo_and_base64_formats(monkeypatch, tmp_path):
+    client, db = _client(monkeypatch, tmp_path)
+    share_link = (
+        "vless://11111111-2222-3333-4444-555555555555@203.0.113.41:443"
+        "?security=reality&type=tcp&flow=xtls-rprx-vision"
+        "&pbk=dE8nfT3BBGpvTndPFXrdC3bSRHHQf5veZBKF31ZbWeo"
+        "&fp=chrome&sni=cover.example&sid=01020304#chain"
+    )
+    db.execute(
+        """
+        INSERT INTO proxy_chains (
+            id, name, token, client_uuid, status, share_link, created_at, updated_at
+        ) VALUES ('chain-yaml', 'chain', 'yaml-token', 'client-id', 'ready', ?, 'now', 'now')
+        """,
+        (share_link,),
+    )
+
+    mihomo = client.get("/sub/chains/yaml-token?format=mihomo")
+    assert mihomo.status_code == 200
+    assert mihomo.headers["content-type"].startswith("application/yaml")
+    assert yaml.safe_load(mihomo.text)["proxies"][0]["type"] == "vless"
+
+    detected = client.get(
+        "/sub/chains/yaml-token",
+        headers={"User-Agent": "mihomo/1.19.0"},
+    )
+    assert detected.headers["content-type"].startswith("application/yaml")
+    assert yaml.safe_load(detected.text)["proxy-groups"][0]["name"] == "PROXY"
+
+    legacy = client.get("/sub/chains/yaml-token?format=base64")
+    assert legacy.headers["content-type"].startswith("text/plain")
+    assert base64.b64decode(legacy.text).decode("utf-8") == share_link

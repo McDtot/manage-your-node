@@ -220,11 +220,16 @@ async def _read_payload(request: Request) -> dict:
     return payload
 
 
-async def _service_response(func, status_code: int = 200, text: bool = False) -> Response:  # noqa: ANN001
+async def _service_response(
+    func,
+    status_code: int = 200,
+    text: bool = False,
+    media_type: str | None = None,
+) -> Response:  # noqa: ANN001
     try:
         value = await run_in_threadpool(func)
         if text:
-            return PlainTextResponse(value, status_code=status_code)
+            return PlainTextResponse(value, status_code=status_code, media_type=media_type)
         return JSONResponse(value, status_code=status_code)
     except ValueError as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
@@ -357,6 +362,20 @@ def _get_service(request: Request) -> AppServices:
     return request.app.state.services
 
 
+def _subscription_output_format(request: Request) -> str:
+    requested = request.query_params.get("format", "").strip().lower()
+    if requested:
+        return requested
+    user_agent = request.headers.get("user-agent", "").lower()
+    if "mihomo" in user_agent or "clash" in user_agent:
+        return "mihomo"
+    return "base64"
+
+
+def _subscription_media_type(output_format: str) -> str:
+    return "application/yaml" if output_format in {"clash", "mihomo", "yaml"} else "text/plain"
+
+
 async def summary(request: Request) -> Response:
     return await _service_response(_get_service(request).summary)
 
@@ -408,17 +427,32 @@ async def get_job(request: Request) -> Response:
 
 async def render_subscription(request: Request) -> Response:
     token = request.path_params["token"]
-    return await _service_response(lambda: _get_service(request).render_managed_subscription(token), text=True)
+    output_format = _subscription_output_format(request)
+    return await _service_response(
+        lambda: _get_service(request).render_managed_subscription(token, output_format),
+        text=True,
+        media_type=_subscription_media_type(output_format),
+    )
 
 
 async def render_deployment_subscription(request: Request) -> Response:
     token = request.path_params["token"]
-    return await _service_response(lambda: _get_service(request).render_deployment_subscription(token), text=True)
+    output_format = _subscription_output_format(request)
+    return await _service_response(
+        lambda: _get_service(request).render_deployment_subscription(token, output_format),
+        text=True,
+        media_type=_subscription_media_type(output_format),
+    )
 
 
 async def render_chain_subscription(request: Request) -> Response:
     token = request.path_params["token"]
-    return await _service_response(lambda: _get_service(request).render_proxy_chain_subscription(token), text=True)
+    output_format = _subscription_output_format(request)
+    return await _service_response(
+        lambda: _get_service(request).render_proxy_chain_subscription(token, output_format),
+        text=True,
+        media_type=_subscription_media_type(output_format),
+    )
 
 
 async def mutate(request: Request) -> Response:
