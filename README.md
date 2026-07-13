@@ -15,7 +15,7 @@
 | 部署 | dry-run 演练，或 native 真实安装 3x-ui + 默认 `VLESS + REALITY` |
 | 客户端 | 创建、启停、重置流量、改额度与到期 |
 | 订阅 | 默认订阅与自定义订阅链接分发 |
-| 代理链 | 例如 `A → C → B`：用户连 A，经 C，从 B 出口；远端为独立 `myn-chain-*` systemd 服务 |
+| 代理链 | 例如 `A → C → B`：入口固定 VLESS Reality，节点间可逐跳选择 SS2022 或 Reality；远端为独立 `myn-chain-*` systemd 服务 |
 | 容器 | `Dockerfile` + `docker-compose.yml` |
 
 ---
@@ -58,17 +58,20 @@ Compose 默认把端口发布到宿主机 `0.0.0.0:8787`；密钥通过 Docker s
 2. **部署** — 创建 3x-ui 部署（先 dry-run 熟悉流程，再 native）  
 3. **客户端** — 部署成功后创建客户端  
 4. **订阅** — 配置并分发订阅链接  
-5. **代理链**（可选）— 选择 ready 的 native 节点排序 → 保存 →「下发远端」
+5. **代理链**（可选）— 选择 ready 的 native 节点排序 → 逐跳选择协议 → 保存 →「下发远端」
 
 代理链语义（UI 从上到下）：
 
 ```text
-用户 → A → C → B → Internet
+用户 ─ VLESS + REALITY → A ─ SS2022 / Reality → C ─ SS2022 / Reality → B → Internet
 ```
 
 - 第一台是入口（客户端只连它）  
 - 中间是中继  
 - 最后一台是出口  
+- 客户端到入口固定为 `VLESS + REALITY`；节点间默认使用 `Shadowsocks 2022`，真正跨境的节点间链路可切回 Reality
+- SS2022 使用 `2022-blake3-aes-256-gcm` 与逐跳独立密钥；密钥经 `APP_SECRET` 加密存库，不下发给客户端
+- 固定发布包内的 Xray 目前可以运行 SS2022，但已输出未来可能移除 Shadowsocks 的兼容性警告；新建链路时可逐跳选择 Reality
 - 订阅 `/sub/chains/{token}` 返回入口链接  
 
 链路不改写 3x-ui 主配置，而是在每台机上装独立服务：
@@ -78,7 +81,7 @@ Compose 默认把端口发布到宿主机 `0.0.0.0:8787`；密钥通过 Docker s
 /etc/systemd/system/myn-chain-*.service
 ```
 
-删除链路 / 部署 / 服务器时，会尽力停掉并移除对应远端服务。
+删除链路 / 部署 / 服务器时，会尽力停掉并移除对应远端服务。自动放行的系统防火墙端口不会擅自删除，避免移除用户原有规则；不用的端口应在确认后手动关闭。
 
 ---
 

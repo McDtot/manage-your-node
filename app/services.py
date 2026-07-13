@@ -25,6 +25,13 @@ from .xui_api import XuiApiClient
 
 
 DEFAULT_REALITY_DEST = "www.microsoft.com:443"
+CHAIN_PROTOCOL_VLESS_REALITY = "vless_reality"
+CHAIN_PROTOCOL_SHADOWSOCKS_2022 = "shadowsocks_2022"
+CHAIN_PROTOCOLS = {
+    CHAIN_PROTOCOL_VLESS_REALITY,
+    CHAIN_PROTOCOL_SHADOWSOCKS_2022,
+}
+CHAIN_SS_METHOD = "2022-blake3-aes-256-gcm"
 MAX_JOB_LOG_ENTRIES = 2000
 MAX_JOB_LOG_LINE = 4096
 
@@ -151,6 +158,7 @@ class AppServices:
             ("deployments", "encrypted_panel_password"),
             ("deployments", "encrypted_api_token"),
             ("proxy_chain_nodes", "encrypted_private_key"),
+            ("proxy_chain_nodes", "encrypted_ss_password"),
         ]
         try:
             for table, column in encrypted_columns:
@@ -938,6 +946,17 @@ class AppServices:
             nodes = self._proxy_chain_nodes(row["id"])
             row["nodes"] = nodes
             row["path"] = " -> ".join(node["server_name"] for node in nodes)
+            row["hops"] = [
+                {
+                    "fromDeploymentId": nodes[index - 1]["deployment_id"],
+                    "fromServerName": nodes[index - 1]["server_name"],
+                    "toDeploymentId": node["deployment_id"],
+                    "toServerName": node["server_name"],
+                    "protocol": node["inbound_protocol"],
+                }
+                for index, node in enumerate(nodes)
+                if index > 0
+            ]
             row["entry_server_name"] = nodes[0]["server_name"] if nodes else ""
             row["exit_server_name"] = nodes[-1]["server_name"] if nodes else ""
             row["subscription_url"] = self._chain_subscription_url(row["token"])
@@ -961,6 +980,22 @@ class AppServices:
             raise ValueError("proxy chain requires at least two deployments")
         if len(ordered_ids) > 6:
             raise ValueError("proxy chain supports up to six deployments for now")
+
+        raw_link_protocols = payload.get("linkProtocols")
+        if raw_link_protocols is None:
+            # Preserve the previous all-Reality API behavior for older clients.
+            link_protocols = [CHAIN_PROTOCOL_VLESS_REALITY] * (len(ordered_ids) - 1)
+        else:
+            if not isinstance(raw_link_protocols, list):
+                raise ValueError("linkProtocols must be a list")
+            if len(raw_link_protocols) != len(ordered_ids) - 1:
+                raise ValueError("linkProtocols must contain one protocol per server-to-server hop")
+            link_protocols = [str(protocol).strip() for protocol in raw_link_protocols]
+            if any(protocol not in CHAIN_PROTOCOLS for protocol in link_protocols):
+                supported = ", ".join(sorted(CHAIN_PROTOCOLS))
+                raise ValueError(f"unsupported chain protocol; choose one of: {supported}")
+
+        inbound_protocols = [CHAIN_PROTOCOL_VLESS_REALITY, *link_protocols]
 
         deployments = self._chain_deployments_by_id(ordered_ids)
         missing = [deployment_id for deployment_id in ordered_ids if deployment_id not in deployments]
@@ -990,11 +1025,19 @@ class AppServices:
             self.db.executemany(
                 """
                 INSERT INTO proxy_chain_nodes (
-                    chain_id, deployment_id, position, created_at
-                ) VALUES (?, ?, ?, ?)
+                    chain_id, deployment_id, position, inbound_protocol,
+                    ss_method, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?)
                 """,
                 [
-                    (chain_id, deployment_id, index, stamp)
+                    (
+                        chain_id,
+                        deployment_id,
+                        index,
+                        inbound_protocols[index],
+                        CHAIN_SS_METHOD,
+                        stamp,
+                    )
                     for index, deployment_id in enumerate(ordered_ids)
                 ],
             )
@@ -1152,9 +1195,15 @@ class AppServices:
         nodes = self._prepare_proxy_chain_nodes(job_id, chain_id, nodes, dry_run=True)
         for index, node in enumerate(nodes):
             role = "exit" if index == len(nodes) - 1 else "relay"
+            protocol = (
+                "VLESS + REALITY"
+                if node["inbound_protocol"] == CHAIN_PROTOCOL_VLESS_REALITY
+                else "Shadowsocks 2022"
+            )
             self._append_job_log(
                 job_id,
-                f"Dry-run: {node['server_name']} prepared as {role} on port {node['inbound_port']}",
+                f"Dry-run: {node['server_name']} prepared as {role} with {protocol} "
+                f"on port {node['inbound_port']}",
             )
             time.sleep(0.15)
             self.db.execute(
@@ -1205,21 +1254,32 @@ class AppServices:
         prepared: list[dict[str, Any]] = []
         for node in nodes:
             update: dict[str, Any] = {}
+            protocol = node.get("inbound_protocol") or CHAIN_PROTOCOL_VLESS_REALITY
+            if protocol not in CHAIN_PROTOCOLS:
+                raise ValueError(f"unsupported chain protocol on {node['server_name']}: {protocol}")
             if not node.get("inbound_port"):
                 update["inbound_port"] = self._new_chain_port(used_ports)
                 used_ports.add(update["inbound_port"])
-            if not node.get("node_client_uuid"):
-                update["client_uuid"] = str(uuid.uuid4())
-            if not node.get("short_id"):
-                update["short_id"] = secrets.token_hex(4)
-            if not node.get("public_key") or not node.get("encrypted_private_key"):
-                if dry_run:
-                    private_key, public_key = self._dry_reality_keypair()
-                else:
-                    self._append_job_log(job_id, f"Generating REALITY keypair on {node['server_name']}")
-                    private_key, public_key = self._remote_x25519_keypair(node)
-                update["encrypted_private_key"] = self.secret_box.seal(private_key)
-                update["public_key"] = public_key
+            if protocol == CHAIN_PROTOCOL_VLESS_REALITY:
+                if not node.get("node_client_uuid"):
+                    update["client_uuid"] = str(uuid.uuid4())
+                if not node.get("short_id"):
+                    update["short_id"] = secrets.token_hex(4)
+                if not node.get("public_key") or not node.get("encrypted_private_key"):
+                    if dry_run:
+                        private_key, public_key = self._dry_reality_keypair()
+                    else:
+                        self._append_job_log(
+                            job_id,
+                            f"Generating REALITY keypair on {node['server_name']}",
+                        )
+                        private_key, public_key = self._remote_x25519_keypair(node)
+                    update["encrypted_private_key"] = self.secret_box.seal(private_key)
+                    update["public_key"] = public_key
+            elif not node.get("encrypted_ss_password"):
+                update["encrypted_ss_password"] = self.secret_box.seal(
+                    self._new_ss2022_password()
+                )
             if not node.get("remote_service_name"):
                 update["remote_service_name"] = f"myn-chain-{chain_id}-{node['position']}"
 
@@ -1247,6 +1307,9 @@ class AppServices:
 
     def _dry_reality_keypair(self) -> tuple[str, str]:
         return secrets.token_urlsafe(32)[:43], secrets.token_urlsafe(32)[:43]
+
+    def _new_ss2022_password(self) -> str:
+        return base64.b64encode(secrets.token_bytes(32)).decode("ascii")
 
     def _remote_x25519_keypair(self, node: dict[str, Any]) -> tuple[str, str]:
         lines = self.ssh.run_script(
@@ -1309,7 +1372,12 @@ echo "Using Xray: $XRAY"
         )
         self.ssh.run_script(
             node,
-            self._chain_install_script(service_name, int(node["inbound_port"]), config),
+            self._chain_install_script(
+                service_name,
+                int(node["inbound_port"]),
+                config,
+                allow_udp=node["inbound_protocol"] == CHAIN_PROTOCOL_SHADOWSOCKS_2022,
+            ),
             lambda line: self._append_job_log(job_id, f"{node['server_name']}: {line}"),
             timeout=240,
         )
@@ -1319,10 +1387,22 @@ echo "Using Xray: $XRAY"
         service_name: str,
         inbound_port: int,
         config: dict[str, Any],
+        allow_udp: bool = False,
     ) -> str:
         encoded_config = base64.b64encode(
             json.dumps(config, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
         ).decode("ascii")
+        ufw_udp_rule = (
+            f"  $SUDO ufw allow {shell_quote(inbound_port)}/udp >/dev/null 2>&1 || true\n"
+            if allow_udp
+            else ""
+        )
+        firewalld_udp_rule = (
+            f"  $SUDO firewall-cmd --permanent --add-port={shell_quote(inbound_port)}/udp "
+            ">/dev/null 2>&1 || true\n"
+            if allow_udp
+            else ""
+        )
         return f"""#!/usr/bin/env bash
 set -Eeuo pipefail
 
@@ -1403,9 +1483,11 @@ $SUDO systemctl is-active --quiet "$SERVICE_NAME"
 
 if command -v ufw >/dev/null 2>&1; then
   $SUDO ufw allow {shell_quote(inbound_port)}/tcp >/dev/null 2>&1 || true
+{ufw_udp_rule.rstrip()}
 fi
 if command -v firewall-cmd >/dev/null 2>&1; then
   $SUDO firewall-cmd --permanent --add-port={shell_quote(inbound_port)}/tcp >/dev/null 2>&1 || true
+{firewalld_udp_rule.rstrip()}
   $SUDO firewall-cmd --reload >/dev/null 2>&1 || true
 fi
 
@@ -1417,9 +1499,45 @@ echo "Service $SERVICE_NAME is active"
         node: dict[str, Any],
         next_node: dict[str, Any] | None,
     ) -> dict[str, Any]:
+        return {
+            "log": {"loglevel": "warning"},
+            "inbounds": [self._chain_inbound(node)],
+            "outbounds": [self._chain_outbound(next_node)],
+        }
+
+    def _chain_inbound(self, node: dict[str, Any]) -> dict[str, Any]:
+        protocol = node.get("inbound_protocol") or CHAIN_PROTOCOL_VLESS_REALITY
+        sniffing = {
+            "enabled": True,
+            "destOverride": ["http", "tls", "quic"],
+            "metadataOnly": False,
+            "routeOnly": False,
+        }
+        if protocol == CHAIN_PROTOCOL_SHADOWSOCKS_2022:
+            encrypted_password = node.get("encrypted_ss_password")
+            if not encrypted_password:
+                raise ValueError(f"Shadowsocks password is missing for {node['server_name']}")
+            return {
+                "tag": "myn-chain-in",
+                "listen": "",
+                "port": int(node["inbound_port"]),
+                "protocol": "shadowsocks",
+                "settings": {
+                    "network": "tcp,udp",
+                    "method": node.get("ss_method") or CHAIN_SS_METHOD,
+                    "password": self.secret_box.open(encrypted_password),
+                },
+                "sniffing": sniffing,
+            }
+
+        if protocol != CHAIN_PROTOCOL_VLESS_REALITY:
+            raise ValueError(f"unsupported chain protocol on {node['server_name']}: {protocol}")
         dest = reality_dest()
         server_name = reality_server_name()
-        inbound = {
+        encrypted_private_key = node.get("encrypted_private_key")
+        if not encrypted_private_key:
+            raise ValueError(f"REALITY private key is missing for {node['server_name']}")
+        return {
             "tag": "myn-chain-in",
             "listen": "",
             "port": int(node["inbound_port"]),
@@ -1443,19 +1561,38 @@ echo "Service $SERVICE_NAME is active"
                     "dest": dest,
                     "xver": 0,
                     "serverNames": [server_name],
-                    "privateKey": self.secret_box.open(node["encrypted_private_key"]),
+                    "privateKey": self.secret_box.open(encrypted_private_key),
                     "shortIds": [node["short_id"]],
                 },
             },
-            "sniffing": {
-                "enabled": True,
-                "destOverride": ["http", "tls", "quic"],
-                "metadataOnly": False,
-                "routeOnly": False,
-            },
+            "sniffing": sniffing,
         }
-        if next_node:
-            outbound = {
+
+    def _chain_outbound(self, next_node: dict[str, Any] | None) -> dict[str, Any]:
+        if not next_node:
+            return {"tag": "direct", "protocol": "freedom"}
+
+        protocol = next_node.get("inbound_protocol") or CHAIN_PROTOCOL_VLESS_REALITY
+        if protocol == CHAIN_PROTOCOL_SHADOWSOCKS_2022:
+            encrypted_password = next_node.get("encrypted_ss_password")
+            if not encrypted_password:
+                raise ValueError(
+                    f"Shadowsocks password is missing for {next_node['server_name']}"
+                )
+            return {
+                "tag": "myn-chain-next",
+                "protocol": "shadowsocks",
+                "settings": {
+                    "address": next_node["host"],
+                    "port": int(next_node["inbound_port"]),
+                    "method": next_node.get("ss_method") or CHAIN_SS_METHOD,
+                    "password": self.secret_box.open(encrypted_password),
+                },
+            }
+
+        if protocol == CHAIN_PROTOCOL_VLESS_REALITY:
+            server_name = reality_server_name()
+            return {
                 "tag": "myn-chain-next",
                 "protocol": "vless",
                 "settings": {
@@ -1486,15 +1623,14 @@ echo "Service $SERVICE_NAME is active"
                     },
                 },
             }
-        else:
-            outbound = {"tag": "direct", "protocol": "freedom"}
-        return {
-            "log": {"loglevel": "warning"},
-            "inbounds": [inbound],
-            "outbounds": [outbound],
-        }
+
+        raise ValueError(
+            f"unsupported chain protocol on {next_node['server_name']}: {protocol}"
+        )
 
     def _chain_share_link(self, entry: dict[str, Any], name: str) -> str:
+        if entry.get("inbound_protocol") != CHAIN_PROTOCOL_VLESS_REALITY:
+            raise ValueError("proxy-chain entry must use VLESS + REALITY")
         params = {
             "security": "reality",
             "type": "tcp",
@@ -1571,9 +1707,10 @@ echo "Removed $SERVICE_NAME"
     def _proxy_chain_full_nodes(self, chain_id: str) -> list[dict[str, Any]]:
         return self.db.query_all(
             """
-            SELECT pcn.position, pcn.inbound_port,
+            SELECT pcn.position, pcn.inbound_protocol, pcn.inbound_port,
                    pcn.client_uuid AS node_client_uuid,
                    pcn.encrypted_private_key, pcn.public_key, pcn.short_id,
+                   pcn.ss_method, pcn.encrypted_ss_password,
                    pcn.remote_service_name, pcn.status AS node_status,
                    d.id AS deployment_id, d.install_method,
                    d.status AS deployment_status, d.protocol, d.proxy_port,
@@ -1602,7 +1739,8 @@ echo "Removed $SERVICE_NAME"
             """
             SELECT pcn.position, d.id AS deployment_id, s.name AS server_name,
                    s.host, d.protocol, d.proxy_port, d.status,
-                   pcn.inbound_port, pcn.client_uuid, pcn.public_key,
+                   pcn.inbound_protocol, pcn.inbound_port,
+                   pcn.client_uuid, pcn.public_key, pcn.ss_method,
                    pcn.short_id, pcn.remote_service_name, pcn.status AS node_status
             FROM proxy_chain_nodes pcn
             JOIN deployments d ON d.id = pcn.deployment_id

@@ -145,11 +145,14 @@ class Database:
                     chain_id TEXT NOT NULL,
                     deployment_id TEXT NOT NULL,
                     position INTEGER NOT NULL,
+                    inbound_protocol TEXT NOT NULL DEFAULT 'vless_reality',
                     inbound_port INTEGER,
                     client_uuid TEXT,
                     encrypted_private_key TEXT,
                     public_key TEXT,
                     short_id TEXT,
+                    ss_method TEXT NOT NULL DEFAULT '2022-blake3-aes-256-gcm',
+                    encrypted_ss_password TEXT,
                     remote_service_name TEXT,
                     status TEXT NOT NULL DEFAULT 'planned',
                     created_at TEXT NOT NULL,
@@ -222,11 +225,22 @@ class Database:
             self._ensure_column("deployments", "subscription_configured", "INTEGER NOT NULL DEFAULT 0")
             self._ensure_column("jobs", "chain_id", "TEXT")
             self._ensure_column("proxy_chains", "last_error", "TEXT")
+            self._ensure_column(
+                "proxy_chain_nodes",
+                "inbound_protocol",
+                "TEXT NOT NULL DEFAULT 'vless_reality'",
+            )
             self._ensure_column("proxy_chain_nodes", "inbound_port", "INTEGER")
             self._ensure_column("proxy_chain_nodes", "client_uuid", "TEXT")
             self._ensure_column("proxy_chain_nodes", "encrypted_private_key", "TEXT")
             self._ensure_column("proxy_chain_nodes", "public_key", "TEXT")
             self._ensure_column("proxy_chain_nodes", "short_id", "TEXT")
+            self._ensure_column(
+                "proxy_chain_nodes",
+                "ss_method",
+                "TEXT NOT NULL DEFAULT '2022-blake3-aes-256-gcm'",
+            )
+            self._ensure_column("proxy_chain_nodes", "encrypted_ss_password", "TEXT")
             self._ensure_column("proxy_chain_nodes", "remote_service_name", "TEXT")
             self._ensure_column("proxy_chain_nodes", "status", "TEXT NOT NULL DEFAULT 'planned'")
             self._ensure_column("proxy_chain_nodes", "updated_at", "TEXT")

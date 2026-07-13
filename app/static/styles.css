@@ -917,6 +917,48 @@ input[type="checkbox"] {
   font-size: 16px;
 }
 
+.chain-hop {
+  display: grid;
+  grid-template-columns: 24px minmax(0, 1fr);
+  align-items: center;
+  gap: 7px;
+  padding: 1px 9px;
+}
+
+.chain-hop-arrow {
+  display: grid;
+  place-items: center;
+  color: var(--blue);
+  font-size: 17px;
+  font-weight: 760;
+}
+
+.chain-hop label {
+  display: grid;
+  grid-template-columns: minmax(90px, 0.7fr) minmax(180px, 1.3fr);
+  align-items: center;
+  gap: 9px;
+  font-size: 10px;
+}
+
+.chain-hop select {
+  min-height: 36px;
+  border-color: rgba(0, 122, 255, 0.15);
+  border-radius: 11px;
+  padding: 7px 9px;
+  font-size: 11px;
+}
+
+.chain-route-summary {
+  border: 1px solid rgba(0, 122, 255, 0.13);
+  border-radius: 11px;
+  background: rgba(0, 122, 255, 0.045);
+  color: var(--muted-strong);
+  padding: 8px 10px;
+  font-size: 11px;
+  line-height: 1.55;
+}
+
 .chain-preview {
   display: grid;
   gap: 4px;

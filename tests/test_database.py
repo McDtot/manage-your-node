@@ -1,3 +1,4 @@
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -27,3 +28,47 @@ def test_online_backup(tmp_path):
     db.backup_to(target)
     backup = Database(Path(target))
     assert backup.query_one("SELECT name FROM subscriptions WHERE id = 'sub'")["name"] == "name"
+
+
+def test_proxy_chain_protocol_columns_migrate_existing_rows(tmp_path):
+    path = tmp_path / "legacy.sqlite"
+    connection = sqlite3.connect(path)
+    connection.executescript(
+        """
+        CREATE TABLE proxy_chain_nodes (
+            chain_id TEXT NOT NULL,
+            deployment_id TEXT NOT NULL,
+            position INTEGER NOT NULL,
+            inbound_port INTEGER,
+            client_uuid TEXT,
+            encrypted_private_key TEXT,
+            public_key TEXT,
+            short_id TEXT,
+            remote_service_name TEXT,
+            status TEXT NOT NULL DEFAULT 'planned',
+            created_at TEXT NOT NULL,
+            updated_at TEXT,
+            PRIMARY KEY(chain_id, position),
+            UNIQUE(chain_id, deployment_id)
+        );
+        INSERT INTO proxy_chain_nodes (
+            chain_id, deployment_id, position, created_at
+        ) VALUES ('legacy-chain', 'legacy-deployment', 0, 'now');
+        """
+    )
+    connection.commit()
+    connection.close()
+
+    db = Database(path)
+    row = db.query_one(
+        """
+        SELECT inbound_protocol, ss_method, encrypted_ss_password
+        FROM proxy_chain_nodes
+        WHERE chain_id = 'legacy-chain'
+        """
+    )
+    assert row == {
+        "inbound_protocol": "vless_reality",
+        "ss_method": "2022-blake3-aes-256-gcm",
+        "encrypted_ss_password": None,
+    }

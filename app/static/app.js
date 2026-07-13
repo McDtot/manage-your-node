@@ -6,9 +6,13 @@ const state = {
   chains: [],
   clients: [],
   chainDraft: [],
+  chainProtocolDraft: {},
   activeJobId: null,
   jobTimer: null,
 };
+
+const CHAIN_PROTOCOL_VLESS_REALITY = "vless_reality";
+const CHAIN_PROTOCOL_SHADOWSOCKS_2022 = "shadowsocks_2022";
 
 const $ = (selector) => document.querySelector(selector);
 const $$ = (selector) => Array.from(document.querySelectorAll(selector));
@@ -248,6 +252,9 @@ function renderChains() {
 
 function chainItem(chain) {
   const subscriptionUrl = absoluteUrl(chain.subscription_url);
+  const hopSummary = (chain.hops || [])
+    .map((hop) => `${hop.fromServerName} — ${chainProtocolLabel(hop.protocol)} → ${hop.toServerName}`)
+    .join(" · ");
   return `
     <article class="item">
       <div class="item-head">
@@ -258,6 +265,7 @@ function chainItem(chain) {
         ${statusBadge(chain.status)}
       </div>
       <div class="meta">入口：${escapeHtml(chain.entry_server_name || "-")} · 出口：${escapeHtml(chain.exit_server_name || "-")}</div>
+      ${hopSummary ? `<div class="chain-route-summary">${escapeHtml(hopSummary)}</div>` : ""}
       ${chain.last_error ? `<div class="meta bad-text">错误：${escapeHtml(chain.last_error)}</div>` : ""}
       <div class="meta">订阅：<span class="mono">${escapeHtml(subscriptionUrl)}</span></div>
       <div class="mono">${chain.share_link ? escapeHtml(chain.share_link) : "下发成功后生成入口节点链接"}</div>
@@ -278,6 +286,37 @@ function readyDeployments() {
   return state.deployments.filter((deployment) => deployment.status === "ready");
 }
 
+function chainProtocolLabel(protocol) {
+  return protocol === CHAIN_PROTOCOL_SHADOWSOCKS_2022
+    ? "SS2022"
+    : "VLESS + REALITY";
+}
+
+function chainEdgeKey(fromDeploymentId, toDeploymentId) {
+  return `${fromDeploymentId}::${toDeploymentId}`;
+}
+
+function chainProtocolFor(fromDeploymentId, toDeploymentId) {
+  return state.chainProtocolDraft[chainEdgeKey(fromDeploymentId, toDeploymentId)] ||
+    CHAIN_PROTOCOL_SHADOWSOCKS_2022;
+}
+
+function chainLinkProtocols() {
+  return state.chainDraft.slice(1).map((deploymentId, index) =>
+    chainProtocolFor(state.chainDraft[index], deploymentId)
+  );
+}
+
+function chainPreviewText(selected) {
+  if (!selected.length) return "未选择";
+  let preview = `客户端 — VLESS + REALITY → ${selected[0].server_name}`;
+  for (let index = 1; index < selected.length; index += 1) {
+    const protocol = chainProtocolFor(selected[index - 1].id, selected[index].id);
+    preview += ` — ${chainProtocolLabel(protocol)} → ${selected[index].server_name}`;
+  }
+  return preview;
+}
+
 function renderChainBuilder() {
   const availableNode = $("#chainAvailableNodes");
   const selectedNode = $("#chainSelectedNodes");
@@ -294,10 +333,12 @@ function renderChainBuilder() {
     available.map((deployment) => chainAvailableItem(deployment)).join("") ||
     empty("暂无可用 ready 部署");
   selectedNode.innerHTML =
-    selected.map((deployment, index) => chainSelectedItem(deployment, index)).join("") ||
+    selected.map((deployment, index) => `
+      ${index > 0 ? chainHopItem(selected[index - 1], deployment, index) : ""}
+      ${chainSelectedItem(deployment, index)}
+    `).join("") ||
     `<div class="empty">把节点拖到这里，顺序就是入口到出口</div>`;
-  $("#chainPreview").textContent =
-    selected.map((deployment) => deployment.server_name).join(" -> ") || "未选择";
+  $("#chainPreview").textContent = chainPreviewText(selected);
   $("#chainSubmitBtn").disabled = selected.length < 2;
 }
 
@@ -319,7 +360,7 @@ function chainSelectedItem(deployment, index) {
       <span class="chain-index">${index + 1}</span>
       <div>
         <strong>${escapeHtml(deployment.server_name)}</strong>
-        <small>${index === 0 ? "入口" : index === state.chainDraft.length - 1 ? "出口" : "中继"} · ${escapeHtml(deployment.host)}:${deployment.proxy_port}</small>
+        <small>${index === 0 ? "入口 · 客户端经 VLESS + REALITY 接入" : index === state.chainDraft.length - 1 ? "出口" : "中继"} · ${escapeHtml(deployment.host)}:${deployment.proxy_port}</small>
       </div>
       <div class="chain-node-actions">
         <button class="ghost icon-button" type="button" data-chain-up="${index}" title="上移">↑</button>
@@ -327,6 +368,23 @@ function chainSelectedItem(deployment, index) {
         <button class="ghost icon-button" type="button" data-chain-remove="${index}" title="移除">×</button>
       </div>
     </article>
+  `;
+}
+
+function chainHopItem(fromDeployment, toDeployment, destinationIndex) {
+  const edgeKey = chainEdgeKey(fromDeployment.id, toDeployment.id);
+  const protocol = chainProtocolFor(fromDeployment.id, toDeployment.id);
+  return `
+    <div class="chain-hop" data-chain-position="${destinationIndex}">
+      <span class="chain-hop-arrow">↓</span>
+      <label>
+        <span>${escapeHtml(fromDeployment.server_name)} 到 ${escapeHtml(toDeployment.server_name)}</span>
+        <select data-chain-protocol data-chain-edge="${escapeHtml(edgeKey)}" aria-label="选择节点间协议">
+          <option value="${CHAIN_PROTOCOL_SHADOWSOCKS_2022}" ${protocol === CHAIN_PROTOCOL_SHADOWSOCKS_2022 ? "selected" : ""}>Shadowsocks 2022（海外转发）</option>
+          <option value="${CHAIN_PROTOCOL_VLESS_REALITY}" ${protocol === CHAIN_PROTOCOL_VLESS_REALITY ? "selected" : ""}>VLESS + REALITY（跨境链路）</option>
+        </select>
+      </label>
+    </div>
   `;
 }
 
@@ -606,9 +664,11 @@ function bindEvents() {
       body: JSON.stringify({
         name: data.name,
         deploymentIds: state.chainDraft,
+        linkProtocols: chainLinkProtocols(),
       }),
     });
     state.chainDraft = [];
+    state.chainProtocolDraft = {};
     form.reset();
     toast("代理链已保存");
     await refresh();
@@ -691,6 +751,13 @@ function bindEvents() {
     if (payload.type === "selected") {
       moveChainDeployment(Number(payload.index), index);
     }
+  });
+
+  document.body.addEventListener("change", (event) => {
+    const selector = event.target.closest("[data-chain-protocol]");
+    if (!selector) return;
+    state.chainProtocolDraft[selector.dataset.chainEdge] = selector.value;
+    renderChainBuilder();
   });
 
   document.body.addEventListener("click", async (event) => {

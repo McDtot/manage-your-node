@@ -2,13 +2,52 @@ import pytest
 
 from app.database import Database
 from app.security import SecretBox
-from app.services import AppServices, reality_dest, reality_server_name
+from app.services import (
+    CHAIN_PROTOCOL_SHADOWSOCKS_2022,
+    CHAIN_PROTOCOL_VLESS_REALITY,
+    CHAIN_SS_METHOD,
+    AppServices,
+    reality_dest,
+    reality_server_name,
+)
 
 
 @pytest.fixture
 def services(tmp_path):
     db = Database(tmp_path / "test.db")
     return AppServices(db, SecretBox("a-long-test-secret-value"))
+
+
+def _create_ready_deployment(services, suffix: str, host: str) -> str:
+    server = services.create_server(
+        {
+            "name": f"edge-{suffix}",
+            "host": host,
+            "sshPort": 22,
+            "sshUser": "deploy",
+            "authType": "agent",
+        }
+    )
+    deployment_id = f"dep-{suffix}"
+    services.db.execute(
+        """
+        INSERT INTO deployments (
+            id, server_id, engine, protocol, install_method, panel_port,
+            panel_path, panel_username, encrypted_panel_password,
+            encrypted_api_token, proxy_port, status, subscription_url,
+            created_at, updated_at
+        ) VALUES (?, ?, '3x-ui', 'VLESS + REALITY', 'dry-run', 32000,
+                  '/panel', 'admin', ?, ?, 443, 'ready', ?, 'now', 'now')
+        """,
+        (
+            deployment_id,
+            server["id"],
+            services.secret_box.seal("panel-password"),
+            services.secret_box.seal("api-token"),
+            f"/sub/deployments/{deployment_id}",
+        ),
+    )
+    return deployment_id
 
 
 def test_summary_empty(services):
@@ -183,3 +222,97 @@ def test_proxy_chain_failure_triggers_cleanup(services, monkeypatch):
     job = db.query_one("SELECT status, logs FROM jobs WHERE id='job1'")
     assert job["status"] == "failed"
     assert "Rolling back" in job["logs"]
+
+
+def test_mixed_proxy_chain_uses_ss2022_between_overseas_nodes(services):
+    deployment_ids = [
+        _create_ready_deployment(services, "hk", "198.51.100.10"),
+        _create_ready_deployment(services, "jp", "198.51.100.20"),
+        _create_ready_deployment(services, "us", "198.51.100.30"),
+    ]
+    chain = services.create_proxy_chain(
+        {
+            "name": "mixed-chain",
+            "deploymentIds": deployment_ids,
+            "linkProtocols": [
+                CHAIN_PROTOCOL_SHADOWSOCKS_2022,
+                CHAIN_PROTOCOL_VLESS_REALITY,
+            ],
+        }
+    )
+
+    assert [node["inbound_protocol"] for node in chain["nodes"]] == [
+        CHAIN_PROTOCOL_VLESS_REALITY,
+        CHAIN_PROTOCOL_SHADOWSOCKS_2022,
+        CHAIN_PROTOCOL_VLESS_REALITY,
+    ]
+    assert [hop["protocol"] for hop in chain["hops"]] == [
+        CHAIN_PROTOCOL_SHADOWSOCKS_2022,
+        CHAIN_PROTOCOL_VLESS_REALITY,
+    ]
+    assert all("encrypted_ss_password" not in node for node in chain["nodes"])
+
+    started = services.start_proxy_chain_deployment(chain["id"])
+    assert services.wait_for_workers()
+    assert services.get_job(started["job"]["id"])["status"] == "success"
+
+    nodes = services._proxy_chain_full_nodes(chain["id"])
+    assert nodes[0]["encrypted_private_key"]
+    assert nodes[1]["encrypted_ss_password"]
+    assert nodes[1]["ss_method"] == CHAIN_SS_METHOD
+    assert len(services.secret_box.open(nodes[1]["encrypted_ss_password"])) == 44
+    assert not nodes[1]["encrypted_private_key"]
+    assert nodes[2]["encrypted_private_key"]
+
+    entry_config = services._chain_xray_config(nodes[0], nodes[1])
+    assert entry_config["inbounds"][0]["protocol"] == "vless"
+    assert entry_config["outbounds"][0]["protocol"] == "shadowsocks"
+    assert entry_config["outbounds"][0]["settings"]["address"] == "198.51.100.20"
+
+    relay_config = services._chain_xray_config(nodes[1], nodes[2])
+    assert relay_config["inbounds"][0]["protocol"] == "shadowsocks"
+    assert relay_config["inbounds"][0]["settings"]["network"] == "tcp,udp"
+    assert relay_config["outbounds"][0]["protocol"] == "vless"
+
+    exit_config = services._chain_xray_config(nodes[2], None)
+    assert exit_config["inbounds"][0]["protocol"] == "vless"
+    assert exit_config["outbounds"][0]["protocol"] == "freedom"
+    assert services.get_proxy_chain(chain["id"])["share_link"].startswith("vless://")
+
+
+def test_proxy_chain_protocol_validation_and_legacy_default(services):
+    deployment_ids = [
+        _create_ready_deployment(services, "one", "203.0.113.11"),
+        _create_ready_deployment(services, "two", "203.0.113.12"),
+    ]
+    with pytest.raises(ValueError, match="one protocol per server-to-server hop"):
+        services.create_proxy_chain(
+            {
+                "deploymentIds": deployment_ids,
+                "linkProtocols": [],
+            }
+        )
+    with pytest.raises(ValueError, match="unsupported chain protocol"):
+        services.create_proxy_chain(
+            {
+                "deploymentIds": deployment_ids,
+                "linkProtocols": ["plain-text"],
+            }
+        )
+
+    legacy_chain = services.create_proxy_chain({"deploymentIds": deployment_ids})
+    assert [node["inbound_protocol"] for node in legacy_chain["nodes"]] == [
+        CHAIN_PROTOCOL_VLESS_REALITY,
+        CHAIN_PROTOCOL_VLESS_REALITY,
+    ]
+
+
+def test_ss2022_chain_install_script_opens_udp_firewall_rules(services):
+    install_script = services._chain_install_script(
+        "myn-chain-test",
+        45000,
+        {"inbounds": [], "outbounds": []},
+        allow_udp=True,
+    )
+    assert "ufw allow 45000/udp" in install_script
+    assert "--add-port=45000/udp" in install_script
