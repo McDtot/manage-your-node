@@ -11,7 +11,7 @@ PANEL_PORT_VALUE="8787"
 DOMAIN=""
 BIND_ADDRESS_VALUE=""
 PASSWORD_FILE=""
-PASSWORD_CREATED=0
+PASSWORD_SOURCE="existing"
 ROOT=()
 
 info() {
@@ -151,7 +151,8 @@ Manage Your Node 一键部署脚本
   -h, --help                显示帮助
 
 说明：
-  - 首次执行会生成 .env、应用主密钥和管理员密码。
+  - 首次交互执行会生成 .env 和应用主密钥，并提示设置管理员密码。
+  - 无交互终端且未指定密码文件时，会生成随机管理员密码。
   - 重复执行会保留已有配置、密码与 Docker 数据卷，并重新构建服务。
   - 未检测到 Docker 时，会从 Docker 官方软件源自动安装。
   - 自动安装支持 Ubuntu、Debian、Fedora、CentOS 和 RHEL。
@@ -257,6 +258,33 @@ random_hex() {
   od -An -N "$byte_count" -tx1 /dev/urandom | tr -d ' \n'
 }
 
+prompt_admin_password() {
+  local first=""
+  local second=""
+
+  [[ -t 0 && -r /dev/tty && -w /dev/tty ]] || return 1
+  while true; do
+    printf '[manage-your-node] 请设置管理员密码（至少 12 个字符，输入不会显示）：' > /dev/tty
+    IFS= read -r -s first < /dev/tty || fail "读取管理员密码失败"
+    printf '\n' > /dev/tty
+    if (( ${#first} < 12 )); then
+      printf '[manage-your-node] 密码至少需要 12 个字符，请重新输入。\n' > /dev/tty
+      continue
+    fi
+
+    printf '[manage-your-node] 请再次输入管理员密码：' > /dev/tty
+    IFS= read -r -s second < /dev/tty || fail "读取管理员密码确认失败"
+    printf '\n' > /dev/tty
+    if [[ "$first" != "$second" ]]; then
+      printf '[manage-your-node] 两次输入不一致，请重新设置。\n' > /dev/tty
+      continue
+    fi
+
+    ADMIN_PASSWORD_VALUE="$first"
+    return 0
+  done
+}
+
 mkdir -p secrets
 chmod 700 secrets
 
@@ -272,14 +300,19 @@ if [[ ! -s secrets/admin_password.txt ]]; then
     ADMIN_PASSWORD_VALUE="$(<"$PASSWORD_FILE")"
     [[ "$ADMIN_PASSWORD_VALUE" != *$'\n'* ]] || fail "管理员密码不能包含换行符"
     (( ${#ADMIN_PASSWORD_VALUE} >= 12 )) || fail "管理员密码至少需要 12 个字符"
+    PASSWORD_SOURCE="file"
+  elif prompt_admin_password; then
+    PASSWORD_SOURCE="prompted"
   else
+    info "未检测到交互式终端，将生成随机管理员密码"
     ADMIN_PASSWORD_VALUE="$(random_hex 18)"
     GENERATED_PASSWORD="$ADMIN_PASSWORD_VALUE"
+    PASSWORD_SOURCE="generated"
   fi
   printf '%s' "$ADMIN_PASSWORD_VALUE" > secrets/admin_password.txt
+  unset ADMIN_PASSWORD_VALUE
   chmod 600 secrets/admin_password.txt
-  PASSWORD_CREATED=1
-  info "已生成管理员密码"
+  info "已设置管理员密码"
 fi
 
 APP_SECRET_VALUE="$(<secrets/app_secret.txt)"
@@ -366,10 +399,19 @@ printf '\n'
 info "部署完成"
 printf '访问地址：%s\n' "$ACCESS_URL"
 printf '管理员：%s\n' "$ACTIVE_USER"
-if (( PASSWORD_CREATED == 1 )) && [[ -n "$GENERATED_PASSWORD" ]]; then
-  printf '初始密码：%s\n' "$GENERATED_PASSWORD"
-  printf '请立即登录并把密码保存到安全的密码管理器。\n'
-else
-  printf '管理员密码：沿用 secrets/admin_password.txt 中的现有值\n'
-fi
+case "$PASSWORD_SOURCE" in
+  generated)
+    printf '初始密码：%s\n' "$GENERATED_PASSWORD"
+    printf '请立即登录并把密码保存到安全的密码管理器。\n'
+    ;;
+  prompted)
+    printf '管理员密码：已按交互输入设置（不会回显）\n'
+    ;;
+  file)
+    printf '管理员密码：已从指定密码文件设置（不会回显）\n'
+    ;;
+  *)
+    printf '管理员密码：沿用 secrets/admin_password.txt 中的现有值\n'
+    ;;
+esac
 printf '查看日志：%s logs -f\n' "${COMPOSE[*]}"

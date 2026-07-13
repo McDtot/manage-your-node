@@ -27,6 +27,19 @@ def test_installer_does_not_accept_password_on_command_line():
     assert "--admin-password " not in script
 
 
+def test_installer_prompts_for_and_confirms_new_admin_password_securely():
+    script = (ROOT / "install.sh").read_text(encoding="utf-8")
+
+    assert "prompt_admin_password()" in script
+    assert "请设置管理员密码" in script
+    assert "请再次输入管理员密码" in script
+    assert script.count("IFS= read -r -s") == 2
+    assert "[[ -t 0" in script
+    assert "< /dev/tty" in script
+    assert 'PASSWORD_SOURCE="prompted"' in script
+    assert "未检测到交互式终端，将生成随机管理员密码" in script
+
+
 def test_installer_uses_official_docker_repositories():
     script = (ROOT / "install.sh").read_text(encoding="utf-8")
 
