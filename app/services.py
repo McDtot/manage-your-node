@@ -844,20 +844,6 @@ class AppServices:
                 f"Dry-run finished: generated 3x-ui deployment data for {server['host']}",
             )
 
-            if payload.get("createInitialClient", True):
-                self.create_client(
-                    deployment_id,
-                    {
-                        "name": payload.get("clientName") or "default-user",
-                        "quotaGb": payload.get("quotaGb") or 100,
-                        "expiresAt": payload.get("expiresAt")
-                        or (datetime.now(timezone.utc) + timedelta(days=30))
-                        .date()
-                        .isoformat(),
-                    },
-                )
-                self._append_job_log(job_id, "Created initial local user and share link")
-
             self._finish_job(job_id, "success", None)
         except Exception as exc:  # noqa: BLE001
             self.db.execute(
@@ -931,20 +917,6 @@ class AppServices:
                     ("ready", now_iso(), deployment_id),
                 )
                 self._append_job_log(job_id, "3x-ui panel is installed and default inbound is ready")
-
-            if payload.get("createInitialClient", True):
-                self.create_client(
-                    deployment_id,
-                    {
-                        "name": payload.get("clientName") or "default-user",
-                        "quotaGb": payload.get("quotaGb") or 100,
-                        "expiresAt": payload.get("expiresAt")
-                        or (datetime.now(timezone.utc) + timedelta(days=30))
-                        .date()
-                        .isoformat(),
-                    },
-                )
-                self._append_job_log(job_id, "Created initial user in 3x-ui and stored share link")
 
             try:
                 with self._xui_session(self.get_deployment(deployment_id)) as xui:

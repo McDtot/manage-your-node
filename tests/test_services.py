@@ -401,6 +401,42 @@ def test_deployment_persists_auto_and_manual_reality_settings(services, monkeypa
     assert services.wait_for_workers()
 
 
+def test_deployment_does_not_create_an_initial_user(services, monkeypatch):
+    server = services.create_server(
+        {
+            "name": "edge-no-initial-user",
+            "host": "203.0.113.51",
+            "sshPort": 22,
+            "sshUser": "deploy",
+            "authType": "agent",
+        }
+    )
+    monkeypatch.setattr("app.services.time.sleep", lambda _seconds: None)
+
+    result = services.start_deployment(
+        server["id"],
+        {
+            "installMethod": "dry-run",
+            "realityMode": "auto",
+            # Legacy deployment payloads must not bypass the user page.
+            "createInitialClient": True,
+            "clientName": "legacy-default-user",
+            "quotaGb": 100,
+            "expiresAt": "2030-01-01",
+        },
+    )
+
+    assert services.wait_for_workers()
+    assert services.get_job(result["job"]["id"])["status"] == "success"
+    assert services.list_clients() == []
+    deployment = next(
+        item
+        for item in services.list_deployments()
+        if item["id"] == result["deployment"]["id"]
+    )
+    assert deployment["client_count"] == 0
+
+
 def test_native_reality_target_probe_is_persisted(services, monkeypatch):
     deployment_id = _create_ready_deployment(services, "probe", "203.0.113.60")
     services.db.execute(
