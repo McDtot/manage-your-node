@@ -80,7 +80,7 @@ function setSection(id) {
     servers: ["INFRASTRUCTURE", "服务器"],
     deployments: ["PROVISIONING", "部署"],
     chains: ["ROUTING", "代理链"],
-    clients: ["ACCESS", "客户端"],
+    clients: ["ACCESS", "用户"],
     logs: ["ACTIVITY", "任务日志"],
   };
   $$(".section").forEach((section) => {
@@ -233,7 +233,7 @@ function render() {
   renderChains();
   renderClients();
   renderSelects();
-  $("#statusLine").textContent = `${state.servers.length} 台服务器，${state.deployments.length} 个部署，${state.chains.length} 条代理链，${state.subscriptions.length} 条订阅，${state.clients.length} 个客户端`;
+  $("#statusLine").textContent = `${state.servers.length} 台服务器，${state.deployments.length} 个部署，${state.chains.length} 条代理链，${state.subscriptions.length} 条订阅，${state.clients.length} 名用户`;
 }
 
 function renderSummary() {
@@ -355,7 +355,7 @@ function chainLinkProtocols() {
 
 function chainPreviewText(selected) {
   if (!selected.length) return "未选择";
-  let preview = `客户端 — VLESS + REALITY → ${selected[0].server_name}`;
+  let preview = `用户设备 — VLESS + REALITY → ${selected[0].server_name}`;
   for (let index = 1; index < selected.length; index += 1) {
     const protocol = chainProtocolFor(selected[index - 1].id, selected[index].id);
     preview += ` — ${chainProtocolLabel(protocol)} → ${selected[index].server_name}`;
@@ -406,7 +406,7 @@ function chainSelectedItem(deployment, index) {
       <span class="chain-index">${index + 1}</span>
       <div>
         <strong>${escapeHtml(deployment.server_name)}</strong>
-        <small>${index === 0 ? "入口 · 客户端经 VLESS + REALITY 接入" : index === state.chainDraft.length - 1 ? "出口" : "中继"} · ${escapeHtml(deployment.host)}:${deployment.proxy_port}</small>
+        <small>${index === 0 ? "入口 · 用户设备经 VLESS + REALITY 接入" : index === state.chainDraft.length - 1 ? "出口" : "中继"} · ${escapeHtml(deployment.host)}:${deployment.proxy_port}</small>
       </div>
       <div class="chain-node-actions">
         <button class="ghost icon-button" type="button" data-chain-up="${index}" title="上移">↑</button>
@@ -475,9 +475,11 @@ function deploymentItem(deployment, options = {}) {
       <div class="meta">面板：<span class="mono">127.0.0.1:${deployment.panel_port}${escapeHtml(deployment.panel_path)}</span>（仅 SSH 隧道）</div>
       <div class="meta">面板账号由控制器加密保管；面板仅允许通过 SSH 隧道访问</div>
       <div class="meta">入站 ID：<span class="mono">${escapeHtml(deployment.xui_inbound_id || "未同步")}</span></div>
+      <div class="meta">用户：${Number(deployment.client_count || 0)} 名（每名用户使用独立 UUID）</div>
       <div class="meta">伪装目标：<span class="mono">${escapeHtml(deployment.reality_dest || (deployment.reality_mode === "auto" ? "自动检测中" : "-"))}</span> · ${deployment.reality_mode === "auto" ? "自动选择" : "手动指定"}</div>
       <div class="meta">默认订阅：<span class="mono">${escapeHtml(subscriptionUrl)}</span></div>
       <div class="item-actions">
+        ${deployment.status === "ready" ? `<button class="primary" data-add-user="${deployment.id}">添加用户</button>` : ""}
         <button class="ghost" data-section-jump="subscriptions">管理订阅</button>
         ${options.allowDelete ? `<button class="danger" data-delete-deployment="${deployment.id}">删除</button>` : ""}
       </div>
@@ -511,7 +513,25 @@ function subscriptionItem(subscription) {
 }
 
 function renderClients() {
-  $("#clientList").innerHTML = state.clients.map(clientItem).join("") || empty("暂无客户端");
+  $("#clientList").innerHTML = state.deployments.map((deployment) => {
+    const users = state.clients.filter((client) => client.deployment_id === deployment.id);
+    return `
+      <section class="node-user-group">
+        <div class="item-head">
+          <div class="item-title">
+            <strong>${escapeHtml(deployment.server_name)}</strong>
+            <small>${escapeHtml(deployment.protocol)} · ${escapeHtml(deployment.host)}:${deployment.proxy_port}</small>
+          </div>
+          <span class="badge ${users.length ? "ok" : ""}">${users.length} 名用户</span>
+        </div>
+        <div class="meta">入站 ID：<span class="mono">${escapeHtml(deployment.xui_inbound_id || "未同步")}</span></div>
+        <div class="node-user-list">
+          ${users.map(clientItem).join("") || empty("该节点暂无用户")}
+        </div>
+        ${deployment.status === "ready" ? `<div class="item-actions"><button class="primary" data-add-user="${deployment.id}">＋ 添加用户</button></div>` : ""}
+      </section>
+    `;
+  }).join("") || empty("暂无节点，请先完成部署");
 }
 
 function clientItem(client) {
@@ -523,7 +543,7 @@ function clientItem(client) {
       <div class="item-head">
         <div class="item-title">
           <strong>${escapeHtml(client.name)}</strong>
-          <small>${escapeHtml(client.server_name)} · 到期 ${escapeHtml(client.expires_at)}</small>
+          <small>节点 ${escapeHtml(client.server_name)} · 到期 ${escapeHtml(client.expires_at)}</small>
         </div>
         ${statusBadge(client.enabled ? "enabled" : "disabled")}
       </div>
@@ -531,7 +551,7 @@ function clientItem(client) {
       <div class="meta">${bytes(client.used_bytes)} / ${bytes(client.quota_bytes)} · UUID <span class="mono">${escapeHtml(client.uuid)}</span></div>
       <div class="mono">${escapeHtml(client.share_link)}</div>
       <div class="item-actions">
-        <button class="secondary" data-copy="${escapeHtml(client.share_link)}">复制节点</button>
+        <button class="secondary" data-copy="${escapeHtml(client.share_link)}">复制连接</button>
         <button class="ghost" data-edit-client="${client.id}">编辑</button>
         <button class="ghost" data-reset-client="${client.id}">重置流量</button>
         <button class="ghost" data-toggle-client="${client.id}" data-enabled="${client.enabled ? 0 : 1}">
@@ -550,7 +570,7 @@ function renderSelects() {
 
   const deploymentOptions = state.deployments
     .filter((deployment) => deployment.status === "ready")
-    .map((deployment) => `<option value="${deployment.id}">${escapeHtml(deployment.server_name)} · ${escapeHtml(deployment.protocol)}</option>`)
+    .map((deployment) => `<option value="${deployment.id}">${escapeHtml(deployment.server_name)} · ${escapeHtml(deployment.protocol)} · ${Number(deployment.client_count || 0)} 名用户</option>`)
     .join("");
   $("#clientDeploymentSelect").innerHTML = deploymentOptions || `<option value="">先完成部署</option>`;
 }
@@ -561,7 +581,7 @@ function empty(text) {
 
 function openClientEdit(clientId) {
   const client = state.clients.find((item) => item.id === clientId);
-  if (!client) return toast("客户端不存在");
+  if (!client) return toast("用户不存在");
   const form = $("#clientEditForm");
   form.elements.id.value = client.id;
   form.elements.name.value = client.name;
@@ -715,14 +735,17 @@ function bindEvents() {
     event.preventDefault();
     const form = event.currentTarget;
     const data = formData(form);
-    if (!data.deploymentId) return toast("请选择部署");
+    if (!data.deploymentId) return toast("请选择节点");
+    const deploymentId = data.deploymentId;
     await api(`/api/deployments/${data.deploymentId}/clients`, {
       method: "POST",
       body: JSON.stringify(data),
     });
     form.reset();
-    toast("客户端已创建");
     await refresh();
+    form.elements.deploymentId.value = deploymentId;
+    form.elements.name.focus();
+    toast("用户已创建，可继续在该节点添加其他用户");
   });
 
   $("#subscriptionCreateForm").addEventListener("submit", async (event) => {
@@ -764,7 +787,7 @@ function bindEvents() {
     const form = event.currentTarget;
     const data = formData(form);
     const client = state.clients.find((item) => item.id === data.id);
-    if (!client) return toast("客户端不存在");
+    if (!client) return toast("用户不存在");
     await api(`/api/clients/${data.id}`, {
       method: "PATCH",
       body: JSON.stringify({
@@ -775,7 +798,7 @@ function bindEvents() {
       }),
     });
     closeClientEdit();
-    toast("客户端已更新");
+    toast("用户已更新");
     await refresh();
   });
 
@@ -922,6 +945,12 @@ function bindEvents() {
       $("#deployServerSelect").value = target.dataset.deployServer;
     }
 
+    if (target.dataset.addUser) {
+      setSection("clients");
+      $("#clientDeploymentSelect").value = target.dataset.addUser;
+      $("#clientForm").elements.name.focus();
+    }
+
     if (target.dataset.deleteServer) {
       const server = state.servers.find((item) => item.id === target.dataset.deleteServer);
       if (!confirm(`删除服务器 ${server?.name || ""}？这会同步卸载远端 3x-ui 并删除本地记录。`)) return;
@@ -1018,7 +1047,7 @@ function bindEvents() {
           enabled: Number(target.dataset.enabled) === 1,
         }),
       });
-      toast("客户端状态已更新");
+      toast("用户状态已更新");
       await refresh();
     }
   });

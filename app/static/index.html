@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Manage Your Node</title>
-    <link rel="stylesheet" href="/static/styles.css?v=ios-20260713" />
+    <link rel="stylesheet" href="/static/styles.css?v=users-20260714" />
   </head>
   <body>
     <div class="shell">
@@ -41,7 +41,7 @@
           </button>
           <button class="nav-item" data-section="clients">
             <span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M8 3h8a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2Zm3 15h2"/></svg></span>
-            <span>客户端</span>
+            <span>用户</span>
           </button>
           <button class="nav-item" data-section="logs">
             <span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M5 4h14v16H5V4Zm3 4h8M8 12h8m-8 4h5"/></svg></span>
@@ -83,7 +83,7 @@
               <small>当前可用节点</small>
             </article>
             <article class="metric metric-purple">
-              <div class="metric-top"><span class="metric-icon" aria-hidden="true">▣</span><span>客户端</span></div>
+              <div class="metric-top"><span class="metric-icon" aria-hidden="true">▣</span><span>用户</span></div>
               <strong id="metricClients">0</strong>
               <small>已签发配置</small>
             </article>
@@ -206,12 +206,12 @@
               </div>
               <label class="check">
                 <input name="createInitialClient" type="checkbox" checked />
-                创建首个客户端
+                创建首个用户
               </label>
               <div class="row">
                 <label>
-                  客户端名
-                  <input name="clientName" value="default-client" />
+                  用户名
+                  <input name="clientName" value="default-user" />
                 </label>
                 <label>
                   流量 GB
@@ -252,7 +252,7 @@
                 <section>
                   <h3>链路顺序</h3>
                   <div id="chainSelectedNodes" class="chain-node-list chain-dropzone"></div>
-                  <div class="meta">客户端固定经 VLESS + REALITY 接入第一台；节点之间可逐跳选择 SS2022 或 Reality</div>
+                  <div class="meta">用户设备固定经 VLESS + REALITY 接入第一台；节点之间可逐跳选择 SS2022 或 Reality</div>
                   <div class="meta">SS2022 适合当前海外内部转发；Xray 已提示该协议未来可能移除，长期方案建议新建链路时选择 Reality</div>
                 </section>
               </div>
@@ -298,15 +298,16 @@
           <div class="grid two">
             <form class="panel form" id="clientForm">
               <div class="panel-head">
-                <h2>新增客户端</h2>
+                <h2>新增用户</h2>
               </div>
               <label>
-                部署
+                节点
                 <select name="deploymentId" id="clientDeploymentSelect" required></select>
               </label>
+              <div class="meta">一个节点可以创建多个用户，每名用户拥有独立 UUID、流量额度和到期时间。</div>
               <label>
-                名称
-                <input name="name" placeholder="phone-a" required />
+                用户名
+                <input name="name" placeholder="user-a" required />
               </label>
               <div class="row">
                 <label>
@@ -318,12 +319,12 @@
                   <input name="expiresAt" type="date" />
                 </label>
               </div>
-              <button class="primary" type="submit">创建客户端</button>
+              <button class="primary" type="submit">创建用户</button>
             </form>
 
             <section class="panel wide">
               <div class="panel-head">
-                <h2>客户端列表</h2>
+                <h2>节点与用户</h2>
               </div>
               <div id="clientList" class="list"></div>
             </section>
@@ -347,11 +348,11 @@
       <form class="dialog-panel form" id="clientEditForm">
         <input type="hidden" name="id" />
         <div class="panel-head">
-          <h2>编辑客户端</h2>
+          <h2>编辑用户</h2>
           <button class="ghost icon-button" type="button" data-close-client-edit>×</button>
         </div>
         <label>
-          名称
+          用户名
           <input name="name" required />
         </label>
         <label>
@@ -389,6 +390,6 @@
     </dialog>
 
     <div class="toast" id="toast" hidden></div>
-    <script src="/static/app.js?v=subscription-formats-20260713"></script>
+    <script src="/static/app.js?v=users-v2-20260714"></script>
   </body>
 </html>

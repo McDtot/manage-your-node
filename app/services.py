@@ -848,7 +848,7 @@ class AppServices:
                 self.create_client(
                     deployment_id,
                     {
-                        "name": payload.get("clientName") or "default-client",
+                        "name": payload.get("clientName") or "default-user",
                         "quotaGb": payload.get("quotaGb") or 100,
                         "expiresAt": payload.get("expiresAt")
                         or (datetime.now(timezone.utc) + timedelta(days=30))
@@ -856,7 +856,7 @@ class AppServices:
                         .isoformat(),
                     },
                 )
-                self._append_job_log(job_id, "Created initial local client and share link")
+                self._append_job_log(job_id, "Created initial local user and share link")
 
             self._finish_job(job_id, "success", None)
         except Exception as exc:  # noqa: BLE001
@@ -936,7 +936,7 @@ class AppServices:
                 self.create_client(
                     deployment_id,
                     {
-                        "name": payload.get("clientName") or "default-client",
+                        "name": payload.get("clientName") or "default-user",
                         "quotaGb": payload.get("quotaGb") or 100,
                         "expiresAt": payload.get("expiresAt")
                         or (datetime.now(timezone.utc) + timedelta(days=30))
@@ -944,7 +944,7 @@ class AppServices:
                         .isoformat(),
                     },
                 )
-                self._append_job_log(job_id, "Created initial client in 3x-ui and stored share link")
+                self._append_job_log(job_id, "Created initial user in 3x-ui and stored share link")
 
             try:
                 with self._xui_session(self.get_deployment(deployment_id)) as xui:
@@ -2123,6 +2123,23 @@ echo "Removed $SERVICE_NAME"
         )
         return {row["id"]: row for row in rows}
 
+    def _assert_user_name_available(
+        self,
+        deployment_id: str,
+        name: str,
+        exclude_client_id: str | None = None,
+    ) -> None:
+        sql = (
+            "SELECT id FROM clients "
+            "WHERE deployment_id = ? AND name = ? COLLATE NOCASE"
+        )
+        params: list[Any] = [deployment_id, name]
+        if exclude_client_id:
+            sql += " AND id != ?"
+            params.append(exclude_client_id)
+        if self.db.query_one(sql, tuple(params)):
+            raise ValueError("该节点已存在同名用户")
+
     def create_client(self, deployment_id: str, payload: dict[str, Any]) -> dict[str, Any]:
         deployment = self.get_deployment(deployment_id)
         client_id = new_id("cli")
@@ -2144,6 +2161,7 @@ echo "Removed $SERVICE_NAME"
         name = require_text(payload, "name")
         if len(name) > 128:
             raise ValueError("name must be 128 characters or fewer")
+        self._assert_user_name_available(deployment_id, name)
         tag = quote(name)
         share_link = (
             f"vless://{client_uuid}@{url_host(deployment['host'])}:{deployment['proxy_port']}"
@@ -2231,7 +2249,7 @@ echo "Removed $SERVICE_NAME"
     def get_client(self, client_id: str) -> dict[str, Any]:
         rows = [row for row in self.list_clients() if row["id"] == client_id]
         if not rows:
-            raise ValueError("client not found")
+            raise ValueError("用户不存在")
         return rows[0]
 
     def update_client(self, client_id: str, payload: dict[str, Any]) -> dict[str, Any]:
@@ -2240,6 +2258,13 @@ echo "Removed $SERVICE_NAME"
         name = str(payload.get("name", client["name"])).strip()
         if not name:
             raise ValueError("name is required")
+        if len(name) > 128:
+            raise ValueError("name must be 128 characters or fewer")
+        self._assert_user_name_available(
+            client["deployment_id"],
+            name,
+            exclude_client_id=client_id,
+        )
         try:
             quota_gb = float(
                 payload.get("quotaGb", client["quota_bytes"] / 1024 / 1024 / 1024)
