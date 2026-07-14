@@ -146,6 +146,49 @@ def test_deployment_list_does_not_expose_control_credentials(services):
     assert "encrypted_api_token" not in deployment
 
 
+def test_one_node_supports_multiple_users(services):
+    deployment_id = _create_ready_deployment(
+        services,
+        "multi-user",
+        "203.0.113.25",
+    )
+    services._ensure_deployment_subscription(deployment_id, "edge-multi-user")
+
+    first = services.create_client(
+        deployment_id,
+        {"name": "alice", "quotaGb": 100, "expiresAt": "2030-01-01"},
+    )
+    second = services.create_client(
+        deployment_id,
+        {"name": "bob", "quotaGb": 200, "expiresAt": "2030-02-01"},
+    )
+
+    users = [
+        item for item in services.list_clients()
+        if item["deployment_id"] == deployment_id
+    ]
+    assert {item["name"] for item in users} == {"alice", "bob"}
+    assert first["uuid"] != second["uuid"]
+    assert services.list_deployments()[0]["client_count"] == 2
+
+
+def test_user_names_are_unique_within_a_node(services):
+    deployment_id = _create_ready_deployment(
+        services,
+        "unique-user",
+        "203.0.113.26",
+    )
+    services._ensure_deployment_subscription(deployment_id, "edge-unique-user")
+    services.create_client(deployment_id, {"name": "Alice"})
+
+    with pytest.raises(ValueError, match="该节点已存在同名用户"):
+        services.create_client(deployment_id, {"name": "alice"})
+
+    second = services.create_client(deployment_id, {"name": "Bob"})
+    with pytest.raises(ValueError, match="该节点已存在同名用户"):
+        services.update_client(second["id"], {"name": "ALICE"})
+
+
 def test_subscription_lifecycle(services):
     sub = services.create_subscription({"name": "my-sub"})
     assert sub["name"] == "my-sub"
