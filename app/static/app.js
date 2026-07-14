@@ -540,6 +540,8 @@ function clientItem(client) {
   const percent = client.quota_bytes > 0
     ? Math.min(100, Math.round((client.used_bytes / client.quota_bytes) * 100))
     : 0;
+  const resetDays = Number(client.traffic_reset_days || 0);
+  const resetLabel = resetDays > 0 ? `每 ${resetDays} 天自动重置` : "不自动重置";
   return `
     <article class="item">
       <div class="item-head">
@@ -550,7 +552,7 @@ function clientItem(client) {
         ${statusBadge(client.enabled ? "enabled" : "disabled")}
       </div>
       <div class="progress"><span style="width: ${percent}%"></span></div>
-      <div class="meta">${bytes(client.used_bytes)} / ${bytes(client.quota_bytes)} · UUID <span class="mono">${escapeHtml(client.uuid)}</span></div>
+      <div class="meta">${bytes(client.used_bytes)} / ${bytes(client.quota_bytes)} · ${resetLabel} · UUID <span class="mono">${escapeHtml(client.uuid)}</span></div>
       <div class="mono">${escapeHtml(client.share_link)}</div>
       <div class="item-actions">
         <button class="secondary" data-copy="${escapeHtml(client.share_link)}">复制连接</button>
@@ -588,6 +590,7 @@ function openClientEdit(clientId) {
   form.elements.id.value = client.id;
   form.elements.name.value = client.name;
   form.elements.quotaGb.value = gb(client.quota_bytes);
+  form.elements.trafficResetDays.value = Number(client.traffic_reset_days || 0);
   $("#clientEditDialog").showModal();
 }
 
@@ -817,6 +820,7 @@ function bindEvents() {
       body: JSON.stringify({
         name: data.name,
         quotaGb: data.quotaGb,
+        trafficResetDays: data.trafficResetDays,
         expiresAt: client.expires_at,
         enabled: Boolean(client.enabled),
       }),
@@ -1055,12 +1059,16 @@ function bindEvents() {
     }
 
     if (target.dataset.resetClient) {
-      await api(`/api/clients/${target.dataset.resetClient}/reset`, {
-        method: "POST",
-        body: "{}",
-      });
-      toast("流量已重置");
-      await refresh();
+      try {
+        await api(`/api/clients/${target.dataset.resetClient}/reset`, {
+          method: "POST",
+          body: "{}",
+        });
+        toast("本地与 3x-ui 流量已重置");
+        await refresh();
+      } catch (error) {
+        toast(error instanceof Error ? error.message : "重置流量失败");
+      }
     }
 
     if (target.dataset.toggleClient) {

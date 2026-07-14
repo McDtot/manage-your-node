@@ -1,4 +1,5 @@
 import base64
+from contextlib import nullcontext
 
 import pytest
 import yaml
@@ -187,6 +188,141 @@ def test_user_names_are_unique_within_a_node(services):
     second = services.create_client(deployment_id, {"name": "Bob"})
     with pytest.raises(ValueError, match="该节点已存在同名用户"):
         services.update_client(second["id"], {"name": "ALICE"})
+
+
+def test_user_traffic_reset_period_can_be_configured(services):
+    deployment_id = _create_ready_deployment(
+        services,
+        "traffic-cycle",
+        "203.0.113.29",
+    )
+    services._ensure_deployment_subscription(deployment_id, "edge-traffic-cycle")
+
+    client = services.create_client(
+        deployment_id,
+        {"name": "periodic-user", "trafficResetDays": 30},
+    )
+    assert client["traffic_reset_days"] == 30
+
+    updated = services.update_client(client["id"], {"trafficResetDays": 45})
+    assert updated["traffic_reset_days"] == 45
+
+    for invalid in (-1, 3651, "1.5", 1.5, True):
+        with pytest.raises(ValueError, match="trafficResetDays"):
+            services.update_client(client["id"], {"trafficResetDays": invalid})
+
+
+def test_updating_traffic_reset_period_syncs_to_remote(services, monkeypatch):
+    deployment_id = _create_ready_deployment(
+        services,
+        "traffic-cycle-remote",
+        "203.0.113.30",
+    )
+    services._ensure_deployment_subscription(deployment_id, "edge-traffic-cycle-remote")
+    client = services.create_client(deployment_id, {"name": "remote-periodic-user"})
+    services.db.execute(
+        "UPDATE deployments SET install_method = 'native', xui_inbound_id = 44 WHERE id = ?",
+        (deployment_id,),
+    )
+    updated_payloads = []
+
+    class FakeXui:
+        def wait_ready(self, seconds):
+            pass
+
+        def login(self):
+            pass
+
+        def get_client(self, email):
+            return {"client": {"uuid": client["uuid"], "email": email}}
+
+        def update_client(self, email, payload):
+            updated_payloads.append((email, payload))
+
+        def client_links(self, email):
+            return []
+
+        def restart_xray(self):
+            pass
+
+    monkeypatch.setattr(services, "_xui_session", lambda _deployment: nullcontext(FakeXui()))
+
+    updated = services.update_client(client["id"], {"trafficResetDays": 60})
+
+    assert updated["traffic_reset_days"] == 60
+    assert updated_payloads[0][0] == "remote-periodic-user"
+    assert updated_payloads[0][1]["reset"] == 60
+
+
+def test_reset_client_traffic_resets_remote_before_local(services, monkeypatch):
+    deployment_id = _create_ready_deployment(
+        services,
+        "reset-remote",
+        "203.0.113.27",
+    )
+    services._ensure_deployment_subscription(deployment_id, "edge-reset-remote")
+    client = services.create_client(deployment_id, {"name": "alice+reset"})
+    services.db.execute(
+        "UPDATE deployments SET install_method = 'native', xui_inbound_id = 42 WHERE id = ?",
+        (deployment_id,),
+    )
+    services.db.execute(
+        "UPDATE clients SET used_bytes = ? WHERE id = ?",
+        (123456, client["id"]),
+    )
+    calls = []
+
+    class FakeXui:
+        def wait_ready(self, seconds):
+            calls.append(("wait_ready", seconds))
+
+        def login(self):
+            calls.append(("login",))
+
+        def reset_client_traffic(self, inbound_id, email):
+            calls.append(("reset", inbound_id, email))
+
+    monkeypatch.setattr(services, "_xui_session", lambda _deployment: nullcontext(FakeXui()))
+
+    reset = services.reset_client(client["id"])
+
+    assert calls == [("wait_ready", 30), ("login",), ("reset", 42, "alice+reset")]
+    assert reset["used_bytes"] == 0
+
+
+def test_reset_client_traffic_keeps_local_usage_when_remote_fails(services, monkeypatch):
+    deployment_id = _create_ready_deployment(
+        services,
+        "reset-failure",
+        "203.0.113.28",
+    )
+    services._ensure_deployment_subscription(deployment_id, "edge-reset-failure")
+    client = services.create_client(deployment_id, {"name": "failed-reset"})
+    services.db.execute(
+        "UPDATE deployments SET install_method = 'native', xui_inbound_id = 43 WHERE id = ?",
+        (deployment_id,),
+    )
+    services.db.execute(
+        "UPDATE clients SET used_bytes = ? WHERE id = ?",
+        (654321, client["id"]),
+    )
+
+    class FailingXui:
+        def wait_ready(self, seconds):
+            pass
+
+        def login(self):
+            pass
+
+        def reset_client_traffic(self, inbound_id, email):
+            raise RuntimeError("remote reset failed")
+
+    monkeypatch.setattr(services, "_xui_session", lambda _deployment: nullcontext(FailingXui()))
+
+    with pytest.raises(RuntimeError, match="remote reset failed"):
+        services.reset_client(client["id"])
+
+    assert services.get_client(client["id"])["used_bytes"] == 654321
 
 
 def test_subscription_lifecycle(services):

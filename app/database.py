@@ -80,6 +80,7 @@ class Database:
                     uuid TEXT NOT NULL,
                     quota_bytes INTEGER NOT NULL,
                     used_bytes INTEGER NOT NULL,
+                    traffic_reset_days INTEGER NOT NULL DEFAULT 0,
                     expires_at TEXT NOT NULL,
                     enabled INTEGER NOT NULL,
                     share_link TEXT NOT NULL,
@@ -244,6 +245,11 @@ class Database:
             )
             self._ensure_column("deployments", "reality_dest", "TEXT NOT NULL DEFAULT ''")
             self._ensure_column("deployments", "reality_sni", "TEXT NOT NULL DEFAULT ''")
+            self._ensure_column(
+                "clients",
+                "traffic_reset_days",
+                "INTEGER NOT NULL DEFAULT 0",
+            )
             self._ensure_column("jobs", "chain_id", "TEXT")
             self._ensure_column("proxy_chains", "last_error", "TEXT")
             self._ensure_column(

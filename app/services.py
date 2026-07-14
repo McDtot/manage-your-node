@@ -292,6 +292,21 @@ def int_field(payload: dict[str, Any], key: str, default: int) -> int:
         raise ValueError(f"{key} must be a number") from exc
 
 
+def traffic_reset_days_field(payload: dict[str, Any], default: int = 0) -> int:
+    raw = payload.get("trafficResetDays", default)
+    if raw is None or (isinstance(raw, str) and not raw.strip()):
+        raw = default
+    if isinstance(raw, bool) or (isinstance(raw, float) and not raw.is_integer()):
+        raise ValueError("trafficResetDays must be a whole number")
+    try:
+        days = int(raw)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("trafficResetDays must be a whole number") from exc
+    if not 0 <= days <= 3650:
+        raise ValueError("trafficResetDays must be between 0 and 3650")
+    return days
+
+
 def port_field(payload: dict[str, Any], key: str, default: int) -> int:
     value = int_field(payload, key, default)
     if not 1 <= value <= 65535:
@@ -1243,7 +1258,8 @@ exit 43
             """
             SELECT c.id, c.deployment_id, d.server_id, s.name AS server_name,
                    s.host, c.name, c.uuid, c.quota_bytes, c.used_bytes,
-                   c.expires_at, c.enabled, c.share_link, c.subscription_url,
+                   c.traffic_reset_days, c.expires_at, c.enabled,
+                   c.share_link, c.subscription_url,
                    c.created_at, c.updated_at
             FROM clients c
             JOIN deployments d ON d.id = c.deployment_id
@@ -2123,6 +2139,7 @@ echo "Removed $SERVICE_NAME"
         if not math.isfinite(quota_gb) or not 0 <= quota_gb <= 1_000_000:
             raise ValueError("quotaGb must be between 0 and 1000000")
         quota_bytes = int(quota_gb * 1024 * 1024 * 1024)
+        traffic_reset_days = traffic_reset_days_field(payload)
         expires_at = str(payload.get("expiresAt", "")).strip()
         if not expires_at:
             expires_at = (datetime.now(timezone.utc) + timedelta(days=30)).date().isoformat()
@@ -2155,6 +2172,7 @@ echo "Removed $SERVICE_NAME"
                     sub_id=sub_id,
                     quota_bytes=quota_bytes,
                     expires_ms=self._expires_ms(expires_at),
+                    reset_days=traffic_reset_days,
                 )
             if links:
                 share_link = _normalize_client_share_link_host(
@@ -2167,9 +2185,10 @@ echo "Removed $SERVICE_NAME"
                 """
                 INSERT INTO clients (
                     id, deployment_id, name, uuid, quota_bytes, used_bytes,
-                    expires_at, enabled, share_link, subscription_url,
+                    traffic_reset_days, expires_at, enabled, share_link,
+                    subscription_url,
                     created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     client_id,
@@ -2178,6 +2197,7 @@ echo "Removed $SERVICE_NAME"
                     client_uuid,
                     quota_bytes,
                     0,
+                    traffic_reset_days,
                     expires_at,
                     1,
                     share_link,
@@ -2246,6 +2266,10 @@ echo "Removed $SERVICE_NAME"
         if not math.isfinite(quota_gb) or not 0 <= quota_gb <= 1_000_000:
             raise ValueError("quotaGb must be between 0 and 1000000")
         quota_bytes = int(quota_gb * 1024 * 1024 * 1024)
+        traffic_reset_days = traffic_reset_days_field(
+            payload,
+            int(client.get("traffic_reset_days") or 0),
+        )
         expires_at = str(payload.get("expiresAt", client["expires_at"]))
         try:
             date.fromisoformat(expires_at)
@@ -2278,6 +2302,7 @@ echo "Removed $SERVICE_NAME"
                 updated_remote["email"] = name
                 updated_remote["totalGB"] = quota_bytes
                 updated_remote["expiryTime"] = self._expires_ms(expires_at)
+                updated_remote["reset"] = traffic_reset_days
                 updated_remote["enable"] = bool(enabled)
                 xui.update_client(client["name"], updated_remote)
                 try:
@@ -2299,15 +2324,38 @@ echo "Removed $SERVICE_NAME"
         self.db.execute(
             """
             UPDATE clients
-            SET name = ?, quota_bytes = ?, expires_at = ?, enabled = ?, share_link = ?, updated_at = ?
+            SET name = ?, quota_bytes = ?, traffic_reset_days = ?, expires_at = ?,
+                enabled = ?, share_link = ?, updated_at = ?
             WHERE id = ?
             """,
-            (name, quota_bytes, expires_at, enabled, share_link, stamp, client_id),
+            (
+                name,
+                quota_bytes,
+                traffic_reset_days,
+                expires_at,
+                enabled,
+                share_link,
+                stamp,
+                client_id,
+            ),
         )
         return self.get_client(client_id)
 
     def reset_client(self, client_id: str) -> dict[str, Any]:
-        self.get_client(client_id)
+        client = self.get_client(client_id)
+        deployment = self.get_deployment(client["deployment_id"])
+        if (
+            deployment.get("install_method") == "native"
+            and deployment.get("status") == "ready"
+            and deployment.get("xui_inbound_id")
+        ):
+            with self._xui_session(deployment) as xui:
+                xui.wait_ready(seconds=30)
+                xui.login()
+                xui.reset_client_traffic(
+                    int(deployment["xui_inbound_id"]),
+                    client["name"],
+                )
         self.db.execute(
             "UPDATE clients SET used_bytes = 0, updated_at = ? WHERE id = ?",
             (now_iso(), client_id),

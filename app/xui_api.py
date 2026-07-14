@@ -142,6 +142,7 @@ class XuiApiClient:
         sub_id: str,
         quota_bytes: int,
         expires_ms: int,
+        reset_days: int,
     ) -> list[str]:
         payload = {
             "client": {
@@ -155,7 +156,7 @@ class XuiApiClient:
                 "tgId": 0,
                 "subId": sub_id,
                 "comment": "",
-                "reset": 0,
+                "reset": reset_days,
             },
             "inboundIds": [inbound_id],
         }
@@ -174,6 +175,12 @@ class XuiApiClient:
 
     def update_client(self, email: str, client: dict[str, Any]) -> None:
         self.post_json(f"panel/api/clients/update/{quote(email, safe='')}", client)
+
+    def reset_client_traffic(self, inbound_id: int, email: str) -> None:
+        self.post_json(
+            f"panel/api/inbounds/{inbound_id}/resetClientTraffic/{quote(email, safe='')}",
+            {},
+        )
 
     def client_links(self, email: str) -> list[str]:
         links = self.get_json(f"panel/api/clients/links/{quote(email, safe='')}").get("obj") or []

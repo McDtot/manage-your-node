@@ -72,3 +72,34 @@ def test_proxy_chain_protocol_columns_migrate_existing_rows(tmp_path):
         "ss_method": "2022-blake3-aes-256-gcm",
         "encrypted_ss_password": None,
     }
+
+
+def test_client_traffic_reset_period_migrates_existing_table(tmp_path):
+    path = tmp_path / "legacy-clients.sqlite"
+    connection = sqlite3.connect(path)
+    connection.executescript(
+        """
+        CREATE TABLE clients (
+            id TEXT PRIMARY KEY,
+            deployment_id TEXT NOT NULL,
+            name TEXT NOT NULL,
+            uuid TEXT NOT NULL,
+            quota_bytes INTEGER NOT NULL,
+            used_bytes INTEGER NOT NULL,
+            expires_at TEXT NOT NULL,
+            enabled INTEGER NOT NULL,
+            share_link TEXT NOT NULL,
+            subscription_url TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+        """
+    )
+    connection.commit()
+    connection.close()
+
+    db = Database(path)
+    columns = {row["name"]: row for row in db.query_all("PRAGMA table_info(clients)")}
+
+    assert columns["traffic_reset_days"]["notnull"] == 1
+    assert columns["traffic_reset_days"]["dflt_value"] == "0"
