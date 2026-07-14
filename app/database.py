@@ -166,6 +166,15 @@ class Database:
                     FOREIGN KEY(deployment_id) REFERENCES deployments(id) ON DELETE CASCADE
                 );
 
+                CREATE TABLE IF NOT EXISTS subscription_chain_entries (
+                    subscription_id TEXT NOT NULL,
+                    chain_id TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    PRIMARY KEY(subscription_id, chain_id),
+                    FOREIGN KEY(subscription_id) REFERENCES subscriptions(id) ON DELETE CASCADE,
+                    FOREIGN KEY(chain_id) REFERENCES proxy_chains(id) ON DELETE CASCADE
+                );
+
                 CREATE TABLE IF NOT EXISTS login_rate_limits (
                     client_key TEXT PRIMARY KEY,
                     failures TEXT NOT NULL,
@@ -215,6 +224,8 @@ class Database:
                     ON jobs(server_id);
                 CREATE INDEX IF NOT EXISTS idx_proxy_chain_nodes_deployment
                     ON proxy_chain_nodes(deployment_id);
+                CREATE INDEX IF NOT EXISTS idx_subscription_chain_entries_chain
+                    ON subscription_chain_entries(chain_id);
                 CREATE INDEX IF NOT EXISTS idx_audit_events_at
                     ON audit_events(at);
                 CREATE INDEX IF NOT EXISTS idx_operation_locks_job

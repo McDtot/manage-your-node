@@ -207,6 +207,85 @@ def test_subscription_token_rotation_invalidates_old_url(services):
         services.render_managed_subscription(old_token)
 
 
+def test_managed_subscription_can_include_proxy_chains(services):
+    entry_id = _create_ready_deployment(
+        services,
+        "subscription-entry",
+        "203.0.113.61",
+    )
+    exit_id = _create_ready_deployment(
+        services,
+        "subscription-exit",
+        "203.0.113.62",
+    )
+    services._ensure_deployment_subscription(entry_id, "edge-subscription-entry")
+    client = services.create_client(entry_id, {"name": "subscriber", "quotaGb": 20})
+    chain = services.create_proxy_chain({"deploymentIds": [entry_id, exit_id]})
+    chain_link = "vless://ready-proxy-chain"
+    services.db.execute(
+        "UPDATE proxy_chains SET share_link = ?, status = 'ready' WHERE id = ?",
+        (chain_link, chain["id"]),
+    )
+    subscription = services.create_subscription({"name": "combined"})
+
+    config = services.update_managed_subscription(
+        subscription["id"],
+        {
+            "nodes": [{"nodeId": client["id"], "quotaGb": 20}],
+            "chainIds": [chain["id"]],
+        },
+    )
+
+    assert config["selectedChainIds"] == [chain["id"]]
+    assert {item["id"] for item in config["availableChains"]} == {chain["id"]}
+    services.db.execute(
+        "UPDATE clients SET used_bytes = ? WHERE id = ?",
+        (3 * 1024**3, client["id"]),
+    )
+    summary = services.get_subscription(subscription["id"])
+    assert summary["node_count"] == 1
+    assert summary["chain_count"] == 1
+    assert summary["used_bytes"] == 3 * 1024**3
+    assert summary["remaining_bytes"] == 17 * 1024**3
+    listed = next(
+        item
+        for item in services.list_subscriptions()
+        if item["id"] == subscription["id"]
+    )
+    assert listed["remaining_bytes"] == 17 * 1024**3
+    rendered = base64.b64decode(
+        services.render_managed_subscription(subscription["token"])
+    ).decode("utf-8")
+    assert rendered.splitlines() == [client["share_link"], chain_link]
+
+    services.db.execute(
+        "UPDATE clients SET used_bytes = ? WHERE id = ?",
+        (25 * 1024**3, client["id"]),
+    )
+    assert services.get_subscription(subscription["id"])["remaining_bytes"] == 0
+
+    # Older API clients that only update nodes must not silently drop proxy chains.
+    services.update_managed_subscription(subscription["id"], {"nodes": []})
+    assert services.get_managed_subscription_config(subscription["id"])[
+        "selectedChainIds"
+    ] == [chain["id"]]
+
+
+def test_unready_proxy_chain_cannot_be_added_to_managed_subscription(services):
+    deployment_ids = [
+        _create_ready_deployment(services, "unready-entry", "203.0.113.63"),
+        _create_ready_deployment(services, "unready-exit", "203.0.113.64"),
+    ]
+    chain = services.create_proxy_chain({"deploymentIds": deployment_ids})
+    subscription = services.create_subscription({"name": "combined"})
+
+    with pytest.raises(ValueError, match="proxy chain is not ready"):
+        services.update_managed_subscription(
+            subscription["id"],
+            {"chainIds": [chain["id"]]},
+        )
+
+
 def test_recover_orphaned_jobs(services):
     db = services.db
     db.execute(

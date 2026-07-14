@@ -2461,11 +2461,40 @@ echo "3x-ui cleanup completed"
         rows = self.db.query_all(
             """
             SELECT s.id, s.name, s.token, s.created_at, s.updated_at,
-                   COUNT(se.node_client_id) AS node_count,
-                   COALESCE(SUM(se.quota_bytes), 0) AS quota_bytes
+                   (
+                       SELECT COUNT(*)
+                       FROM subscription_entries se
+                       WHERE se.subscription_id = s.id
+                   ) AS node_count,
+                   (
+                       SELECT COUNT(*)
+                       FROM subscription_chain_entries sce
+                       WHERE sce.subscription_id = s.id
+                   ) AS chain_count,
+                   COALESCE((
+                       SELECT SUM(se.quota_bytes)
+                       FROM subscription_entries se
+                       WHERE se.subscription_id = s.id
+                   ), 0) AS quota_bytes,
+                   COALESCE((
+                       SELECT SUM(c.used_bytes)
+                       FROM subscription_entries se
+                       JOIN clients c ON c.id = se.node_client_id
+                       WHERE se.subscription_id = s.id
+                   ), 0) AS used_bytes,
+                   COALESCE((
+                       SELECT SUM(
+                           CASE
+                               WHEN se.quota_bytes > c.used_bytes
+                               THEN se.quota_bytes - c.used_bytes
+                               ELSE 0
+                           END
+                       )
+                       FROM subscription_entries se
+                       JOIN clients c ON c.id = se.node_client_id
+                       WHERE se.subscription_id = s.id
+                   ), 0) AS remaining_bytes
             FROM subscriptions s
-            LEFT JOIN subscription_entries se ON se.subscription_id = s.id
-            GROUP BY s.id
             ORDER BY s.created_at DESC
             """
         )
@@ -2492,12 +2521,41 @@ echo "3x-ui cleanup completed"
         row = self.db.query_one(
             """
             SELECT s.id, s.name, s.token, s.created_at, s.updated_at,
-                   COUNT(se.node_client_id) AS node_count,
-                   COALESCE(SUM(se.quota_bytes), 0) AS quota_bytes
+                   (
+                       SELECT COUNT(*)
+                       FROM subscription_entries se
+                       WHERE se.subscription_id = s.id
+                   ) AS node_count,
+                   (
+                       SELECT COUNT(*)
+                       FROM subscription_chain_entries sce
+                       WHERE sce.subscription_id = s.id
+                   ) AS chain_count,
+                   COALESCE((
+                       SELECT SUM(se.quota_bytes)
+                       FROM subscription_entries se
+                       WHERE se.subscription_id = s.id
+                   ), 0) AS quota_bytes,
+                   COALESCE((
+                       SELECT SUM(c.used_bytes)
+                       FROM subscription_entries se
+                       JOIN clients c ON c.id = se.node_client_id
+                       WHERE se.subscription_id = s.id
+                   ), 0) AS used_bytes,
+                   COALESCE((
+                       SELECT SUM(
+                           CASE
+                               WHEN se.quota_bytes > c.used_bytes
+                               THEN se.quota_bytes - c.used_bytes
+                               ELSE 0
+                           END
+                       )
+                       FROM subscription_entries se
+                       JOIN clients c ON c.id = se.node_client_id
+                       WHERE se.subscription_id = s.id
+                   ), 0) AS remaining_bytes
             FROM subscriptions s
-            LEFT JOIN subscription_entries se ON se.subscription_id = s.id
             WHERE s.id = ?
-            GROUP BY s.id
             """,
             (subscription_id,),
         )
@@ -2517,9 +2575,29 @@ echo "3x-ui cleanup completed"
             """,
             (subscription_id,),
         )
+        selected_chains = self.db.query_all(
+            """
+            SELECT chain_id
+            FROM subscription_chain_entries
+            WHERE subscription_id = ?
+            ORDER BY created_at ASC
+            """,
+            (subscription_id,),
+        )
+        available_chains = [
+            {
+                "id": chain["id"],
+                "name": chain["name"],
+                "status": chain["status"],
+                "share_link": chain["share_link"],
+                "path": chain["path"],
+            }
+            for chain in self.list_proxy_chains()
+        ]
         return {
             "subscription": subscription,
             "availableNodes": self.list_clients(),
+            "availableChains": available_chains,
             "selectedNodes": [
                 {
                     "nodeClientId": row["node_client_id"],
@@ -2527,6 +2605,7 @@ echo "3x-ui cleanup completed"
                 }
                 for row in selected
             ],
+            "selectedChainIds": [row["chain_id"] for row in selected_chains],
         }
 
     def update_managed_subscription(
@@ -2541,6 +2620,10 @@ echo "3x-ui cleanup completed"
             nodes = [{"nodeId": node_id} for node_id in payload.get("nodeIds", [])]
         if not isinstance(nodes, list):
             raise ValueError("nodes must be a list")
+        chain_ids_supplied = "chainIds" in payload
+        chain_ids = payload.get("chainIds", [])
+        if not isinstance(chain_ids, list):
+            raise ValueError("chainIds must be a list")
 
         clients = {client["id"]: client for client in self.list_clients()}
         selected: list[tuple[str, int]] = []
@@ -2563,6 +2646,35 @@ echo "3x-ui cleanup completed"
                 raise ValueError("quotaGb must be zero or greater")
             selected.append((node_id, quota_bytes))
             seen.add(node_id)
+
+        if chain_ids_supplied:
+            chains = {chain["id"]: chain for chain in self.list_proxy_chains()}
+            selected_chain_ids: list[str] = []
+            seen_chains = set()
+            for chain_id in chain_ids:
+                text_id = str(chain_id).strip()
+                if not text_id or text_id in seen_chains:
+                    continue
+                chain = chains.get(text_id)
+                if not chain:
+                    raise ValueError("selected proxy chain not found")
+                if not chain["share_link"]:
+                    raise ValueError("proxy chain is not ready")
+                selected_chain_ids.append(text_id)
+                seen_chains.add(text_id)
+        else:
+            selected_chain_ids = [
+                row["chain_id"]
+                for row in self.db.query_all(
+                    """
+                    SELECT chain_id
+                    FROM subscription_chain_entries
+                    WHERE subscription_id = ?
+                    ORDER BY created_at ASC
+                    """,
+                    (subscription_id,),
+                )
+            ]
 
         for node_id, quota_bytes in selected:
             client = clients[node_id]
@@ -2605,6 +2717,21 @@ echo "3x-ui cleanup completed"
                     for node_id, quota_bytes in selected
                 ],
             )
+            self.db.execute(
+                "DELETE FROM subscription_chain_entries WHERE subscription_id = ?",
+                (subscription_id,),
+            )
+            self.db.executemany(
+                """
+                INSERT INTO subscription_chain_entries (
+                    subscription_id, chain_id, created_at
+                ) VALUES (?, ?, ?)
+                """,
+                [
+                    (subscription_id, chain_id, stamp)
+                    for chain_id in selected_chain_ids
+                ],
+            )
         return self.get_managed_subscription_config(subscription_id)
 
     def delete_subscription(self, subscription_id: str) -> dict[str, str]:
@@ -2637,7 +2764,21 @@ echo "3x-ui cleanup completed"
             """,
             (subscription["id"],),
         )
-        links = [row["share_link"] for row in rows if row.get("share_link")]
+        chain_rows = self.db.query_all(
+            """
+            SELECT pc.share_link
+            FROM subscription_chain_entries sce
+            JOIN proxy_chains pc ON pc.id = sce.chain_id
+            WHERE sce.subscription_id = ? AND pc.share_link != ''
+            ORDER BY sce.created_at ASC, pc.created_at ASC
+            """,
+            (subscription["id"],),
+        )
+        links = [
+            row["share_link"]
+            for row in [*rows, *chain_rows]
+            if row.get("share_link")
+        ]
         return _render_subscription_links(links, output_format)
 
     def get_subscription_config(self, deployment_id: str) -> dict[str, Any]:

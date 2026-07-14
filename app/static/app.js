@@ -489,6 +489,8 @@ function deploymentItem(deployment, options = {}) {
 
 function subscriptionItem(subscription) {
   const subscriptionUrl = absoluteUrl(subscription.subscription_url);
+  const nodeCount = Number(subscription.node_count || 0);
+  const chainCount = Number(subscription.chain_count || 0);
   return `
     <article class="item subscription-item">
       <div class="item-head">
@@ -496,13 +498,13 @@ function subscriptionItem(subscription) {
           <strong>${escapeHtml(subscription.name)}</strong>
           <small>更新于 ${escapeHtml(subscription.updated_at)}</small>
         </div>
-        <span class="badge ok">${Number(subscription.node_count || 0)} 个节点</span>
+        <span class="badge ok">${nodeCount} 个节点 · ${chainCount} 条代理链</span>
       </div>
       <div class="sub-link-row compact">
         <span class="mono">${escapeHtml(subscriptionUrl)}</span>
         <button class="secondary" data-copy="${escapeHtml(subscriptionUrl)}">复制链接</button>
       </div>
-      <div class="meta">节点总流量：${bytes(subscription.quota_bytes)}</div>
+      <div class="meta">普通节点流量：剩余 ${bytes(subscription.remaining_bytes)} · 已用 ${bytes(subscription.used_bytes)} / 总量 ${bytes(subscription.quota_bytes)}</div>
       <div class="item-actions">
         <button class="primary" data-edit-subscription="${subscription.id}">分发和调整</button>
         <button class="secondary" data-rotate-subscription-token="${subscription.id}">轮换令牌</button>
@@ -597,6 +599,7 @@ function closeClientEdit() {
 async function openSubscriptionEdit(subscriptionId) {
   const config = await api(`/api/subscriptions/${subscriptionId}`);
   const selected = new Map(config.selectedNodes.map((item) => [item.nodeClientId, item]));
+  const selectedChains = new Set(config.selectedChainIds || []);
   const form = $("#subscriptionForm");
   const url = absoluteUrl(config.subscription.subscription_url);
   form.elements.subscriptionId.value = subscriptionId;
@@ -604,9 +607,16 @@ async function openSubscriptionEdit(subscriptionId) {
   $("#subscriptionTitle").textContent = "分发和调整";
   $("#subscriptionUrlValue").textContent = url;
   $("#subscriptionCopyBtn").dataset.copy = url;
-  $("#subscriptionNodeList").innerHTML =
-    config.availableNodes.map((node) => subscriptionNodeItem(node, selected.get(node.id))).join("") ||
-    empty("暂无可选节点");
+  const nodeOptions = config.availableNodes
+    .map((node) => subscriptionNodeItem(node, selected.get(node.id)))
+    .join("");
+  const chainOptions = (config.availableChains || [])
+    .map((chain) => subscriptionChainItem(chain, selectedChains.has(chain.id)))
+    .join("");
+  $("#subscriptionNodeList").innerHTML = [
+    nodeOptions ? `<div class="subscription-picker-heading">普通节点</div>${nodeOptions}` : "",
+    chainOptions ? `<div class="subscription-picker-heading">代理链</div>${chainOptions}` : "",
+  ].join("") || empty("暂无可选节点或代理链");
   $("#subscriptionDialog").showModal();
 }
 
@@ -623,6 +633,20 @@ function subscriptionNodeItem(node, selected) {
           流量 GB
           <input name="quotaGb:${escapeHtml(node.id)}" type="number" min="0" step="1" value="${escapeHtml(gb(selectedQuota))}" />
         </span>
+      </span>
+    </label>
+  `;
+}
+
+function subscriptionChainItem(chain, selected) {
+  const ready = Boolean(chain.share_link);
+  return `
+    <label class="node-option ${ready ? "" : "disabled"}">
+      <input type="checkbox" name="chainIds" value="${escapeHtml(chain.id)}" ${selected ? "checked" : ""} ${ready ? "" : "disabled"} />
+      <span>
+        <strong>${escapeHtml(chain.name)}</strong>
+        <small>${escapeHtml(chain.path)} · ${ready ? "可加入订阅" : "下发成功后可加入"}</small>
+        ${ready ? `<span class="mono">${escapeHtml(chain.share_link)}</span>` : ""}
       </span>
     </label>
   `;
@@ -811,15 +835,18 @@ function bindEvents() {
         nodeId: input.value,
         quotaGb: form.elements[`quotaGb:${input.value}`]?.value || 0,
       }));
+    const chainIds = Array.from(form.querySelectorAll('input[name="chainIds"]:checked'))
+      .map((input) => input.value);
     await api(`/api/subscriptions/${subscriptionId}`, {
       method: "PATCH",
       body: JSON.stringify({
         name: form.elements.name.value,
         nodes,
+        chainIds,
       }),
     });
     closeSubscriptionEdit();
-    toast("订阅节点已更新");
+    toast("订阅内容已更新");
     await refresh();
   });
 
