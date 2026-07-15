@@ -29,7 +29,7 @@
 | 部署 | 通过 SSH 真实安装 3x-ui + 默认 `VLESS + REALITY` |
 | 用户 | 在同一节点创建多个独立用户，支持启停、手动或周期重置流量、修改额度，以及设置到期日或不限时 |
 | 订阅 | 按需手动创建订阅链接，支持为每条订阅单独设置节点显示名称 |
-| 代理链 | 例如 `A → C → B`：入口固定 VLESS Reality，节点间可逐跳选择 SS2022 或 Reality；远端为独立 `myn-chain-*` systemd 服务 |
+| 代理链 | 例如 `A → C → B`：为每个节点指定对等映射端口，入口固定 VLESS Reality，节点间可逐跳选择 Reality 或 SS2022；远端为独立 `myn-chain-*` systemd 服务 |
 | 容器 | `Dockerfile` + `docker-compose.yml` |
 
 ---
@@ -127,7 +127,7 @@ Compose 默认把端口发布到宿主机 `0.0.0.0:8787`；密钥通过 Docker s
 2. **部署** — 创建 3x-ui 部署；伪装目标建议选“自动检测并固定”
 3. **用户** — 部署成功后可在同一节点创建多个用户
 4. **订阅** — 配置并分发订阅链接，可把普通节点用户与已下发的代理链汇总到同一链接
-5. **代理链**（可选）— 选择 ready 的 native 节点排序 → 逐跳选择协议 → 保存 →「下发远端」
+5. **代理链**（可选）— 选择 ready 的 native 节点排序 → 为每台机填写已分配的对等映射端口 → 逐跳选择协议 → 保存 →「下发远端」
 
 代理链语义（UI 从上到下）：
 
@@ -138,10 +138,13 @@ Compose 默认把端口发布到宿主机 `0.0.0.0:8787`；密钥通过 Docker s
 - 第一台是入口（用户设备只连接它）
 - 中间是中继  
 - 最后一台是出口  
-- 用户设备到入口固定为 `VLESS + REALITY`；节点间默认使用 `Shadowsocks 2022`，真正跨境的节点间链路可切回 Reality
+- 每个节点需要一个内外一致的链路端口：入口端口供用户设备连接，其余节点端口供上一跳连接；程序不会随机选择端口
+- 用户设备到入口固定为 `VLESS + REALITY`；节点间默认使用只需 TCP 的 Reality，也可以逐跳切换为 SS2022
+- Reality 链路端口只需映射 TCP；SS2022 链路端口必须同时映射 TCP 与 UDP
+- 保存时会检查端口范围，以及与 SSH、3x-ui 面板、普通代理和其他代理链的冲突；下发前还会在远端检查实际监听占用
 - SS2022 使用 `2022-blake3-aes-256-gcm` 与逐跳独立密钥；密钥经 `APP_SECRET` 加密存库，不下发给用户设备
 - 固定发布包内的 Xray 目前可以运行 SS2022，但已输出未来可能移除 Shadowsocks 的兼容性警告；新建链路时可逐跳选择 Reality
-- 订阅 `/sub/chains/{token}?format=mihomo` 返回可直接导入 Mihomo / Clash 的 YAML；`format=base64` 返回传统 Base64 入口链接。无参数时会根据客户端 User-Agent 自动选择，其他客户端默认保持 Base64 兼容。
+- 订阅 `/sub/chains/{token}?format=mihomo` 返回可直接导入 Mihomo / Clash 的 YAML；`format=base64` 返回传统 Base64 入口链接。无参数时会根据客户端 User-Agent 自动选择，其他客户端默认保持 Base64 兼容。代理链加入组合订阅时，可以单独设置该订阅内的显示名称，不会改动代理链原始名称。
 
 链路不改写 3x-ui 主配置，而是在每台机上装独立服务：
 
@@ -171,7 +174,7 @@ Compose 默认把端口发布到宿主机 `0.0.0.0:8787`；密钥通过 Docker s
 - SSH 可达；非 root 需无密码 sudo  
 - 支持未加密私钥、密码或 ssh-agent；暂不支持带 passphrase 的私钥粘贴  
 - 代理链节点须为 native + ready，且目标机有 systemd  
-- 链路端口需在云防火墙与系统防火墙放行  
+- 每个代理链节点都要准备一个对等映射端口；Reality 放行 TCP，SS2022 同时放行 TCP 与 UDP
 
 失败时：代理链会尽力清理已装的 `myn-chain-*`；若 native 安装结果已写入后再失败，会尝试卸载远端 3x-ui。清理均为 best-effort。
 
@@ -328,6 +331,7 @@ examples/           Caddy / Nginx 反向代理示例
 
 - 单管理员，无多用户 / RBAC  
 - 代理链 Xray 服务不出现在 3x-ui 面板里  
+- NAT 代理链目前只支持公网端口与本机监听端口相同的对等映射，不支持端口转换
 - 远端失败清理是 best-effort  
 - 订阅 token 泄露即可读取对应订阅内容  
 - 暂不支持带 passphrase 的 SSH 私钥粘贴  

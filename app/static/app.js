@@ -8,6 +8,7 @@ const state = {
   webSettings: null,
   chainDraft: [],
   chainProtocolDraft: {},
+  chainPortDraft: {},
   activeJobId: null,
   jobTimer: null,
 };
@@ -319,6 +320,9 @@ function chainItem(chain) {
   const hopSummary = (chain.hops || [])
     .map((hop) => `${hop.fromServerName} — ${chainProtocolLabel(hop.protocol)} → ${hop.toServerName}`)
     .join(" · ");
+  const endpointSummary = (chain.nodes || [])
+    .map((node) => `${node.server_name} ${displayEndpoint(node.host, node.inbound_port || "未配置")}`)
+    .join(" → ");
   return `
     <article class="item">
       <div class="item-head">
@@ -329,6 +333,7 @@ function chainItem(chain) {
         ${statusBadge(chain.status)}
       </div>
       <div class="meta">入口：${escapeHtml(chain.entry_server_name || "-")} · 出口：${escapeHtml(chain.exit_server_name || "-")}</div>
+      ${endpointSummary ? `<div class="meta">对等映射端口：<span class="mono">${escapeHtml(endpointSummary)}</span></div>` : ""}
       ${hopSummary ? `<div class="chain-route-summary">${escapeHtml(hopSummary)}</div>` : ""}
       ${chain.last_error ? `<div class="meta bad-text">错误：${escapeHtml(chain.last_error)}</div>` : ""}
       <div class="meta">Mihomo / Clash 订阅：<span class="mono">${subscriptionReady ? escapeHtml(subscriptionUrl) : "下发成功后可用"}</span></div>
@@ -365,7 +370,7 @@ function chainEdgeKey(fromDeploymentId, toDeploymentId) {
 
 function chainProtocolFor(fromDeploymentId, toDeploymentId) {
   return state.chainProtocolDraft[chainEdgeKey(fromDeploymentId, toDeploymentId)] ||
-    CHAIN_PROTOCOL_SHADOWSOCKS_2022;
+    CHAIN_PROTOCOL_VLESS_REALITY;
 }
 
 function chainLinkProtocols() {
@@ -374,12 +379,38 @@ function chainLinkProtocols() {
   );
 }
 
+function chainPortFor(deploymentId) {
+  return String(state.chainPortDraft[deploymentId] ?? "").trim();
+}
+
+function chainInboundPorts() {
+  return state.chainDraft.map((deploymentId) => Number(chainPortFor(deploymentId)));
+}
+
+function chainPortsValid() {
+  return state.chainDraft.every((deploymentId) => {
+    const raw = chainPortFor(deploymentId);
+    const port = Number(raw);
+    return /^\d+$/.test(raw) && Number.isInteger(port) && port >= 1 && port <= 65535;
+  });
+}
+
+function displayEndpoint(host, port) {
+  const renderedHost = String(host).includes(":") ? `[${host}]` : host;
+  return `${renderedHost}:${port || "待填写"}`;
+}
+
+function updateChainSubmitState() {
+  const button = $("#chainSubmitBtn");
+  if (button) button.disabled = state.chainDraft.length < 2 || !chainPortsValid();
+}
+
 function chainPreviewText(selected) {
   if (!selected.length) return "未选择";
-  let preview = `用户设备 — VLESS + REALITY → ${selected[0].server_name}`;
+  let preview = `用户设备 — VLESS + REALITY → ${displayEndpoint(selected[0].host, chainPortFor(selected[0].id))}`;
   for (let index = 1; index < selected.length; index += 1) {
     const protocol = chainProtocolFor(selected[index - 1].id, selected[index].id);
-    preview += ` — ${chainProtocolLabel(protocol)} → ${selected[index].server_name}`;
+    preview += ` — ${chainProtocolLabel(protocol)} → ${displayEndpoint(selected[index].host, chainPortFor(selected[index].id))}`;
   }
   return preview;
 }
@@ -406,7 +437,7 @@ function renderChainBuilder() {
     `).join("") ||
     `<div class="empty">把节点拖到这里，顺序就是入口到出口</div>`;
   $("#chainPreview").textContent = chainPreviewText(selected);
-  $("#chainSubmitBtn").disabled = selected.length < 2;
+  updateChainSubmitState();
 }
 
 function chainAvailableItem(deployment) {
@@ -422,12 +453,20 @@ function chainAvailableItem(deployment) {
 }
 
 function chainSelectedItem(deployment, index) {
+  const inboundProtocol = index === 0
+    ? CHAIN_PROTOCOL_VLESS_REALITY
+    : chainProtocolFor(state.chainDraft[index - 1], deployment.id);
+  const transportHint = inboundProtocol === CHAIN_PROTOCOL_SHADOWSOCKS_2022 ? "TCP + UDP" : "TCP";
   return `
     <article class="chain-node is-selected" draggable="true" data-chain-drag="selected" data-chain-index="${index}" data-chain-position="${index}">
       <span class="chain-index">${index + 1}</span>
-      <div>
+      <div class="chain-node-main">
         <strong>${escapeHtml(deployment.server_name)}</strong>
         <small>${index === 0 ? "入口 · 用户设备经 VLESS + REALITY 接入" : index === state.chainDraft.length - 1 ? "出口" : "中继"} · ${escapeHtml(deployment.host)}:${deployment.proxy_port}</small>
+        <label class="chain-port-field">
+          <span>对等映射链路端口 · ${transportHint}</span>
+          <input data-chain-port data-deployment-id="${escapeHtml(deployment.id)}" type="number" min="1" max="65535" inputmode="numeric" placeholder="例如 31001" value="${escapeHtml(chainPortFor(deployment.id))}" required />
+        </label>
       </div>
       <div class="chain-node-actions">
         <button class="ghost icon-button" type="button" data-chain-up="${index}" title="上移">↑</button>
@@ -447,8 +486,8 @@ function chainHopItem(fromDeployment, toDeployment, destinationIndex) {
       <label>
         <span>${escapeHtml(fromDeployment.server_name)} 到 ${escapeHtml(toDeployment.server_name)}</span>
         <select data-chain-protocol data-chain-edge="${escapeHtml(edgeKey)}" aria-label="选择节点间协议">
-          <option value="${CHAIN_PROTOCOL_SHADOWSOCKS_2022}" ${protocol === CHAIN_PROTOCOL_SHADOWSOCKS_2022 ? "selected" : ""}>Shadowsocks 2022（海外转发）</option>
-          <option value="${CHAIN_PROTOCOL_VLESS_REALITY}" ${protocol === CHAIN_PROTOCOL_VLESS_REALITY ? "selected" : ""}>VLESS + REALITY（跨境链路）</option>
+          <option value="${CHAIN_PROTOCOL_VLESS_REALITY}" ${protocol === CHAIN_PROTOCOL_VLESS_REALITY ? "selected" : ""}>VLESS + REALITY（TCP，适合 NAT）</option>
+          <option value="${CHAIN_PROTOCOL_SHADOWSOCKS_2022}" ${protocol === CHAIN_PROTOCOL_SHADOWSOCKS_2022 ? "selected" : ""}>Shadowsocks 2022（需 TCP + UDP）</option>
         </select>
       </label>
     </div>
@@ -463,7 +502,8 @@ function addChainDeployment(deploymentId, index = state.chainDraft.length) {
 }
 
 function removeChainDeployment(index) {
-  state.chainDraft.splice(index, 1);
+  const [deploymentId] = state.chainDraft.splice(index, 1);
+  if (deploymentId) delete state.chainPortDraft[deploymentId];
   renderChainBuilder();
 }
 
@@ -627,7 +667,10 @@ function closeClientEdit() {
 async function openSubscriptionEdit(subscriptionId) {
   const config = await api(`/api/subscriptions/${subscriptionId}`);
   const selected = new Map(config.selectedNodes.map((item) => [item.nodeClientId, item]));
-  const selectedChains = new Set(config.selectedChainIds || []);
+  const selectedChains = new Map(
+    (config.selectedChains || (config.selectedChainIds || []).map((chainId) => ({ chainId })))
+      .map((item) => [item.chainId, item]),
+  );
   const form = $("#subscriptionForm");
   const url = absoluteUrl(config.subscription.subscription_url);
   form.elements.subscriptionId.value = subscriptionId;
@@ -639,7 +682,7 @@ async function openSubscriptionEdit(subscriptionId) {
     .map((node) => subscriptionNodeItem(node, selected.get(node.id)))
     .join("");
   const chainOptions = (config.availableChains || [])
-    .map((chain) => subscriptionChainItem(chain, selectedChains.has(chain.id)))
+    .map((chain) => subscriptionChainItem(chain, selectedChains.get(chain.id)))
     .join("");
   $("#subscriptionNodeList").innerHTML = [
     nodeOptions ? `<div class="subscription-picker-heading">普通节点</div>${nodeOptions}` : "",
@@ -707,15 +750,23 @@ function subscriptionNodeItem(node, selected) {
 
 function subscriptionChainItem(chain, selected) {
   const ready = Boolean(chain.share_link);
+  const displayName = selected?.displayName || "";
+  const currentName = shareLinkDisplayName(chain.share_link) || chain.name;
   return `
-    <label class="node-option ${ready ? "" : "disabled"}">
+    <article class="node-option ${ready ? "" : "disabled"}">
       <input type="checkbox" name="chainIds" value="${escapeHtml(chain.id)}" ${selected ? "checked" : ""} ${ready ? "" : "disabled"} />
-      <span>
+      <div>
         <strong>${escapeHtml(chain.name)}</strong>
         <small>${escapeHtml(chain.path)} · ${ready ? "可加入订阅" : "下发成功后可加入"}</small>
         ${ready ? `<span class="mono">${escapeHtml(chain.share_link)}</span>` : ""}
-      </span>
-    </label>
+        <div class="node-option-fields">
+          <label>
+            代理链显示名称
+            <input name="chainDisplayName:${escapeHtml(chain.id)}" type="text" maxlength="128" value="${escapeHtml(displayName)}" placeholder="当前：${escapeHtml(currentName)}" ${ready ? "" : "disabled"} />
+          </label>
+        </div>
+      </div>
+    </article>
   `;
 }
 
@@ -929,16 +980,19 @@ function bindEvents() {
     const form = event.currentTarget;
     const data = formData(form);
     if (state.chainDraft.length < 2) return toast("至少选择两个部署节点");
+    if (!chainPortsValid()) return toast("请为每个节点填写 1–65535 的对等映射链路端口");
     await api("/api/chains", {
       method: "POST",
       body: JSON.stringify({
         name: data.name,
         deploymentIds: state.chainDraft,
+        inboundPorts: chainInboundPorts(),
         linkProtocols: chainLinkProtocols(),
       }),
     });
     state.chainDraft = [];
     state.chainProtocolDraft = {};
+    state.chainPortDraft = {};
     form.reset();
     toast("代理链已保存");
     await refresh();
@@ -976,14 +1030,17 @@ function bindEvents() {
         quotaGb: form.elements[`quotaGb:${input.value}`]?.value || 0,
         displayName: form.elements[`displayName:${input.value}`]?.value || "",
       }));
-    const chainIds = Array.from(form.querySelectorAll('input[name="chainIds"]:checked'))
-      .map((input) => input.value);
+    const chains = Array.from(form.querySelectorAll('input[name="chainIds"]:checked'))
+      .map((input) => ({
+        chainId: input.value,
+        displayName: form.elements[`chainDisplayName:${input.value}`]?.value || "",
+      }));
     await api(`/api/subscriptions/${subscriptionId}`, {
       method: "PATCH",
       body: JSON.stringify({
         name: form.elements.name.value,
         nodes,
-        chainIds,
+        chains,
       }),
     });
     closeSubscriptionEdit();
@@ -992,6 +1049,10 @@ function bindEvents() {
   });
 
   document.body.addEventListener("dragstart", (event) => {
+    if (event.target.closest("input, select, button")) {
+      event.preventDefault();
+      return;
+    }
     const node = event.target.closest("[data-chain-drag]");
     if (!node) return;
     event.dataTransfer.effectAllowed = "move";
@@ -1034,6 +1095,17 @@ function bindEvents() {
     if (!selector) return;
     state.chainProtocolDraft[selector.dataset.chainEdge] = selector.value;
     renderChainBuilder();
+  });
+
+  document.body.addEventListener("input", (event) => {
+    const input = event.target.closest("[data-chain-port]");
+    if (!input) return;
+    state.chainPortDraft[input.dataset.deploymentId] = input.value.trim();
+    const selected = state.chainDraft
+      .map((deploymentId) => state.deployments.find((deployment) => deployment.id === deploymentId))
+      .filter(Boolean);
+    $("#chainPreview").textContent = chainPreviewText(selected);
+    updateChainSubmitState();
   });
 
   document.body.addEventListener("click", async (event) => {

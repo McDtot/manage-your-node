@@ -60,6 +60,15 @@ def _create_ready_deployment(services, suffix: str, host: str) -> str:
     return deployment_id
 
 
+def _proxy_chain_payload(deployment_ids: list[str], **overrides):
+    payload = {
+        "deploymentIds": deployment_ids,
+        "inboundPorts": [41001 + index for index in range(len(deployment_ids))],
+    }
+    payload.update(overrides)
+    return payload
+
+
 def _trust_server_for_native_deployment(services, server_id: str) -> None:
     services.db.execute(
         "UPDATE servers SET status = 'reachable' WHERE id = ?",
@@ -554,7 +563,7 @@ def test_managed_subscription_can_include_proxy_chains(services):
         "203.0.113.62",
     )
     client = services.create_client(entry_id, {"name": "subscriber", "quotaGb": 20})
-    chain = services.create_proxy_chain({"deploymentIds": [entry_id, exit_id]})
+    chain = services.create_proxy_chain(_proxy_chain_payload([entry_id, exit_id]))
     chain_link = "vless://ready-proxy-chain"
     services.db.execute(
         "UPDATE proxy_chains SET share_link = ?, status = 'ready' WHERE id = ?",
@@ -605,12 +614,73 @@ def test_managed_subscription_can_include_proxy_chains(services):
     ] == [chain["id"]]
 
 
+def test_subscription_proxy_chain_display_name_is_scoped_and_used_by_all_formats(services):
+    deployment_ids = [
+        _create_ready_deployment(services, "named-chain-entry", "203.0.113.68"),
+        _create_ready_deployment(services, "named-chain-exit", "203.0.113.69"),
+    ]
+    chain = services.create_proxy_chain(
+        _proxy_chain_payload(deployment_ids, name="原始代理链")
+    )
+    original_link = (
+        "vless://11111111-2222-3333-4444-555555555555@203.0.113.68:41001"
+        "?security=reality&type=tcp&flow=xtls-rprx-vision"
+        "&pbk=dE8nfT3BBGpvTndPFXrdC3bSRHHQf5veZBKF31ZbWeo"
+        "&fp=chrome&sni=cover.example&sid=a1b2c3d4#原始代理链"
+    )
+    services.db.execute(
+        "UPDATE proxy_chains SET share_link = ?, status = 'ready' WHERE id = ?",
+        (original_link, chain["id"]),
+    )
+    subscription = services.create_subscription({"name": "chain-renamed"})
+    display_name = "香港 → 美国｜游戏专线"
+
+    config = services.update_managed_subscription(
+        subscription["id"],
+        {
+            "chains": [
+                {
+                    "chainId": chain["id"],
+                    "displayName": display_name,
+                }
+            ]
+        },
+    )
+
+    assert config["selectedChainIds"] == [chain["id"]]
+    assert config["selectedChains"] == [
+        {"chainId": chain["id"], "displayName": display_name}
+    ]
+    rendered_link = base64.b64decode(
+        services.render_managed_subscription(subscription["token"])
+    ).decode("utf-8")
+    assert unquote(urlparse(rendered_link).fragment) == display_name
+    mihomo = yaml.safe_load(
+        services.render_managed_subscription(subscription["token"], "mihomo")
+    )
+    assert mihomo["proxies"][0]["name"] == display_name
+    assert services.get_proxy_chain(chain["id"])["share_link"] == original_link
+
+    # The legacy chainIds payload keeps an existing subscription-specific name.
+    preserved = services.update_managed_subscription(
+        subscription["id"],
+        {"chainIds": [chain["id"]]},
+    )
+    assert preserved["selectedChains"][0]["displayName"] == display_name
+
+    with pytest.raises(ValueError, match="128 characters"):
+        services.update_managed_subscription(
+            subscription["id"],
+            {"chains": [{"chainId": chain["id"], "displayName": "名" * 129}]},
+        )
+
+
 def test_unready_proxy_chain_cannot_be_added_to_managed_subscription(services):
     deployment_ids = [
         _create_ready_deployment(services, "unready-entry", "203.0.113.63"),
         _create_ready_deployment(services, "unready-exit", "203.0.113.64"),
     ]
-    chain = services.create_proxy_chain({"deploymentIds": deployment_ids})
+    chain = services.create_proxy_chain(_proxy_chain_payload(deployment_ids))
     subscription = services.create_subscription({"name": "combined"})
 
     with pytest.raises(ValueError, match="proxy chain is not ready"):
@@ -930,14 +1000,14 @@ def test_mixed_proxy_chain_uses_ss2022_between_overseas_nodes(services, monkeypa
         (deployment_ids[2],),
     )
     chain = services.create_proxy_chain(
-        {
-            "name": "mixed-chain",
-            "deploymentIds": deployment_ids,
-            "linkProtocols": [
+        _proxy_chain_payload(
+            deployment_ids,
+            name="mixed-chain",
+            linkProtocols=[
                 CHAIN_PROTOCOL_SHADOWSOCKS_2022,
                 CHAIN_PROTOCOL_VLESS_REALITY,
             ],
-        }
+        )
     )
 
     assert [node["inbound_protocol"] for node in chain["nodes"]] == [
@@ -945,6 +1015,7 @@ def test_mixed_proxy_chain_uses_ss2022_between_overseas_nodes(services, monkeypa
         CHAIN_PROTOCOL_SHADOWSOCKS_2022,
         CHAIN_PROTOCOL_VLESS_REALITY,
     ]
+    assert [node["inbound_port"] for node in chain["nodes"]] == [41001, 41002, 41003]
     assert [hop["protocol"] for hop in chain["hops"]] == [
         CHAIN_PROTOCOL_SHADOWSOCKS_2022,
         CHAIN_PROTOCOL_VLESS_REALITY,
@@ -1010,6 +1081,7 @@ def test_mixed_proxy_chain_uses_ss2022_between_overseas_nodes(services, monkeypa
     assert exit_config["outbounds"][0]["protocol"] == "freedom"
     share_link = services.get_proxy_chain(chain["id"])["share_link"]
     assert share_link.startswith("vless://")
+    assert "@198.51.100.10:41001?" in share_link
     assert "sni=entry.example" in share_link
 
 
@@ -1019,25 +1091,94 @@ def test_proxy_chain_protocol_validation_and_legacy_default(services):
         _create_ready_deployment(services, "two", "203.0.113.12"),
     ]
     with pytest.raises(ValueError, match="one protocol per server-to-server hop"):
-        services.create_proxy_chain(
-            {
-                "deploymentIds": deployment_ids,
-                "linkProtocols": [],
-            }
-        )
+        services.create_proxy_chain(_proxy_chain_payload(deployment_ids, linkProtocols=[]))
     with pytest.raises(ValueError, match="unsupported chain protocol"):
         services.create_proxy_chain(
-            {
-                "deploymentIds": deployment_ids,
-                "linkProtocols": ["plain-text"],
-            }
+            _proxy_chain_payload(deployment_ids, linkProtocols=["plain-text"])
         )
 
-    legacy_chain = services.create_proxy_chain({"deploymentIds": deployment_ids})
+    legacy_chain = services.create_proxy_chain(_proxy_chain_payload(deployment_ids))
     assert [node["inbound_protocol"] for node in legacy_chain["nodes"]] == [
         CHAIN_PROTOCOL_VLESS_REALITY,
         CHAIN_PROTOCOL_VLESS_REALITY,
     ]
+
+
+def test_proxy_chain_requires_one_valid_equal_mapping_port_per_node(services):
+    deployment_ids = [
+        _create_ready_deployment(services, "port-one", "203.0.113.41"),
+        _create_ready_deployment(services, "port-two", "203.0.113.42"),
+    ]
+
+    with pytest.raises(ValueError, match="one port per proxy-chain node"):
+        services.create_proxy_chain({"deploymentIds": deployment_ids})
+    with pytest.raises(ValueError, match="one port per proxy-chain node"):
+        services.create_proxy_chain(
+            {"deploymentIds": deployment_ids, "inboundPorts": [41001]}
+        )
+    with pytest.raises(ValueError, match=r"inboundPorts\[1\] must be a whole number"):
+        services.create_proxy_chain(
+            {"deploymentIds": deployment_ids, "inboundPorts": [41001, "not-a-port"]}
+        )
+    with pytest.raises(ValueError, match=r"inboundPorts\[1\] must be between 1 and 65535"):
+        services.create_proxy_chain(
+            {"deploymentIds": deployment_ids, "inboundPorts": [41001, 65536]}
+        )
+
+
+@pytest.mark.parametrize(
+    ("reserved_port", "purpose"),
+    [(22, "SSH"), (32000, "3x-ui panel"), (443, "proxy")],
+)
+def test_proxy_chain_rejects_ports_reserved_on_target_server(
+    services,
+    reserved_port,
+    purpose,
+):
+    deployment_ids = [
+        _create_ready_deployment(services, "reserved-one", "203.0.113.51"),
+        _create_ready_deployment(services, "reserved-two", "203.0.113.52"),
+    ]
+
+    with pytest.raises(ValueError, match=rf"conflicts with its {purpose} port"):
+        services.create_proxy_chain(
+            {
+                "deploymentIds": deployment_ids,
+                "inboundPorts": [reserved_port, 41002],
+            }
+        )
+
+
+def test_proxy_chain_reserves_shared_nat_host_and_port_across_chains(services):
+    first_ids = [
+        _create_ready_deployment(services, "nat-a", "198.51.100.80"),
+        _create_ready_deployment(services, "nat-b", "198.51.100.81"),
+    ]
+    first_chain = services.create_proxy_chain(
+        _proxy_chain_payload(first_ids, inboundPorts=[42001, 42002])
+    )
+    assert first_chain["nodes"][0]["inbound_port"] == 42001
+
+    second_ids = [
+        _create_ready_deployment(services, "nat-c", "198.51.100.80"),
+        _create_ready_deployment(services, "nat-d", "198.51.100.82"),
+    ]
+    with pytest.raises(ValueError, match="already reserved by proxy chain"):
+        services.create_proxy_chain(
+            _proxy_chain_payload(second_ids, inboundPorts=[42001, 42003])
+        )
+
+
+def test_proxy_chain_rejects_duplicate_shared_nat_endpoint_in_same_chain(services):
+    deployment_ids = [
+        _create_ready_deployment(services, "same-a", "198.51.100.90"),
+        _create_ready_deployment(services, "same-b", "198.51.100.90"),
+    ]
+
+    with pytest.raises(ValueError, match="is selected for both"):
+        services.create_proxy_chain(
+            _proxy_chain_payload(deployment_ids, inboundPorts=[43001, 43001])
+        )
 
 
 def test_proxy_chain_subscription_is_unavailable_until_deployed(services):
@@ -1045,7 +1186,7 @@ def test_proxy_chain_subscription_is_unavailable_until_deployed(services):
         _create_ready_deployment(services, "entry", "203.0.113.21"),
         _create_ready_deployment(services, "exit", "203.0.113.22"),
     ]
-    chain = services.create_proxy_chain({"deploymentIds": deployment_ids})
+    chain = services.create_proxy_chain(_proxy_chain_payload(deployment_ids))
 
     with pytest.raises(ValueError, match="proxy chain is not ready"):
         services.render_proxy_chain_subscription(chain["token"])
@@ -1063,7 +1204,7 @@ def test_proxy_chain_subscription_renders_mihomo_yaml(services):
         _create_ready_deployment(services, "entry-yaml", "203.0.113.31"),
         _create_ready_deployment(services, "exit-yaml", "203.0.113.32"),
     ]
-    chain = services.create_proxy_chain({"deploymentIds": deployment_ids})
+    chain = services.create_proxy_chain(_proxy_chain_payload(deployment_ids))
     share_link = (
         "vless://11111111-2222-3333-4444-555555555555@203.0.113.31:443"
         "?security=reality&type=tcp&flow=xtls-rprx-vision"
@@ -1117,5 +1258,8 @@ def test_ss2022_chain_install_script_opens_udp_firewall_rules(services):
     # Xray 26.5.9 infers the config format from the final extension.
     assert 'TMP_CONFIG="$INSTALL_DIR/config.tmp.json"' in install_script
     assert 'run -test -config "$TMP_CONFIG"' in install_script
+    assert "port_is_in_use" in install_script
+    assert "TCP port $INBOUND_PORT is already in use" in install_script
+    assert "UDP port $INBOUND_PORT is already in use" in install_script
     assert "ufw allow 45000/udp" in install_script
     assert "--add-port=45000/udp" in install_script

@@ -1261,6 +1261,21 @@ exit 43
         if len(ordered_ids) > 6:
             raise ValueError("proxy chain supports up to six deployments for now")
 
+        raw_inbound_ports = payload.get("inboundPorts")
+        if not isinstance(raw_inbound_ports, list) or len(raw_inbound_ports) != len(ordered_ids):
+            raise ValueError("inboundPorts must contain one port per proxy-chain node")
+        inbound_ports: list[int] = []
+        for index, raw_port in enumerate(raw_inbound_ports):
+            if isinstance(raw_port, bool) or (isinstance(raw_port, float) and not raw_port.is_integer()):
+                raise ValueError(f"inboundPorts[{index}] must be a whole number")
+            try:
+                inbound_port = int(raw_port)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"inboundPorts[{index}] must be a whole number") from exc
+            if not 1 <= inbound_port <= 65535:
+                raise ValueError(f"inboundPorts[{index}] must be between 1 and 65535")
+            inbound_ports.append(inbound_port)
+
         raw_link_protocols = payload.get("linkProtocols")
         if raw_link_protocols is None:
             # Preserve the previous all-Reality API behavior for older clients.
@@ -1291,7 +1306,6 @@ exit 43
             raise ValueError(
                 f"deployment is not a ready native deployment: {', '.join(unavailable)}"
             )
-
         name = str(payload.get("name", "")).strip()
         if not name:
             name = " -> ".join(deployments[deployment_id]["server_name"] for deployment_id in ordered_ids)
@@ -1301,6 +1315,7 @@ exit 43
         client_uuid = str(uuid.uuid4())
         stamp = now_iso()
         with self.db.transaction():
+            self._assert_proxy_chain_ports_available(ordered_ids, inbound_ports, deployments)
             self.db.execute(
                 """
                 INSERT INTO proxy_chains (
@@ -1312,9 +1327,9 @@ exit 43
             self.db.executemany(
                 """
                 INSERT INTO proxy_chain_nodes (
-                    chain_id, deployment_id, position, inbound_protocol,
+                    chain_id, deployment_id, position, inbound_protocol, inbound_port,
                     ss_method, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
                 [
                     (
@@ -1322,6 +1337,7 @@ exit 43
                         deployment_id,
                         index,
                         inbound_protocols[index],
+                        inbound_ports[index],
                         CHAIN_SS_METHOD,
                         stamp,
                     )
@@ -1329,6 +1345,88 @@ exit 43
                 ],
             )
         return self.get_proxy_chain(chain_id)
+
+    def _assert_proxy_chain_ports_available(
+        self,
+        deployment_ids: list[str],
+        inbound_ports: list[int],
+        deployments: dict[str, dict[str, Any]],
+    ) -> None:
+        selected_endpoints: dict[tuple[str, int], str] = {}
+        for deployment_id, inbound_port in zip(deployment_ids, inbound_ports, strict=True):
+            deployment = deployments[deployment_id]
+            server_name = deployment["server_name"]
+            reserved_local_ports = {
+                "SSH": int(deployment["ssh_port"]),
+                "3x-ui panel": int(deployment["panel_port"]),
+                "proxy": int(deployment["proxy_port"]),
+            }
+            for purpose, reserved_port in reserved_local_ports.items():
+                if inbound_port == reserved_port:
+                    raise ValueError(
+                        f"chain port {inbound_port} on {server_name} conflicts with its {purpose} port"
+                    )
+
+            endpoint = (deployment["host"], inbound_port)
+            previous_server = selected_endpoints.get(endpoint)
+            if previous_server:
+                raise ValueError(
+                    f"chain endpoint {endpoint[0]}:{endpoint[1]} is selected for both "
+                    f"{previous_server} and {server_name}"
+                )
+            selected_endpoints[endpoint] = server_name
+
+        hosts = sorted({host for host, _ in selected_endpoints})
+        placeholders = ",".join("?" for _ in hosts)
+        ssh_endpoints = {
+            (row["host"], int(row["ssh_port"])): row["name"]
+            for row in self.db.query_all(
+                f"SELECT name, host, ssh_port FROM servers WHERE host IN ({placeholders})",
+                tuple(hosts),
+            )
+        }
+        proxy_endpoints = {
+            (row["host"], int(row["proxy_port"])): row["server_name"]
+            for row in self.db.query_all(
+                f"""
+                SELECT s.name AS server_name, s.host, d.proxy_port
+                FROM deployments d
+                JOIN servers s ON s.id = d.server_id
+                WHERE s.host IN ({placeholders})
+                """,
+                tuple(hosts),
+            )
+        }
+        chain_endpoints = {
+            (row["host"], int(row["inbound_port"])): row["chain_name"]
+            for row in self.db.query_all(
+                f"""
+                SELECT pc.name AS chain_name, s.host, pcn.inbound_port
+                FROM proxy_chain_nodes pcn
+                JOIN proxy_chains pc ON pc.id = pcn.chain_id
+                JOIN deployments d ON d.id = pcn.deployment_id
+                JOIN servers s ON s.id = d.server_id
+                WHERE s.host IN ({placeholders}) AND pcn.inbound_port IS NOT NULL
+                """,
+                tuple(hosts),
+            )
+        }
+        for endpoint in selected_endpoints:
+            if endpoint in ssh_endpoints:
+                raise ValueError(
+                    f"chain endpoint {endpoint[0]}:{endpoint[1]} conflicts with SSH on "
+                    f"{ssh_endpoints[endpoint]}"
+                )
+            if endpoint in proxy_endpoints:
+                raise ValueError(
+                    f"chain endpoint {endpoint[0]}:{endpoint[1]} conflicts with the proxy on "
+                    f"{proxy_endpoints[endpoint]}"
+                )
+            if endpoint in chain_endpoints:
+                raise ValueError(
+                    f"chain endpoint {endpoint[0]}:{endpoint[1]} is already reserved by proxy chain "
+                    f"{chain_endpoints[endpoint]}"
+                )
 
     def get_proxy_chain(self, chain_id: str) -> dict[str, Any]:
         rows = [chain for chain in self.list_proxy_chains() if chain["id"] == chain_id]
@@ -1491,16 +1589,6 @@ exit 43
         chain_id: str,
         nodes: list[dict[str, Any]],
     ) -> list[dict[str, Any]]:
-        used_ports = {
-            int(row["inbound_port"])
-            for row in nodes
-            if row.get("inbound_port")
-        }
-        used_ports.update(
-            int(row["proxy_port"])
-            for row in nodes
-            if row.get("proxy_port")
-        )
         prepared: list[dict[str, Any]] = []
         for node in nodes:
             update: dict[str, Any] = {}
@@ -1508,8 +1596,10 @@ exit 43
             if protocol not in CHAIN_PROTOCOLS:
                 raise ValueError(f"unsupported chain protocol on {node['server_name']}: {protocol}")
             if not node.get("inbound_port"):
-                update["inbound_port"] = self._new_chain_port(used_ports)
-                used_ports.add(update["inbound_port"])
+                raise ValueError(
+                    f"chain port is missing for {node['server_name']}; recreate the chain and choose "
+                    "an allocated equal-mapping port for every node"
+                )
             if protocol == CHAIN_PROTOCOL_VLESS_REALITY:
                 if not node.get("node_client_uuid"):
                     update["client_uuid"] = str(uuid.uuid4())
@@ -1544,13 +1634,6 @@ exit 43
                 )
             prepared.append(self._proxy_chain_full_nodes(chain_id)[node["position"]])
         return prepared
-
-    def _new_chain_port(self, used_ports: set[int]) -> int:
-        for _ in range(80):
-            port = random.randint(41000, 60999)
-            if port not in used_ports:
-                return port
-        raise ValueError("could not allocate a chain port")
 
     def _new_ss2022_password(self) -> str:
         return base64.b64encode(secrets.token_bytes(32)).decode("ascii")
@@ -1689,11 +1772,51 @@ find_xray() {{
 
 XRAY="$(find_xray)" || {{ echo "xray binary not found" >&2; exit 42; }}
 SERVICE_NAME={shell_quote(service_name)}
+INBOUND_PORT={shell_quote(inbound_port)}
+ALLOW_UDP={"1" if allow_udp else "0"}
 INSTALL_DIR="/opt/manage-node/chains/$SERVICE_NAME"
 CONFIG_FILE="$INSTALL_DIR/config.json"
 TMP_CONFIG="$INSTALL_DIR/config.tmp.json"
 UNIT_FILE="/etc/systemd/system/$SERVICE_NAME.service"
 CONFIG_B64={shell_quote(encoded_config)}
+
+port_is_in_use() {{
+  local protocol="$1"
+  local suffix=":$INBOUND_PORT"
+  if command -v ss >/dev/null 2>&1; then
+    if [ "$protocol" = "udp" ]; then
+      $SUDO ss -H -lun
+    else
+      $SUDO ss -H -ltn
+    fi | awk -v suffix="$suffix" '
+      {{ address=$4; if (length(address) >= length(suffix) && substr(address, length(address) - length(suffix) + 1) == suffix) found=1 }}
+      END {{ exit found ? 0 : 1 }}'
+    return $?
+  fi
+  if command -v netstat >/dev/null 2>&1; then
+    if [ "$protocol" = "udp" ]; then
+      $SUDO netstat -lun
+    else
+      $SUDO netstat -ltn
+    fi | awk -v suffix="$suffix" '
+      NR > 2 {{ address=$4; if (length(address) >= length(suffix) && substr(address, length(address) - length(suffix) + 1) == suffix) found=1 }}
+      END {{ exit found ? 0 : 1 }}'
+    return $?
+  fi
+  echo "Neither ss nor netstat is available; cannot verify chain port availability" >&2
+  exit 44
+}}
+
+if ! $SUDO systemctl is-active --quiet "$SERVICE_NAME"; then
+  if port_is_in_use tcp; then
+    echo "TCP port $INBOUND_PORT is already in use; choose another chain port" >&2
+    exit 45
+  fi
+  if [ "$ALLOW_UDP" = "1" ] && port_is_in_use udp; then
+    echo "UDP port $INBOUND_PORT is already in use; choose another chain port" >&2
+    exit 46
+  fi
+fi
 
 echo "Using Xray: $XRAY"
 $SUDO install -d -m 0755 "$INSTALL_DIR"
@@ -2010,8 +2133,8 @@ echo "Removed $SERVICE_NAME"
         placeholders = ",".join("?" for _ in deployment_ids)
         rows = self.db.query_all(
             f"""
-            SELECT d.id, s.name AS server_name, s.host,
-                   d.protocol, d.proxy_port, d.status, d.install_method
+            SELECT d.id, d.server_id, s.name AS server_name, s.host, s.ssh_port,
+                   d.protocol, d.panel_port, d.proxy_port, d.status, d.install_method
             FROM deployments d
             JOIN servers s ON s.id = d.server_id
             WHERE d.id IN ({placeholders})
@@ -2533,7 +2656,7 @@ echo "3x-ui cleanup completed"
         )
         selected_chains = self.db.query_all(
             """
-            SELECT chain_id
+            SELECT chain_id, display_name
             FROM subscription_chain_entries
             WHERE subscription_id = ?
             ORDER BY created_at ASC
@@ -2562,6 +2685,13 @@ echo "3x-ui cleanup completed"
                 }
                 for row in selected
             ],
+            "selectedChains": [
+                {
+                    "chainId": row["chain_id"],
+                    "displayName": row["display_name"],
+                }
+                for row in selected_chains
+            ],
             "selectedChainIds": [row["chain_id"] for row in selected_chains],
         }
 
@@ -2577,10 +2707,16 @@ echo "3x-ui cleanup completed"
             nodes = [{"nodeId": node_id} for node_id in payload.get("nodeIds", [])]
         if not isinstance(nodes, list):
             raise ValueError("nodes must be a list")
-        chain_ids_supplied = "chainIds" in payload
-        chain_ids = payload.get("chainIds", [])
-        if not isinstance(chain_ids, list):
-            raise ValueError("chainIds must be a list")
+        chain_selection_supplied = "chains" in payload or "chainIds" in payload
+        if "chains" in payload:
+            chain_items = payload.get("chains", [])
+            if not isinstance(chain_items, list):
+                raise ValueError("chains must be a list")
+        else:
+            chain_ids = payload.get("chainIds", [])
+            if not isinstance(chain_ids, list):
+                raise ValueError("chainIds must be a list")
+            chain_items = [{"chainId": chain_id} for chain_id in chain_ids]
 
         clients = {client["id"]: client for client in self.list_clients()}
         existing_display_names = {
@@ -2589,6 +2725,17 @@ echo "3x-ui cleanup completed"
                 """
                 SELECT node_client_id, display_name
                 FROM subscription_entries
+                WHERE subscription_id = ?
+                """,
+                (subscription_id,),
+            )
+        }
+        existing_chain_display_names = {
+            row["chain_id"]: row["display_name"]
+            for row in self.db.query_all(
+                """
+                SELECT chain_id, display_name
+                FROM subscription_chain_entries
                 WHERE subscription_id = ?
                 """,
                 (subscription_id,),
@@ -2621,12 +2768,14 @@ echo "3x-ui cleanup completed"
             selected.append((node_id, quota_bytes, display_name))
             seen.add(node_id)
 
-        if chain_ids_supplied:
+        if chain_selection_supplied:
             chains = {chain["id"]: chain for chain in self.list_proxy_chains()}
-            selected_chain_ids: list[str] = []
+            selected_chains: list[tuple[str, str]] = []
             seen_chains = set()
-            for chain_id in chain_ids:
-                text_id = str(chain_id).strip()
+            for item in chain_items:
+                if not isinstance(item, dict):
+                    raise ValueError("chains must contain objects")
+                text_id = str(item.get("chainId", "")).strip()
                 if not text_id or text_id in seen_chains:
                     continue
                 chain = chains.get(text_id)
@@ -2634,14 +2783,20 @@ echo "3x-ui cleanup completed"
                     raise ValueError("selected proxy chain not found")
                 if not chain["share_link"]:
                     raise ValueError("proxy chain is not ready")
-                selected_chain_ids.append(text_id)
+                if "displayName" in item:
+                    display_name = str(item.get("displayName", "")).strip()
+                else:
+                    display_name = existing_chain_display_names.get(text_id, "")
+                if len(display_name) > 128:
+                    raise ValueError("displayName must be 128 characters or fewer")
+                selected_chains.append((text_id, display_name))
                 seen_chains.add(text_id)
         else:
-            selected_chain_ids = [
-                row["chain_id"]
+            selected_chains = [
+                (row["chain_id"], row["display_name"])
                 for row in self.db.query_all(
                     """
-                    SELECT chain_id
+                    SELECT chain_id, display_name
                     FROM subscription_chain_entries
                     WHERE subscription_id = ?
                     ORDER BY created_at ASC
@@ -2720,12 +2875,12 @@ echo "3x-ui cleanup completed"
             self.db.executemany(
                 """
                 INSERT INTO subscription_chain_entries (
-                    subscription_id, chain_id, created_at
-                ) VALUES (?, ?, ?)
+                    subscription_id, chain_id, display_name, created_at
+                ) VALUES (?, ?, ?, ?)
                 """,
                 [
-                    (subscription_id, chain_id, stamp)
-                    for chain_id in selected_chain_ids
+                    (subscription_id, chain_id, display_name, stamp)
+                    for chain_id, display_name in selected_chains
                 ],
             )
         return self.get_managed_subscription_config(subscription_id)
@@ -2762,7 +2917,7 @@ echo "3x-ui cleanup completed"
         )
         chain_rows = self.db.query_all(
             """
-            SELECT pc.share_link
+            SELECT pc.share_link, sce.display_name
             FROM subscription_chain_entries sce
             JOIN proxy_chains pc ON pc.id = sce.chain_id
             WHERE sce.subscription_id = ? AND pc.share_link != ''
@@ -2776,7 +2931,7 @@ echo "3x-ui cleanup completed"
             if row.get("share_link")
         ]
         links.extend(
-            row["share_link"]
+            _share_link_with_display_name(row["share_link"], row["display_name"])
             for row in chain_rows
             if row.get("share_link")
         )

@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Manage Your Node</title>
-    <link rel="stylesheet" href="/static/styles.css?v=chain-protocol-layout-20260715" />
+    <link rel="stylesheet" href="/static/styles.css?v=chain-nat-ports-20260715" />
   </head>
   <body>
     <div class="shell">
@@ -238,8 +238,8 @@
                 <section>
                   <h3>链路顺序</h3>
                   <div id="chainSelectedNodes" class="chain-node-list chain-dropzone"></div>
-                  <div class="meta">用户设备固定经 VLESS + REALITY 接入第一台；节点之间可逐跳选择 SS2022 或 Reality</div>
-                  <div class="meta">SS2022 适合当前海外内部转发；Xray 已提示该协议未来可能移除，长期方案建议新建链路时选择 Reality</div>
+                  <div class="meta">每个节点都要填写 NAT 商家已分配且内外一致的链路端口；入口供用户连接，其余端口供上一跳连接</div>
+                  <div class="meta">默认使用只需 TCP 的 VLESS + REALITY；选择 SS2022 时，同一端口必须同时映射 TCP 和 UDP</div>
                 </section>
               </div>
               <div class="chain-preview">
@@ -436,6 +436,6 @@
     </dialog>
 
     <div class="toast" id="toast" hidden></div>
-    <script src="/static/app.js?v=automatic-origin-20260715"></script>
+    <script src="/static/app.js?v=chain-display-name-20260715"></script>
   </body>
 </html>

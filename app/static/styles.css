@@ -898,7 +898,7 @@ input[type="checkbox"] {
 
 .chain-builder {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: 1fr;
   gap: 12px;
 }
 
@@ -941,6 +941,33 @@ input[type="checkbox"] {
 .chain-node.is-selected {
   grid-template-columns: 27px minmax(0, 1fr) auto;
   border-color: rgba(0, 122, 255, 0.24);
+}
+
+.chain-node-main {
+  min-width: 0;
+}
+
+.chain-port-field {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 5px;
+  margin-top: 8px;
+  color: var(--muted-strong);
+  font-size: 10px;
+}
+
+.chain-port-field span {
+  line-height: 1.35;
+}
+
+.chain-port-field input {
+  width: 100%;
+  min-width: 0;
+  min-height: 34px;
+  border-color: rgba(0, 122, 255, 0.18);
+  border-radius: 10px;
+  padding: 6px 8px;
+  font-size: 12px;
 }
 
 .chain-node:active {

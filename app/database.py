@@ -172,6 +172,7 @@ class Database:
                 CREATE TABLE IF NOT EXISTS subscription_chain_entries (
                     subscription_id TEXT NOT NULL,
                     chain_id TEXT NOT NULL,
+                    display_name TEXT NOT NULL DEFAULT '',
                     created_at TEXT NOT NULL,
                     PRIMARY KEY(subscription_id, chain_id),
                     FOREIGN KEY(subscription_id) REFERENCES subscriptions(id) ON DELETE CASCADE,
@@ -264,6 +265,11 @@ class Database:
             )
             self._ensure_column("jobs", "chain_id", "TEXT")
             self._ensure_column("proxy_chains", "last_error", "TEXT")
+            self._ensure_column(
+                "subscription_chain_entries",
+                "display_name",
+                "TEXT NOT NULL DEFAULT ''",
+            )
             self._ensure_column(
                 "proxy_chain_nodes",
                 "inbound_protocol",

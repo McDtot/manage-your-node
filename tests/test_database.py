@@ -162,6 +162,12 @@ def test_subscription_display_names_migrate_existing_tables(tmp_path):
             updated_at TEXT NOT NULL,
             PRIMARY KEY(subscription_id, node_client_id)
         );
+        CREATE TABLE subscription_chain_entries (
+            subscription_id TEXT NOT NULL,
+            chain_id TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            PRIMARY KEY(subscription_id, chain_id)
+        );
         """
     )
     connection.commit()
@@ -174,6 +180,11 @@ def test_subscription_display_names_migrate_existing_tables(tmp_path):
     entry_columns = {
         row["name"]: row for row in db.query_all("PRAGMA table_info(subscription_entries)")
     }
+    chain_columns = {
+        row["name"]: row
+        for row in db.query_all("PRAGMA table_info(subscription_chain_entries)")
+    }
 
     assert node_columns["display_name"]["dflt_value"] == "''"
     assert entry_columns["display_name"]["dflt_value"] == "''"
+    assert chain_columns["display_name"]["dflt_value"] == "''"
