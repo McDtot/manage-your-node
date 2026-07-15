@@ -12,7 +12,6 @@ from starlette.applications import Starlette
 from starlette.concurrency import run_in_threadpool
 from starlette.middleware import Middleware
 from starlette.middleware.base import BaseHTTPMiddleware
-from starlette.middleware.trustedhost import TrustedHostMiddleware
 from starlette.requests import Request
 from starlette.responses import FileResponse, JSONResponse, PlainTextResponse, RedirectResponse, Response
 from starlette.routing import Route
@@ -22,17 +21,28 @@ from .config import ConfigError, Settings, load_settings
 from .database import Database
 from .security import SecretBox
 from .services import AppServices
+from .web_config import WebConfig
 
 LOGGER = logging.getLogger("myn")
 AUDIT_LOGGER = logging.getLogger("myn.audit")
 UNSAFE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
+SESSION_COOKIE_NAMES = ("__Host-myn_session", "myn_session")
+CSRF_COOKIE_NAMES = ("__Host-myn_csrf", "myn_csrf")
+
+
+def _cookie_value(cookies, names: tuple[str, ...]) -> str:  # noqa: ANN001
+    for name in names:
+        value = cookies.get(name, "")
+        if value:
+            return value
+    return ""
+
+
+def _request_is_loopback(request: Request) -> bool:
+    return (request.url.hostname or "") in {"127.0.0.1", "localhost", "::1"}
 
 
 class SecurityHeadersMiddleware(BaseHTTPMiddleware):
-    def __init__(self, app, secure_transport: bool):  # noqa: ANN001
-        super().__init__(app)
-        self.secure_transport = secure_transport
-
     async def dispatch(self, request: Request, call_next):  # noqa: ANN001
         response = await call_next(request)
         response.headers["X-Content-Type-Options"] = "nosniff"
@@ -45,7 +55,7 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
             "connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; "
             "form-action 'self'"
         )
-        if self.secure_transport:
+        if request.app.state.web_config.cookie_secure and not _request_is_loopback(request):
             response.headers["Strict-Transport-Security"] = "max-age=31536000"
         if (
             request.url.path.startswith("/api/")
@@ -54,6 +64,21 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
         ):
             response.headers["Cache-Control"] = "no-store"
         return response
+
+
+class RuntimeTrustedHostMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):  # noqa: ANN001
+        host = request.url.hostname or ""
+        allowed_hosts = request.app.state.web_config.allowed_hosts()
+        valid = any(
+            pattern == "*"
+            or host == pattern.strip("[]")
+            or (pattern.startswith("*") and host.endswith(pattern[1:]))
+            for pattern in allowed_hosts
+        )
+        if not valid:
+            return PlainTextResponse("Invalid host header", status_code=400)
+        return await call_next(request)
 
 
 class AuditMiddleware(BaseHTTPMiddleware):
@@ -65,7 +90,7 @@ class AuditMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):  # noqa: ANN001
         response = await call_next(request)
         if request.method in UNSAFE_METHODS and request.url.path.startswith("/api/"):
-            token = request.cookies.get(self.auth.cookie_name, "")
+            token = _cookie_value(request.cookies, SESSION_COOKIE_NAMES)
             actor = self.auth.admin_username if self.auth.verify_session(token) else "anonymous"
             client_ip = request.client.host if request.client else "unknown"
             stamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
@@ -104,7 +129,7 @@ class ApiAuthenticationMiddleware(BaseHTTPMiddleware):
             "/api/auth/login",
         }
         if request.url.path.startswith("/api/") and not public:
-            token = request.cookies.get(self.auth.cookie_name, "")
+            token = _cookie_value(request.cookies, SESSION_COOKIE_NAMES)
             if not self.auth.verify_session(token):
                 return JSONResponse({"error": "unauthorized"}, status_code=401)
         return await call_next(request)
@@ -142,30 +167,41 @@ class SubscriptionRateLimitMiddleware(BaseHTTPMiddleware):
 
 
 def _session_token(request: Request) -> str:
-    return request.cookies.get(request.app.state.auth.cookie_name, "")
+    return _cookie_value(request.cookies, SESSION_COOKIE_NAMES)
 
 
-def _csrf_cookie_name(request: Request) -> str:
-    return request.app.state.csrf_cookie_name
+def _csrf_cookie_token(request: Request) -> str:
+    return _cookie_value(request.cookies, CSRF_COOKIE_NAMES)
+
+
+def _request_origin(request: Request) -> str:
+    return f"{request.url.scheme}://{request.headers.get('host', request.url.netloc)}"
 
 
 def _origin_is_allowed(request: Request) -> bool:
     if request.headers.get("sec-fetch-site", "").lower() == "cross-site":
         return False
-    settings: Settings = request.app.state.settings
-    expected = settings.public_origin
-    if settings.allow_insecure or settings.public_access_warning:
-        # Without a canonical HTTPS domain the same process may be reached via
-        # its public, LAN, or loopback address. Always require the
-        # browser Origin to match the validated request Host exactly.
-        expected = f"{request.url.scheme}://{request.headers.get('host', request.url.netloc)}"
+    web_config: WebConfig = request.app.state.web_config
+    request_origin = _request_origin(request)
+    flexible_origin = (
+        request.app.state.settings.allow_insecure
+        or web_config.public_access_warning
+        or _request_is_loopback(request)
+    )
+    def allowed(value: str) -> bool:
+        if flexible_origin:
+            # Without a canonical HTTPS domain the same process may be reached
+            # via its public, LAN, or loopback address. Always require the
+            # browser Origin to match the validated request Host exactly.
+            return value == request_origin
+        return web_config.origin_is_allowed(value, request_origin)
     origin = request.headers.get("origin", "").rstrip("/")
     if origin:
-        return origin == expected
+        return allowed(origin)
     referer = request.headers.get("referer", "")
     if referer:
         parsed = urlparse(referer)
-        return f"{parsed.scheme}://{parsed.netloc}" == expected
+        return allowed(f"{parsed.scheme}://{parsed.netloc}")
     # Non-browser API clients may omit both. Browser requests are still covered
     # by the bound CSRF token, SameSite cookie, and Fetch Metadata check.
     return True
@@ -178,7 +214,7 @@ def _auth_guard(request: Request, require_csrf: bool = False) -> Response | None
         return JSONResponse({"error": "unauthorized"}, status_code=401)
     if require_csrf:
         header_token = request.headers.get("x-csrf-token", "")
-        cookie_token = request.cookies.get(_csrf_cookie_name(request), "")
+        cookie_token = _csrf_cookie_token(request)
         if (
             not _origin_is_allowed(request)
             or not header_token
@@ -280,23 +316,27 @@ async def login(request: Request) -> Response:
     await run_in_threadpool(auth.register_success, client_key)
     token = auth.issue_session()
     csrf = auth.csrf_token(token)
-    settings: Settings = request.app.state.settings
+    web_config: WebConfig = request.app.state.web_config
+    cookie_secure = web_config.cookie_secure and not _request_is_loopback(request)
+    cookie_prefix = "__Host-" if cookie_secure else ""
+    session_cookie_name = f"{cookie_prefix}myn_session"
+    csrf_cookie_name = f"{cookie_prefix}myn_csrf"
     response = JSONResponse({"ok": True})
     response.set_cookie(
-        auth.cookie_name,
+        session_cookie_name,
         token,
         max_age=auth.session_seconds,
         path="/",
-        secure=settings.cookie_secure,
+        secure=cookie_secure,
         httponly=True,
         samesite="strict",
     )
     response.set_cookie(
-        _csrf_cookie_name(request),
+        csrf_cookie_name,
         csrf,
         max_age=auth.session_seconds,
         path="/",
-        secure=settings.cookie_secure,
+        secure=cookie_secure,
         httponly=False,
         samesite="strict",
     )
@@ -308,21 +348,22 @@ async def logout(request: Request) -> Response:
     if blocked:
         return blocked
     response = JSONResponse({"ok": True})
-    secure = request.app.state.settings.cookie_secure
-    response.delete_cookie(
-        request.app.state.auth.cookie_name,
-        path="/",
-        secure=secure,
-        httponly=True,
-        samesite="strict",
-    )
-    response.delete_cookie(
-        _csrf_cookie_name(request),
-        path="/",
-        secure=secure,
-        httponly=False,
-        samesite="strict",
-    )
+    for cookie_name in SESSION_COOKIE_NAMES:
+        response.delete_cookie(
+            cookie_name,
+            path="/",
+            secure=cookie_name.startswith("__Host-"),
+            httponly=True,
+            samesite="strict",
+        )
+    for cookie_name in CSRF_COOKIE_NAMES:
+        response.delete_cookie(
+            cookie_name,
+            path="/",
+            secure=cookie_name.startswith("__Host-"),
+            httponly=False,
+            samesite="strict",
+        )
     return response
 
 
@@ -340,18 +381,20 @@ async def auth_session(request: Request) -> Response:
             "securityWarning": (
                 "当前管理面板没有配置 HTTPS 域名，正在通过公网地址直接访问。"
                 "登录信息和提交的 SSH 凭据可能被链路监听，请尽快配置域名与 HTTPS。"
-                if request.app.state.settings.public_access_warning
+                if request.app.state.web_config.public_access_warning
                 else ""
             ),
         }
     )
-    settings: Settings = request.app.state.settings
+    web_config: WebConfig = request.app.state.web_config
+    cookie_secure = web_config.cookie_secure and not _request_is_loopback(request)
+    cookie_prefix = "__Host-" if cookie_secure else ""
     response.set_cookie(
-        _csrf_cookie_name(request),
+        f"{cookie_prefix}myn_csrf",
         csrf,
         max_age=auth.session_seconds,
         path="/",
-        secure=settings.cookie_secure,
+        secure=cookie_secure,
         httponly=False,
         samesite="strict",
     )
@@ -378,6 +421,26 @@ def _subscription_media_type(output_format: str) -> str:
 
 async def summary(request: Request) -> Response:
     return await _service_response(_get_service(request).summary)
+
+
+async def get_web_settings(request: Request) -> Response:
+    return JSONResponse(request.app.state.web_config.as_dict())
+
+
+async def update_web_settings(request: Request) -> Response:
+    blocked = _auth_guard(request, require_csrf=True)
+    if blocked:
+        return blocked
+    try:
+        body = await _read_payload(request)
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    return await _service_response(
+        lambda: request.app.state.web_config.update_public_origin(
+            body.get("publicOrigin", ""),
+            current_origin=request.headers.get("origin", "") or _request_origin(request),
+        )
+    )
 
 
 async def list_servers(request: Request) -> Response:
@@ -545,17 +608,17 @@ def create_app(
     settings = settings or load_settings()
     db = db or Database(settings.db_path)
     services = services or AppServices(db, SecretBox(settings.app_secret))
+    web_config = WebConfig(settings, db)
     recovered = services.recover_orphaned_jobs()
     if recovered:
         LOGGER.warning("Marked %d orphaned running job(s) as failed after restart", recovered)
-    cookie_prefix = "__Host-" if settings.cookie_secure else ""
     auth = AuthManager(
         settings.app_secret,
         settings.admin_username,
         settings.admin_password,
         settings.session_seconds,
         db=db,
-        cookie_name=f"{cookie_prefix}myn_session",
+        cookie_name="myn_session",
     )
 
     @asynccontextmanager
@@ -576,6 +639,7 @@ def create_app(
         Route("/api/auth/logout", logout, methods=["POST"]),
         Route("/api/auth/session", auth_session, methods=["GET"]),
         Route("/api/summary", summary, methods=["GET"]),
+        Route("/api/settings", get_web_settings, methods=["GET"]),
         Route("/api/servers", list_servers, methods=["GET"]),
         Route("/api/deployments", list_deployments, methods=["GET"]),
         Route("/api/clients", list_clients, methods=["GET"]),
@@ -592,6 +656,7 @@ def create_app(
         Route("/api/subscriptions", mutation_endpoint("create_subscription"), methods=["POST"]),
         Route("/api/chains", mutation_endpoint("create_chain"), methods=["POST"]),
         Route("/api/chains/{item_id}/deploy", mutation_endpoint("deploy_chain"), methods=["POST"]),
+        Route("/api/settings", update_web_settings, methods=["PATCH"]),
         Route("/api/servers/{item_id}/test", mutation_endpoint("test_server"), methods=["POST"]),
         Route(
             "/api/servers/{item_id}/host-key/approve",
@@ -639,8 +704,8 @@ def create_app(
         Route("/{path:path}", spa, methods=["GET"]),
     ]
     middleware = [
-        Middleware(TrustedHostMiddleware, allowed_hosts=list(settings.allowed_hosts)),
-        Middleware(SecurityHeadersMiddleware, secure_transport=settings.cookie_secure),
+        Middleware(RuntimeTrustedHostMiddleware),
+        Middleware(SecurityHeadersMiddleware),
         Middleware(
             SubscriptionRateLimitMiddleware,
             requests_per_minute=settings.subscription_requests_per_minute,
@@ -653,7 +718,7 @@ def create_app(
     application.state.db = db
     application.state.services = services
     application.state.auth = auth
-    application.state.csrf_cookie_name = f"{cookie_prefix}myn_csrf"
+    application.state.web_config = web_config
     return application
 
 

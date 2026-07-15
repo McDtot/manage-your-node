@@ -757,6 +757,51 @@ input[type="checkbox"] {
   font-size: 12px;
 }
 
+.settings-grid {
+  align-items: start;
+}
+
+.settings-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 9px;
+}
+
+.settings-status {
+  display: grid;
+  gap: 10px;
+}
+
+.settings-status > div {
+  display: grid;
+  gap: 5px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: var(--surface-soft);
+  padding: 12px 13px;
+}
+
+.settings-status span {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.settings-status strong {
+  overflow-wrap: anywhere;
+  font-size: 13px;
+}
+
+.settings-note {
+  margin-top: 14px;
+  border-left: 3px solid var(--orange);
+  border-radius: 0 12px 12px 0;
+  background: rgba(255, 149, 0, 0.08);
+  color: var(--muted-strong);
+  padding: 11px 13px;
+  font-size: 12px;
+  line-height: 1.6;
+}
+
 .bad-text {
   color: var(--red);
 }
@@ -1357,7 +1402,7 @@ input[type="checkbox"] {
   .nav {
     display: grid;
     height: 100%;
-    grid-template-columns: repeat(7, minmax(0, 1fr));
+    grid-template-columns: repeat(8, minmax(0, 1fr));
     gap: 2px;
     margin: 0;
   }
@@ -1477,6 +1522,10 @@ input[type="checkbox"] {
 
   .dialog-actions {
     flex-direction: column-reverse;
+  }
+
+  .settings-actions {
+    display: grid;
   }
 
   .dialog-actions button {

@@ -116,6 +116,116 @@ def test_public_http_warning_is_returned_to_web_ui(monkeypatch, tmp_path):
     assert "HTTPS 域名" in session["securityWarning"]
 
 
+def test_webui_can_persist_and_apply_public_origin(monkeypatch, tmp_path):
+    monkeypatch.setenv("APP_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("HOST", "0.0.0.0")
+    monkeypatch.setenv("PORT", "8787")
+    monkeypatch.setenv("APP_SECRET", "a-sufficiently-long-secret")
+    monkeypatch.setenv("ADMIN_PASSWORD", "a-strong-password")
+    monkeypatch.delenv("PUBLIC_ORIGIN", raising=False)
+    monkeypatch.delenv("ALLOWED_HOSTS", raising=False)
+    settings = load_settings()
+    db = Database(settings.db_path)
+    services = AppServices(db, SecretBox(settings.app_secret))
+    app = create_app(settings=settings, db=db, services=services)
+    client = TestClient(app, base_url="http://203.0.113.10:8787")
+    login_response = client.post(
+        "/api/auth/login",
+        json={"username": "admin", "password": "a-strong-password"},
+        headers={"Origin": "http://203.0.113.10:8787"},
+    )
+    assert login_response.status_code == 200
+    csrf = client.cookies.get("myn_csrf")
+    assert csrf
+
+    initial = client.get("/api/settings").json()
+    assert initial["source"] == "automatic"
+    assert initial["publicAccessWarning"] is True
+
+    headers = {
+        "X-CSRF-Token": csrf,
+        "Origin": "http://203.0.113.10:8787",
+    }
+    invalid = client.patch(
+        "/api/settings",
+        json={"publicOrigin": "http://panel.example.com"},
+        headers=headers,
+    )
+    assert invalid.status_code == 400
+    assert "HTTPS" in invalid.json()["error"]
+
+    updated = client.patch(
+        "/api/settings",
+        json={"publicOrigin": "https://panel.example.com/"},
+        headers=headers,
+    )
+    assert updated.status_code == 200
+    assert updated.json() == {
+        "publicOrigin": "https://panel.example.com",
+        "configuredPublicOrigin": "https://panel.example.com",
+        "source": "webui",
+        "publicAccessWarning": False,
+        "cookieSecure": True,
+    }
+    assert db.query_one(
+        "SELECT value FROM app_metadata WHERE key = 'public_origin'"
+    )["value"] == "https://panel.example.com"
+
+    # The address used for the update remains temporarily valid so a bad proxy
+    # configuration can be reverted before the process restarts.
+    assert client.get("/api/settings").status_code == 200
+    assert client.post(
+        "/api/subscriptions",
+        json={"name": "fallback-still-works"},
+        headers=headers,
+    ).status_code == 201
+
+    restarted_db = Database(settings.db_path)
+    restarted_app = create_app(
+        settings=settings,
+        db=restarted_db,
+        services=AppServices(restarted_db, SecretBox(settings.app_secret)),
+    )
+    domain_client = TestClient(restarted_app, base_url="https://panel.example.com")
+    login_response = domain_client.post(
+        "/api/auth/login",
+        json={"username": "admin", "password": "a-strong-password"},
+        headers={"Origin": "https://panel.example.com"},
+    )
+    assert login_response.status_code == 200
+    assert domain_client.cookies.get("__Host-myn_csrf")
+    assert domain_client.get("/api/settings").json()["source"] == "webui"
+    assert domain_client.get(
+        "/api/health/ready",
+        headers={"Host": "attacker.example"},
+    ).status_code == 400
+
+    # Loopback stays available as a recovery path after a bad DNS/proxy change.
+    recovery_client = TestClient(restarted_app, base_url="http://127.0.0.1:8787")
+    recovery_login = recovery_client.post(
+        "/api/auth/login",
+        json={"username": "admin", "password": "a-strong-password"},
+        headers={"Origin": "http://127.0.0.1:8787"},
+    )
+    assert recovery_login.status_code == 200
+    recovery_csrf = recovery_client.cookies.get("myn_csrf")
+    assert recovery_csrf
+    assert recovery_client.get("/api/settings").status_code == 200
+    restored = recovery_client.patch(
+        "/api/settings",
+        json={"publicOrigin": ""},
+        headers={
+            "Origin": "http://127.0.0.1:8787",
+            "X-CSRF-Token": recovery_csrf,
+        },
+    )
+    assert restored.status_code == 200
+    assert restored.json()["source"] == "automatic"
+    assert db.query_one(
+        "SELECT value FROM app_metadata WHERE key = 'public_origin'"
+    ) is None
+
+
 def test_chain_subscription_supports_mihomo_and_base64_formats(monkeypatch, tmp_path):
     client, db = _client(monkeypatch, tmp_path)
     share_link = (

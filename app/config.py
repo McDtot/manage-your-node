@@ -86,7 +86,36 @@ def _normalize_origin(value: str) -> str:
         or parsed.password
     ):
         raise ConfigError("PUBLIC_ORIGIN must be an origin such as https://nodes.example.com")
-    return origin
+    hostname = parsed.hostname
+    if not hostname:
+        raise ConfigError("PUBLIC_ORIGIN must be an origin such as https://nodes.example.com")
+    try:
+        port = parsed.port
+    except ValueError as exc:
+        raise ConfigError("PUBLIC_ORIGIN contains an invalid port") from exc
+
+    try:
+        normalized_host = str(ip_address(hostname))
+    except ValueError:
+        try:
+            normalized_host = hostname.encode("idna").decode("ascii").lower()
+        except UnicodeError as exc:
+            raise ConfigError("PUBLIC_ORIGIN contains an invalid hostname") from exc
+        labels = normalized_host.split(".")
+        if any(
+            not label
+            or len(label) > 63
+            or label.startswith("-")
+            or label.endswith("-")
+            or not all(char.isalnum() or char == "-" for char in label)
+            for label in labels
+        ):
+            raise ConfigError("PUBLIC_ORIGIN contains an invalid hostname")
+
+    rendered_host = f"[{normalized_host}]" if ":" in normalized_host else normalized_host
+    default_port = 443 if parsed.scheme.lower() == "https" else 80
+    rendered_port = f":{port}" if port is not None and port != default_port else ""
+    return f"{parsed.scheme.lower()}://{rendered_host}{rendered_port}"
 
 
 def load_settings() -> Settings:
@@ -114,10 +143,11 @@ def load_settings() -> Settings:
     admin_password = admin_password_env or app_secret
 
     origin_env = os.getenv("PUBLIC_ORIGIN", "").strip()
+    fallback_host = f"[{host}]" if ":" in host and not host.startswith("[") else host
     public_origin = (
         _normalize_origin(origin_env)
         if origin_env
-        else f"http://{host}:{os.getenv('PORT', '8787')}"
+        else f"http://{fallback_host}:{os.getenv('PORT', '8787')}"
     )
     parsed_origin = urlparse(public_origin)
     public_access_warning = not _is_loopback(host) and not (

@@ -5,6 +5,7 @@ const state = {
   subscriptions: [],
   chains: [],
   clients: [],
+  webSettings: null,
   chainDraft: [],
   chainProtocolDraft: {},
   activeJobId: null,
@@ -19,9 +20,9 @@ const $$ = (selector) => Array.from(document.querySelectorAll(selector));
 
 function csrfToken() {
   const cookies = document.cookie.split(";").map((item) => item.trim());
-  const entry = cookies.find((item) =>
-    item.startsWith("myn_csrf=") || item.startsWith("__Host-myn_csrf="),
-  );
+  const entry = ["__Host-myn_csrf=", "myn_csrf="]
+    .map((prefix) => cookies.find((item) => item.startsWith(prefix)))
+    .find(Boolean);
   return entry ? decodeURIComponent(entry.split("=", 2)[1]) : "";
 }
 
@@ -82,6 +83,7 @@ function setSection(id) {
     chains: ["ROUTING", "代理链"],
     clients: ["ACCESS", "用户"],
     logs: ["ACTIVITY", "任务日志"],
+    settings: ["CONFIGURATION", "设置"],
   };
   $$(".section").forEach((section) => {
     section.classList.toggle("is-active", section.id === id);
@@ -198,7 +200,8 @@ async function copy(text) {
 function absoluteUrl(value) {
   const text = String(value || "");
   if (!text || /^https?:\/\//i.test(text)) return text;
-  return `${window.location.origin}${text.startsWith("/") ? "" : "/"}${text}`;
+  const origin = state.webSettings?.publicOrigin || window.location.origin;
+  return `${origin}${text.startsWith("/") ? "" : "/"}${text}`;
 }
 
 function subscriptionUrlFor(value, format) {
@@ -208,13 +211,14 @@ function subscriptionUrlFor(value, format) {
 }
 
 async function refresh() {
-  const [summary, servers, deployments, subscriptions, chains, clients] = await Promise.all([
+  const [summary, servers, deployments, subscriptions, chains, clients, webSettings] = await Promise.all([
     api("/api/summary"),
     api("/api/servers"),
     api("/api/deployments"),
     api("/api/subscriptions"),
     api("/api/chains"),
     api("/api/clients"),
+    api("/api/settings"),
   ]);
   state.summary = summary;
   state.servers = servers.servers;
@@ -222,6 +226,7 @@ async function refresh() {
   state.subscriptions = subscriptions.subscriptions;
   state.chains = chains.chains;
   state.clients = clients.clients;
+  state.webSettings = webSettings;
   render();
 }
 
@@ -233,6 +238,7 @@ function render() {
   renderChains();
   renderClients();
   renderSelects();
+  renderWebSettings();
   $("#statusLine").textContent = `${state.servers.length} 台服务器，${state.deployments.length} 个部署，${state.chains.length} 条代理链，${state.subscriptions.length} 条订阅，${state.clients.length} 名用户`;
 }
 
@@ -625,6 +631,27 @@ async function openSubscriptionEdit(subscriptionId) {
   $("#subscriptionDialog").showModal();
 }
 
+function renderWebSettings() {
+  if (!state.webSettings) return;
+  const sourceLabels = {
+    webui: "WebUI",
+    environment: "服务器环境变量",
+    automatic: "监听地址（自动）",
+  };
+  const form = $("#webSettingsForm");
+  form.elements.publicOrigin.value = state.webSettings.publicOrigin || "";
+  $("#effectivePublicOrigin").textContent = state.webSettings.publicOrigin || "—";
+  $("#publicOriginSource").textContent = sourceLabels[state.webSettings.source] || "未知";
+  $("#secureCookieStatus").textContent = state.webSettings.cookieSecure ? "已启用" : "未启用";
+  $("#resetWebSettingsBtn").disabled = state.webSettings.source !== "webui";
+
+  const warning = $("#securityWarning");
+  warning.textContent = state.webSettings.publicAccessWarning
+    ? "当前管理面板没有配置 HTTPS 域名，正在通过公网地址直接访问。登录信息和提交的 SSH 凭据可能被链路监听，请尽快配置域名与 HTTPS。"
+    : "";
+  warning.hidden = !warning.textContent;
+}
+
 function shareLinkDisplayName(value) {
   try {
     const fragment = new URL(String(value || "")).hash.slice(1);
@@ -718,6 +745,67 @@ function bindEvents() {
   });
   $("#refreshBtn").addEventListener("click", () => refresh().then(() => toast("已刷新")));
   $("#logoutBtn").addEventListener("click", () => logout());
+
+  $("#webSettingsForm").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const form = event.currentTarget;
+    const candidate = String(form.elements.publicOrigin.value || "").trim();
+    let parsed;
+    try {
+      parsed = new URL(candidate);
+    } catch {
+      return toast("请输入完整的 HTTPS 外部访问地址");
+    }
+    if (
+      parsed.protocol !== "https:" ||
+      parsed.username ||
+      parsed.password ||
+      (parsed.pathname && parsed.pathname !== "/") ||
+      parsed.search ||
+      parsed.hash
+    ) {
+      return toast("地址只能包含 HTTPS、域名和可选端口");
+    }
+    const normalized = parsed.origin;
+    if (!confirm(`保存后订阅链接将使用：\n${normalized}\n\n请确认域名解析、HTTPS 和反向代理已经可用。`)) return;
+    let settings;
+    try {
+      settings = await api("/api/settings", {
+        method: "PATCH",
+        body: JSON.stringify({ publicOrigin: candidate }),
+      });
+    } catch (error) {
+      return toast(error instanceof Error ? error.message : "保存外部访问地址失败");
+    }
+    state.webSettings = settings;
+    renderWebSettings();
+    renderDeployments();
+    renderSubscriptions();
+    renderChains();
+    toast("外部访问地址已生效");
+    if (settings.publicOrigin !== window.location.origin && confirm("现在通过新的外部地址重新打开并登录？")) {
+      window.location.href = settings.publicOrigin;
+    }
+  });
+
+  $("#resetWebSettingsBtn").addEventListener("click", async () => {
+    if (!confirm("恢复 .env 或自动检测的服务器配置？")) return;
+    let settings;
+    try {
+      settings = await api("/api/settings", {
+        method: "PATCH",
+        body: JSON.stringify({ publicOrigin: "" }),
+      });
+    } catch (error) {
+      return toast(error instanceof Error ? error.message : "恢复服务器配置失败");
+    }
+    state.webSettings = settings;
+    renderWebSettings();
+    renderDeployments();
+    renderSubscriptions();
+    renderChains();
+    toast("已恢复服务器配置");
+  });
 
   $("#serverForm").addEventListener("submit", async (event) => {
     event.preventDefault();

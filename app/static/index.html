@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Manage Your Node</title>
-    <link rel="stylesheet" href="/static/styles.css?v=subscription-node-names-20260715" />
+    <link rel="stylesheet" href="/static/styles.css?v=web-settings-20260715" />
   </head>
   <body>
     <div class="shell">
@@ -46,6 +46,10 @@
           <button class="nav-item" data-section="logs">
             <span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M5 4h14v16H5V4Zm3 4h8M8 12h8m-8 4h5"/></svg></span>
             <span>日志</span>
+          </button>
+          <button class="nav-item" data-section="settings">
+            <span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8Zm8 4 2-1-2-3-2 .5a8 8 0 0 0-1.5-1L16 5h-4l-.5 2.5a8 8 0 0 0-1.5 1L8 8 6 11l2 1a8 8 0 0 0 0 2l-2 1 2 3 2-.5a8 8 0 0 0 1.5 1L12 21h4l.5-2.5a8 8 0 0 0 1.5-1l2 .5 2-3-2-1a8 8 0 0 0 0-2Z"/></svg></span>
+            <span>设置</span>
           </button>
         </nav>
         <div class="sidebar-footer">
@@ -326,6 +330,46 @@
             <pre id="jobLog" class="log"></pre>
           </section>
         </section>
+
+        <section class="section" id="settings">
+          <div class="grid two settings-grid">
+            <form class="panel form" id="webSettingsForm">
+              <div class="panel-head">
+                <div><h2>外部访问设置</h2><p>反向代理对外提供的 HTTPS 地址</p></div>
+              </div>
+              <label>
+                外部访问地址
+                <input
+                  name="publicOrigin"
+                  type="url"
+                  inputmode="url"
+                  autocomplete="url"
+                  placeholder="https://panel.example.com"
+                  required
+                />
+              </label>
+              <div class="meta">只填写协议、域名和可选端口，不要添加路径、查询参数或末尾斜杠。</div>
+              <div class="settings-actions">
+                <button class="primary" type="submit">保存并立即生效</button>
+                <button class="secondary" id="resetWebSettingsBtn" type="button">恢复服务器配置</button>
+              </div>
+            </form>
+
+            <section class="panel">
+              <div class="panel-head">
+                <div><h2>当前状态</h2><p>订阅链接和 Web 安全策略使用同一地址</p></div>
+              </div>
+              <div class="settings-status">
+                <div><span>生效地址</span><strong class="mono" id="effectivePublicOrigin">—</strong></div>
+                <div><span>配置来源</span><strong id="publicOriginSource">—</strong></div>
+                <div><span>安全 Cookie</span><strong id="secureCookieStatus">—</strong></div>
+              </div>
+              <div class="settings-note">
+                保存前请先确认域名解析、HTTPS 证书和反向代理已经可用。首次切换后请通过新域名重新登录；当前会话的旧地址会临时保留到本次服务重启，配置失败也可通过本机或 SSH 端口转发访问 127.0.0.1 撤销。
+              </div>
+            </section>
+          </div>
+        </section>
         </div>
       </main>
     </div>
@@ -380,6 +424,6 @@
     </dialog>
 
     <div class="toast" id="toast" hidden></div>
-    <script src="/static/app.js?v=subscription-node-names-20260715"></script>
+    <script src="/static/app.js?v=web-settings-20260715"></script>
   </body>
 </html>

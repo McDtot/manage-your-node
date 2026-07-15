@@ -51,6 +51,24 @@ def test_production_with_good_secrets(monkeypatch):
     assert "panel.example.com" in settings.allowed_hosts
 
 
+def test_public_origin_is_canonicalized(monkeypatch):
+    monkeypatch.setenv("HOST", "0.0.0.0")
+    monkeypatch.setenv("APP_SECRET", "a-sufficiently-long-secret")
+    monkeypatch.setenv("ADMIN_PASSWORD", "a-strong-password")
+    monkeypatch.setenv("PUBLIC_ORIGIN", "HTTPS://PANEL.Example.COM:443/")
+    settings = load_settings()
+    assert settings.public_origin == "https://panel.example.com"
+
+
+def test_public_origin_rejects_invalid_port(monkeypatch):
+    monkeypatch.setenv("HOST", "0.0.0.0")
+    monkeypatch.setenv("APP_SECRET", "a-sufficiently-long-secret")
+    monkeypatch.setenv("ADMIN_PASSWORD", "a-strong-password")
+    monkeypatch.setenv("PUBLIC_ORIGIN", "https://panel.example.com:not-a-port")
+    with pytest.raises(ConfigError, match="invalid port"):
+        load_settings()
+
+
 def test_short_secret_rejected(monkeypatch):
     monkeypatch.setenv("HOST", "0.0.0.0")
     monkeypatch.setenv("APP_SECRET", "short")
