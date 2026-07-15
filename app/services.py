@@ -745,8 +745,6 @@ class AppServices:
         panel_username = "myn_" + secrets.token_urlsafe(5).replace("-", "A").replace("_", "B")
         panel_password = secrets.token_urlsafe(18).replace("-", "A").replace("_", "B")
         api_token = ""
-        subscription_url = self._deployment_subscription_url(deployment_id)
-
         with self.db.transaction():
             self._acquire_operation_locks(job_id, [("server", server_id)])
             self.db.execute(
@@ -774,14 +772,13 @@ class AppServices:
                     reality_mode,
                     selected_reality_dest,
                     selected_reality_sni,
-                    1,
+                    0,
                     "provisioning",
-                    subscription_url,
+                    "",
                     stamp,
                     stamp,
                 ),
             )
-            self._ensure_deployment_subscription(deployment_id, server["name"], stamp)
             self.db.execute(
                 """
                 INSERT INTO jobs (
@@ -1162,7 +1159,8 @@ exit 43
         if not auto_selection_pending:
             row["reality_dest"], row["reality_sni"] = _deployment_reality_settings(row)
         row["panel_url"] = f"{row['panel_scheme']}://{url_host(row['host'])}:{row['panel_port']}{row['panel_path']}/"
-        row["subscription_url"] = self._deployment_subscription_url(row["id"])
+        if row.get("subscription_url"):
+            row["subscription_url"] = self._deployment_subscription_url(row["id"])
         encrypted_password = row.pop("encrypted_panel_password", "")
         encrypted_token = row.pop("encrypted_api_token", "")
         if reveal:
@@ -1177,28 +1175,6 @@ exit 43
 
     def _chain_subscription_url(self, token: str) -> str:
         return f"/sub/chains/{token}"
-
-    def _ensure_deployment_subscription(
-        self,
-        deployment_id: str,
-        server_name: str,
-        stamp: str | None = None,
-    ) -> None:
-        created_at = stamp or now_iso()
-        self.db.execute(
-            """
-            INSERT OR IGNORE INTO subscriptions (
-                id, name, token, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?)
-            """,
-            (
-                f"sub_{deployment_id}",
-                f"{server_name} 默认订阅",
-                deployment_id,
-                created_at,
-                created_at,
-            ),
-        )
 
     @contextmanager
     def _xui_session(self, deployment: dict[str, Any]) -> Iterator[XuiApiClient]:
@@ -2143,21 +2119,33 @@ echo "Removed $SERVICE_NAME"
                     stamp,
                 ),
             )
-            self.db.execute(
-                """
-                INSERT OR IGNORE INTO subscription_nodes (
-                    subscription_id, node_client_id, created_at
-                ) VALUES (?, ?, ?)
-                """,
-                (deployment_id, client_id, stamp),
-            )
+            if deployment.get("subscription_url"):
+                self.db.execute(
+                    """
+                    INSERT OR IGNORE INTO subscription_nodes (
+                        subscription_id, node_client_id, created_at
+                    ) VALUES (?, ?, ?)
+                    """,
+                    (deployment_id, client_id, stamp),
+                )
             self.db.execute(
                 """
                 INSERT OR IGNORE INTO subscription_entries (
                     subscription_id, node_client_id, quota_bytes, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?)
+                )
+                SELECT ?, ?, ?, ?, ?
+                WHERE EXISTS (
+                    SELECT 1 FROM subscriptions WHERE id = ?
+                )
                 """,
-                (f"sub_{deployment_id}", client_id, quota_bytes, stamp, stamp),
+                (
+                    f"sub_{deployment_id}",
+                    client_id,
+                    quota_bytes,
+                    stamp,
+                    stamp,
+                    f"sub_{deployment_id}",
+                ),
             )
         return self.get_client(client_id)
 
@@ -2856,10 +2844,10 @@ echo "3x-ui cleanup completed"
             self.db.execute(
                 """
                 UPDATE deployments
-                SET subscription_configured = 1, updated_at = ?
+                SET subscription_configured = 1, subscription_url = ?, updated_at = ?
                 WHERE id = ?
                 """,
-                (stamp, deployment_id),
+                (self._deployment_subscription_url(deployment_id), stamp, deployment_id),
             )
         return self.get_subscription_config(deployment_id)
 
@@ -2868,7 +2856,9 @@ echo "3x-ui cleanup completed"
         deployment_id: str,
         output_format: str = "base64",
     ) -> str:
-        self.get_deployment(deployment_id)
+        deployment = self.get_deployment(deployment_id)
+        if not deployment.get("subscription_url"):
+            raise ValueError("subscription not found")
         rows = self.db.query_all(
             """
             SELECT c.share_link, sn.display_name

@@ -65,6 +65,7 @@ def test_deployments_default_to_native_and_retire_legacy_simulations(tmp_path):
     assert row["install_method"] == "legacy"
     assert row["status"] == "failed"
     assert "no longer supported" in row["last_error"]
+    assert upgraded.query_all("SELECT id FROM subscriptions") == []
 
 
 def test_proxy_chain_protocol_columns_migrate_existing_rows(tmp_path):

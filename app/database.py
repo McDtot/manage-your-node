@@ -296,45 +296,6 @@ class Database:
                 WHERE install_method <> 'native'
                 """
             )
-            self._conn.execute(
-                """
-                INSERT OR IGNORE INTO subscription_nodes (
-                    subscription_id, node_client_id, created_at
-                )
-                SELECT d.id, c.id, COALESCE(c.created_at, d.created_at)
-                FROM deployments d
-                JOIN clients c ON c.deployment_id = d.id
-                WHERE d.subscription_configured = 0
-                """
-            )
-            self._conn.execute(
-                "UPDATE deployments SET subscription_configured = 1 WHERE subscription_configured = 0"
-            )
-            self._conn.execute(
-                """
-                INSERT OR IGNORE INTO subscriptions (
-                    id, name, token, created_at, updated_at
-                )
-                SELECT 'sub_' || d.id, s.name || ' 默认订阅', d.id,
-                       COALESCE(d.created_at, CURRENT_TIMESTAMP),
-                       COALESCE(d.updated_at, d.created_at, CURRENT_TIMESTAMP)
-                FROM deployments d
-                JOIN servers s ON s.id = d.server_id
-                """
-            )
-            self._conn.execute(
-                """
-                INSERT OR IGNORE INTO subscription_entries (
-                    subscription_id, node_client_id, quota_bytes, created_at, updated_at
-                )
-                SELECT 'sub_' || sn.subscription_id, sn.node_client_id, c.quota_bytes,
-                       COALESCE(sn.created_at, c.created_at, CURRENT_TIMESTAMP),
-                       COALESCE(c.updated_at, sn.created_at, CURRENT_TIMESTAMP)
-                FROM subscription_nodes sn
-                JOIN clients c ON c.id = sn.node_client_id
-                JOIN subscriptions s ON s.id = 'sub_' || sn.subscription_id
-                """
-            )
             self._conn.commit()
 
     def _ensure_column(self, table: str, column: str, definition: str) -> None:

@@ -103,6 +103,7 @@ def test_create_and_list_server(services):
     assert server["secret_label"] == "saved"
     listed = services.list_servers()
     assert len(listed) == 1
+    assert services.list_subscriptions() == []
     # Secret material must never be returned to callers.
     assert "encrypted_secret" not in listed[0]
     assert "secret" not in listed[0]
@@ -169,8 +170,6 @@ def test_one_node_supports_multiple_users(services):
         "multi-user",
         "203.0.113.25",
     )
-    services._ensure_deployment_subscription(deployment_id, "edge-multi-user")
-
     first = services.create_client(
         deployment_id,
         {"name": "alice", "quotaGb": 100, "expiresAt": "2030-01-01"},
@@ -195,7 +194,6 @@ def test_user_names_are_unique_within_a_node(services):
         "unique-user",
         "203.0.113.26",
     )
-    services._ensure_deployment_subscription(deployment_id, "edge-unique-user")
     services.create_client(deployment_id, {"name": "Alice"})
 
     with pytest.raises(ValueError, match="该节点已存在同名用户"):
@@ -212,8 +210,6 @@ def test_user_can_be_created_without_expiration(services):
         "never-expires",
         "203.0.113.31",
     )
-    services._ensure_deployment_subscription(deployment_id, "edge-never-expires")
-
     client = services.create_client(
         deployment_id,
         {"name": "permanent-user", "neverExpires": True},
@@ -230,7 +226,6 @@ def test_user_without_expiration_syncs_zero_to_remote(services, monkeypatch):
         "never-expires-remote",
         "203.0.113.32",
     )
-    services._ensure_deployment_subscription(deployment_id, "edge-never-expires-remote")
     services.db.execute(
         "UPDATE deployments SET xui_inbound_id = 45 WHERE id = ?",
         (deployment_id,),
@@ -265,7 +260,6 @@ def test_user_expiration_can_be_removed_and_restored(services, monkeypatch):
         "edit-expiration",
         "203.0.113.33",
     )
-    services._ensure_deployment_subscription(deployment_id, "edge-edit-expiration")
     client = services.create_client(
         deployment_id,
         {"name": "editable-expiration", "expiresAt": "2030-01-01"},
@@ -315,8 +309,6 @@ def test_user_traffic_reset_period_can_be_configured(services):
         "traffic-cycle",
         "203.0.113.29",
     )
-    services._ensure_deployment_subscription(deployment_id, "edge-traffic-cycle")
-
     client = services.create_client(
         deployment_id,
         {"name": "periodic-user", "trafficResetDays": 30},
@@ -337,7 +329,6 @@ def test_updating_traffic_reset_period_syncs_to_remote(services, monkeypatch):
         "traffic-cycle-remote",
         "203.0.113.30",
     )
-    services._ensure_deployment_subscription(deployment_id, "edge-traffic-cycle-remote")
     client = services.create_client(deployment_id, {"name": "remote-periodic-user"})
     services.db.execute(
         "UPDATE deployments SET install_method = 'native', xui_inbound_id = 44 WHERE id = ?",
@@ -379,7 +370,6 @@ def test_reset_client_traffic_resets_remote_before_local(services, monkeypatch):
         "reset-remote",
         "203.0.113.27",
     )
-    services._ensure_deployment_subscription(deployment_id, "edge-reset-remote")
     client = services.create_client(deployment_id, {"name": "alice+reset"})
     services.db.execute(
         "UPDATE deployments SET install_method = 'native', xui_inbound_id = 42 WHERE id = ?",
@@ -415,7 +405,6 @@ def test_reset_client_traffic_keeps_local_usage_when_remote_fails(services, monk
         "reset-failure",
         "203.0.113.28",
     )
-    services._ensure_deployment_subscription(deployment_id, "edge-reset-failure")
     client = services.create_client(deployment_id, {"name": "failed-reset"})
     services.db.execute(
         "UPDATE deployments SET install_method = 'native', xui_inbound_id = 43 WHERE id = ?",
@@ -468,7 +457,6 @@ def test_subscription_node_display_name_is_scoped_and_used_by_all_formats(servic
         "custom-node-name",
         "203.0.113.65",
     )
-    services._ensure_deployment_subscription(deployment_id, "edge-custom-node-name")
     client = services.create_client(deployment_id, {"name": "subscriber", "quotaGb": 20})
     original_link = (
         f"vless://{client['uuid']}@203.0.113.65:443"
@@ -518,37 +506,17 @@ def test_subscription_node_display_name_is_scoped_and_used_by_all_formats(servic
     assert unquote(urlparse(unchanged_link).fragment) == "原始节点"
 
 
-def test_default_subscription_display_name_is_shared_with_deployment_link(services):
+def test_deployment_subscription_remains_available_for_legacy_deployments(services):
     deployment_id = _create_ready_deployment(
         services,
         "default-node-name",
         "203.0.113.66",
     )
-    services._ensure_deployment_subscription(deployment_id, "edge-default-node-name")
     client = services.create_client(deployment_id, {"name": "default-subscriber"})
-    subscription_id = f"sub_{deployment_id}"
-    rotated = services.rotate_subscription_token(subscription_id)
-
-    services.update_managed_subscription(
-        subscription_id,
-        {
-            "nodes": [
-                {
-                    "nodeId": client["id"],
-                    "displayName": "默认订阅节点",
-                }
-            ]
-        },
-    )
-
-    managed_link = base64.b64decode(
-        services.render_managed_subscription(rotated["token"])
-    ).decode("utf-8")
     deployment_link = base64.b64decode(
         services.render_deployment_subscription(deployment_id)
     ).decode("utf-8")
-    assert unquote(urlparse(managed_link).fragment) == "默认订阅节点"
-    assert deployment_link == managed_link
+    assert deployment_link == client["share_link"]
 
 
 def test_subscription_node_display_name_has_a_length_limit(services):
@@ -557,7 +525,6 @@ def test_subscription_node_display_name_has_a_length_limit(services):
         "long-node-name",
         "203.0.113.67",
     )
-    services._ensure_deployment_subscription(deployment_id, "edge-long-node-name")
     client = services.create_client(deployment_id, {"name": "subscriber"})
     subscription = services.create_subscription({"name": "limited"})
 
@@ -586,7 +553,6 @@ def test_managed_subscription_can_include_proxy_chains(services):
         "subscription-exit",
         "203.0.113.62",
     )
-    services._ensure_deployment_subscription(entry_id, "edge-subscription-entry")
     client = services.create_client(entry_id, {"name": "subscriber", "quotaGb": 20})
     chain = services.create_proxy_chain({"deploymentIds": [entry_id, exit_id]})
     chain_link = "vless://ready-proxy-chain"
@@ -820,6 +786,13 @@ def test_deployment_does_not_create_an_initial_user(services, monkeypatch):
         if item["id"] == result["deployment"]["id"]
     )
     assert deployment["client_count"] == 0
+    assert deployment["subscription_url"] == ""
+    assert services.list_subscriptions() == []
+
+    services.create_client(deployment["id"], {"name": "manual-user"})
+    assert services.list_subscriptions() == []
+    with pytest.raises(ValueError, match="subscription not found"):
+        services.render_deployment_subscription(deployment["id"])
 
 
 def test_native_reality_target_probe_is_persisted(services, monkeypatch):

@@ -984,14 +984,15 @@ input[type="checkbox"] {
 
 .chain-hop {
   display: grid;
-  grid-template-columns: 24px minmax(0, 1fr);
+  grid-template-columns: 20px minmax(0, 1fr);
   align-items: center;
-  gap: 7px;
+  gap: 8px;
   padding: 1px 9px;
 }
 
 .chain-hop-arrow {
   display: grid;
+  width: 20px;
   place-items: center;
   color: var(--blue);
   font-size: 17px;
@@ -1000,17 +1001,26 @@ input[type="checkbox"] {
 
 .chain-hop label {
   display: grid;
-  grid-template-columns: minmax(90px, 0.7fr) minmax(180px, 1.3fr);
+  min-width: 0;
+  grid-template-columns: minmax(72px, 0.7fr) minmax(0, 1.3fr);
   align-items: center;
   gap: 9px;
   font-size: 10px;
 }
 
+.chain-hop label > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .chain-hop select {
+  min-width: 0;
   min-height: 36px;
   border-color: rgba(0, 122, 255, 0.15);
   border-radius: 11px;
-  padding: 7px 9px;
+  padding: 7px 32px 7px 9px;
   font-size: 11px;
 }
 
@@ -1518,6 +1528,15 @@ input[type="checkbox"] {
 
   .item-actions button {
     width: 100%;
+  }
+
+  .chain-hop {
+    align-items: start;
+  }
+
+  .chain-hop label {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 5px;
   }
 
   .dialog-actions {

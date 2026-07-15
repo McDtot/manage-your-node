@@ -483,7 +483,6 @@ function chainDropIndex(target) {
 }
 
 function deploymentItem(deployment, options = {}) {
-  const subscriptionUrl = absoluteUrl(deployment.subscription_url);
   return `
     <article class="item">
       <div class="item-head">
@@ -498,7 +497,6 @@ function deploymentItem(deployment, options = {}) {
       <div class="meta">入站 ID：<span class="mono">${escapeHtml(deployment.xui_inbound_id || "未同步")}</span></div>
       <div class="meta">用户：${Number(deployment.client_count || 0)} 名（每名用户使用独立 UUID）</div>
       <div class="meta">伪装目标：<span class="mono">${escapeHtml(deployment.reality_dest || (deployment.reality_mode === "auto" ? "自动检测中" : "-"))}</span> · ${deployment.reality_mode === "auto" ? "自动选择" : "手动指定"}</div>
-      <div class="meta">默认订阅：<span class="mono">${escapeHtml(subscriptionUrl)}</span></div>
       <div class="item-actions">
         ${deployment.status === "ready" && deployment.install_method === "native" ? `<button class="primary" data-add-user="${deployment.id}">添加用户</button>` : ""}
         <button class="ghost" data-section-jump="subscriptions">管理订阅</button>
