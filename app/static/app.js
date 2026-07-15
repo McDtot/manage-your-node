@@ -329,7 +329,9 @@ function chainItem(chain) {
 }
 
 function readyDeployments() {
-  return state.deployments.filter((deployment) => deployment.status === "ready");
+  return state.deployments.filter(
+    (deployment) => deployment.status === "ready" && deployment.install_method === "native",
+  );
 }
 
 function chainProtocolLabel(protocol) {
@@ -479,7 +481,7 @@ function deploymentItem(deployment, options = {}) {
       <div class="meta">伪装目标：<span class="mono">${escapeHtml(deployment.reality_dest || (deployment.reality_mode === "auto" ? "自动检测中" : "-"))}</span> · ${deployment.reality_mode === "auto" ? "自动选择" : "手动指定"}</div>
       <div class="meta">默认订阅：<span class="mono">${escapeHtml(subscriptionUrl)}</span></div>
       <div class="item-actions">
-        ${deployment.status === "ready" ? `<button class="primary" data-add-user="${deployment.id}">添加用户</button>` : ""}
+        ${deployment.status === "ready" && deployment.install_method === "native" ? `<button class="primary" data-add-user="${deployment.id}">添加用户</button>` : ""}
         <button class="ghost" data-section-jump="subscriptions">管理订阅</button>
         ${options.allowDelete ? `<button class="danger" data-delete-deployment="${deployment.id}">删除</button>` : ""}
       </div>
@@ -623,21 +625,38 @@ async function openSubscriptionEdit(subscriptionId) {
   $("#subscriptionDialog").showModal();
 }
 
+function shareLinkDisplayName(value) {
+  try {
+    const fragment = new URL(String(value || "")).hash.slice(1);
+    return fragment ? decodeURIComponent(fragment) : "";
+  } catch (_error) {
+    return "";
+  }
+}
+
 function subscriptionNodeItem(node, selected) {
   const selectedQuota = selected?.quotaBytes ?? node.quota_bytes;
+  const displayName = selected?.displayName || "";
+  const currentName = shareLinkDisplayName(node.share_link) || node.server_name;
   return `
-    <label class="node-option">
+    <article class="node-option">
       <input type="checkbox" name="nodeIds" value="${escapeHtml(node.id)}" ${selected ? "checked" : ""} />
-      <span>
+      <div>
         <strong>${escapeHtml(node.name)}</strong>
         <small>${escapeHtml(node.server_name)} · ${bytes(node.quota_bytes)} · ${node.enabled ? "启用" : "禁用"}</small>
         <span class="mono">${escapeHtml(node.share_link)}</span>
-        <span class="quota-line">
-          流量 GB
-          <input name="quotaGb:${escapeHtml(node.id)}" type="number" min="0" step="1" value="${escapeHtml(gb(selectedQuota))}" />
-        </span>
-      </span>
-    </label>
+        <div class="node-option-fields">
+          <label>
+            节点显示名称
+            <input name="displayName:${escapeHtml(node.id)}" type="text" maxlength="128" value="${escapeHtml(displayName)}" placeholder="当前：${escapeHtml(currentName)}" />
+          </label>
+          <label>
+            流量 GB
+            <input name="quotaGb:${escapeHtml(node.id)}" type="number" min="0" step="1" value="${escapeHtml(gb(selectedQuota))}" />
+          </label>
+        </div>
+      </div>
+    </article>
   `;
 }
 
@@ -743,7 +762,6 @@ function bindEvents() {
     button.disabled = true;
     button.textContent = "正在创建部署…";
     try {
-      data.installMethod = "native";
       const result = await api(`/api/servers/${data.serverId}/deploy`, {
         method: "POST",
         body: JSON.stringify(data),
@@ -838,6 +856,7 @@ function bindEvents() {
       .map((input) => ({
         nodeId: input.value,
         quotaGb: form.elements[`quotaGb:${input.value}`]?.value || 0,
+        displayName: form.elements[`displayName:${input.value}`]?.value || "",
       }));
     const chainIds = Array.from(form.querySelectorAll('input[name="chainIds"]:checked'))
       .map((input) => input.value);

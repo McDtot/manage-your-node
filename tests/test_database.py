@@ -30,6 +30,43 @@ def test_online_backup(tmp_path):
     assert backup.query_one("SELECT name FROM subscriptions WHERE id = 'sub'")["name"] == "name"
 
 
+def test_deployments_default_to_native_and_retire_legacy_simulations(tmp_path):
+    path = tmp_path / "deployment-migration.sqlite"
+    db = Database(path)
+    db.execute(
+        """
+        INSERT INTO servers (
+            id, name, host, ssh_port, ssh_user, auth_type, secret_label,
+            status, created_at, updated_at
+        ) VALUES ('server', 'edge', '203.0.113.10', 22, 'root', 'agent',
+                  'not_saved', 'reachable', 'now', 'now')
+        """
+    )
+    db.execute(
+        """
+        INSERT INTO deployments (
+            id, server_id, engine, protocol, install_method, panel_port,
+            panel_path, panel_username, encrypted_panel_password,
+            encrypted_api_token, proxy_port, status, subscription_url,
+            created_at, updated_at
+        ) VALUES ('deployment', 'server', '3x-ui', 'VLESS + REALITY',
+                  'simulated', 32000, '/panel', 'admin', '', '', 443,
+                  'ready', '/sub/deployments/deployment', 'now', 'now')
+        """
+    )
+
+    upgraded = Database(path)
+    row = upgraded.query_one(
+        "SELECT install_method, status, last_error FROM deployments WHERE id = 'deployment'"
+    )
+    columns = {row["name"]: row for row in upgraded.query_all("PRAGMA table_info(deployments)")}
+
+    assert columns["install_method"]["dflt_value"] == "'native'"
+    assert row["install_method"] == "legacy"
+    assert row["status"] == "failed"
+    assert "no longer supported" in row["last_error"]
+
+
 def test_proxy_chain_protocol_columns_migrate_existing_rows(tmp_path):
     path = tmp_path / "legacy.sqlite"
     connection = sqlite3.connect(path)
@@ -103,3 +140,39 @@ def test_client_traffic_reset_period_migrates_existing_table(tmp_path):
 
     assert columns["traffic_reset_days"]["notnull"] == 1
     assert columns["traffic_reset_days"]["dflt_value"] == "0"
+
+
+def test_subscription_display_names_migrate_existing_tables(tmp_path):
+    path = tmp_path / "legacy-subscription-names.sqlite"
+    connection = sqlite3.connect(path)
+    connection.executescript(
+        """
+        CREATE TABLE subscription_nodes (
+            subscription_id TEXT NOT NULL,
+            node_client_id TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            PRIMARY KEY(subscription_id, node_client_id)
+        );
+        CREATE TABLE subscription_entries (
+            subscription_id TEXT NOT NULL,
+            node_client_id TEXT NOT NULL,
+            quota_bytes INTEGER NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY(subscription_id, node_client_id)
+        );
+        """
+    )
+    connection.commit()
+    connection.close()
+
+    db = Database(path)
+    node_columns = {
+        row["name"]: row for row in db.query_all("PRAGMA table_info(subscription_nodes)")
+    }
+    entry_columns = {
+        row["name"]: row for row in db.query_all("PRAGMA table_info(subscription_entries)")
+    }
+
+    assert node_columns["display_name"]["dflt_value"] == "''"
+    assert entry_columns["display_name"]["dflt_value"] == "''"

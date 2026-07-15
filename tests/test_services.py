@@ -1,5 +1,6 @@
 import base64
 from contextlib import nullcontext
+from urllib.parse import unquote, urlparse
 
 import pytest
 import yaml
@@ -45,7 +46,7 @@ def _create_ready_deployment(services, suffix: str, host: str) -> str:
             panel_path, panel_username, encrypted_panel_password,
             encrypted_api_token, proxy_port, status, subscription_url,
             created_at, updated_at
-        ) VALUES (?, ?, '3x-ui', 'VLESS + REALITY', 'dry-run', 32000,
+        ) VALUES (?, ?, '3x-ui', 'VLESS + REALITY', 'native', 32000,
                   '/panel', 'admin', ?, ?, 443, 'ready', ?, 'now', 'now')
         """,
         (
@@ -57,6 +58,21 @@ def _create_ready_deployment(services, suffix: str, host: str) -> str:
         ),
     )
     return deployment_id
+
+
+def _trust_server_for_native_deployment(services, server_id: str) -> None:
+    services.db.execute(
+        "UPDATE servers SET status = 'reachable' WHERE id = ?",
+        (server_id,),
+    )
+    services.db.execute(
+        """
+        INSERT INTO ssh_host_keys (
+            server_id, key_type, key_base64, fingerprint, trusted, created_at
+        ) VALUES (?, 'ssh-ed25519', 'test-key', 'SHA256:test', 1, 'now')
+        """,
+        (server_id,),
+    )
 
 
 def test_summary_empty(services):
@@ -343,6 +359,119 @@ def test_subscription_token_rotation_invalidates_old_url(services):
         services.render_managed_subscription(old_token)
 
 
+def test_subscription_node_display_name_is_scoped_and_used_by_all_formats(services):
+    deployment_id = _create_ready_deployment(
+        services,
+        "custom-node-name",
+        "203.0.113.65",
+    )
+    services._ensure_deployment_subscription(deployment_id, "edge-custom-node-name")
+    client = services.create_client(deployment_id, {"name": "subscriber", "quotaGb": 20})
+    original_link = (
+        f"vless://{client['uuid']}@203.0.113.65:443"
+        "?security=reality&type=tcp&flow=xtls-rprx-vision"
+        "&pbk=dE8nfT3BBGpvTndPFXrdC3bSRHHQf5veZBKF31ZbWeo"
+        "&fp=chrome&sni=cover.example&sid=a1b2c3d4#原始节点"
+    )
+    services.db.execute(
+        "UPDATE clients SET share_link = ? WHERE id = ?",
+        (original_link, client["id"]),
+    )
+    subscription = services.create_subscription({"name": "renamed"})
+    display_name = "香港｜专线 01"
+
+    config = services.update_managed_subscription(
+        subscription["id"],
+        {
+            "nodes": [
+                {
+                    "nodeId": client["id"],
+                    "quotaGb": 20,
+                    "displayName": display_name,
+                }
+            ]
+        },
+    )
+
+    assert config["selectedNodes"][0]["displayName"] == display_name
+    rendered_link = base64.b64decode(
+        services.render_managed_subscription(subscription["token"])
+    ).decode("utf-8")
+    assert unquote(urlparse(rendered_link).fragment) == display_name
+    mihomo = yaml.safe_load(
+        services.render_managed_subscription(subscription["token"], "mihomo")
+    )
+    assert mihomo["proxies"][0]["name"] == display_name
+    assert services.get_client(client["id"])["share_link"] == original_link
+
+    unchanged = services.create_subscription({"name": "unchanged"})
+    services.update_managed_subscription(
+        unchanged["id"],
+        {"nodes": [{"nodeId": client["id"], "quotaGb": 20}]},
+    )
+    unchanged_link = base64.b64decode(
+        services.render_managed_subscription(unchanged["token"])
+    ).decode("utf-8")
+    assert unquote(urlparse(unchanged_link).fragment) == "原始节点"
+
+
+def test_default_subscription_display_name_is_shared_with_deployment_link(services):
+    deployment_id = _create_ready_deployment(
+        services,
+        "default-node-name",
+        "203.0.113.66",
+    )
+    services._ensure_deployment_subscription(deployment_id, "edge-default-node-name")
+    client = services.create_client(deployment_id, {"name": "default-subscriber"})
+    subscription_id = f"sub_{deployment_id}"
+    rotated = services.rotate_subscription_token(subscription_id)
+
+    services.update_managed_subscription(
+        subscription_id,
+        {
+            "nodes": [
+                {
+                    "nodeId": client["id"],
+                    "displayName": "默认订阅节点",
+                }
+            ]
+        },
+    )
+
+    managed_link = base64.b64decode(
+        services.render_managed_subscription(rotated["token"])
+    ).decode("utf-8")
+    deployment_link = base64.b64decode(
+        services.render_deployment_subscription(deployment_id)
+    ).decode("utf-8")
+    assert unquote(urlparse(managed_link).fragment) == "默认订阅节点"
+    assert deployment_link == managed_link
+
+
+def test_subscription_node_display_name_has_a_length_limit(services):
+    deployment_id = _create_ready_deployment(
+        services,
+        "long-node-name",
+        "203.0.113.67",
+    )
+    services._ensure_deployment_subscription(deployment_id, "edge-long-node-name")
+    client = services.create_client(deployment_id, {"name": "subscriber"})
+    subscription = services.create_subscription({"name": "limited"})
+
+    with pytest.raises(ValueError, match="128 characters"):
+        services.update_managed_subscription(
+            subscription["id"],
+            {
+                "nodes": [
+                    {
+                        "nodeId": client["id"],
+                        "displayName": "名" * 129,
+                    }
+                ]
+            },
+        )
+
+
 def test_managed_subscription_can_include_proxy_chains(services):
     entry_id = _create_ready_deployment(
         services,
@@ -488,17 +617,28 @@ def test_reality_auto_candidates_and_validation(monkeypatch):
 
 
 def test_deployment_persists_auto_and_manual_reality_settings(services, monkeypatch):
-    server = services.create_server(
+    automatic_server = services.create_server(
         {
-            "name": "edge",
+            "name": "edge-auto",
             "host": "203.0.113.50",
             "sshPort": 22,
             "sshUser": "deploy",
             "authType": "agent",
         }
     )
+    manual_server = services.create_server(
+        {
+            "name": "edge-manual",
+            "host": "203.0.113.51",
+            "sshPort": 22,
+            "sshUser": "deploy",
+            "authType": "agent",
+        }
+    )
+    _trust_server_for_native_deployment(services, automatic_server["id"])
+    _trust_server_for_native_deployment(services, manual_server["id"])
 
-    def finish_without_worker(job_id, deployment_id, _server, _payload):
+    def finish_without_worker(job_id, deployment_id, _server):
         services.db.execute(
             "UPDATE deployments SET status = 'ready' WHERE id = ?",
             (deployment_id,),
@@ -507,25 +647,22 @@ def test_deployment_persists_auto_and_manual_reality_settings(services, monkeypa
         services._release_operation_locks(job_id)
 
     monkeypatch.setattr(services, "_run_deployment", finish_without_worker)
-    monkeypatch.setenv("REALITY_CANDIDATES", "auto.example:443,backup.example:443")
 
     automatic = services.start_deployment(
-        server["id"],
+        automatic_server["id"],
         {
-            "installMethod": "dry-run",
             "panelPort": "",
             "realityMode": "auto",
         },
     )["deployment"]
     assert automatic["reality_mode"] == "auto"
-    assert automatic["reality_dest"] == "auto.example:443"
-    assert automatic["reality_sni"] == "auto.example"
+    assert automatic["reality_dest"] == ""
+    assert automatic["reality_sni"] == ""
     assert services.wait_for_workers()
 
     manual = services.start_deployment(
-        server["id"],
+        manual_server["id"],
         {
-            "installMethod": "dry-run",
             "realityMode": "manual",
             "realityDest": "Manual.Example:8443",
             "realitySni": "Cover.Example",
@@ -547,12 +684,21 @@ def test_deployment_does_not_create_an_initial_user(services, monkeypatch):
             "authType": "agent",
         }
     )
-    monkeypatch.setattr("app.services.time.sleep", lambda _seconds: None)
+    _trust_server_for_native_deployment(services, server["id"])
+
+    def finish_without_worker(job_id, deployment_id, _server):
+        services.db.execute(
+            "UPDATE deployments SET status = 'ready' WHERE id = ?",
+            (deployment_id,),
+        )
+        services._finish_job(job_id, "success", None)
+        services._release_operation_locks(job_id)
+
+    monkeypatch.setattr(services, "_run_deployment", finish_without_worker)
 
     result = services.start_deployment(
         server["id"],
         {
-            "installMethod": "dry-run",
             "realityMode": "auto",
             # Legacy deployment payloads must not bypass the user page.
             "createInitialClient": True,
@@ -691,7 +837,7 @@ def test_proxy_chain_failure_triggers_cleanup(services, monkeypatch):
     assert "Rolling back" in job["logs"]
 
 
-def test_mixed_proxy_chain_uses_ss2022_between_overseas_nodes(services):
+def test_mixed_proxy_chain_uses_ss2022_between_overseas_nodes(services, monkeypatch):
     deployment_ids = [
         _create_ready_deployment(services, "hk", "198.51.100.10"),
         _create_ready_deployment(services, "jp", "198.51.100.20"),
@@ -729,9 +875,22 @@ def test_mixed_proxy_chain_uses_ss2022_between_overseas_nodes(services):
     ]
     assert all("encrypted_ss_password" not in node for node in chain["nodes"])
 
+    monkeypatch.setattr(
+        services,
+        "_remote_x25519_keypair",
+        lambda node: (f"private-{node['position']}", f"public-{node['position']}"),
+    )
+    installed = []
+    monkeypatch.setattr(
+        services,
+        "_install_proxy_chain_service",
+        lambda job_id, chain_id, node, config: installed.append(node["position"]),
+    )
+
     started = services.start_proxy_chain_deployment(chain["id"])
     assert services.wait_for_workers()
     assert services.get_job(started["job"]["id"])["status"] == "success"
+    assert installed == [2, 1, 0]
 
     nodes = services._proxy_chain_full_nodes(chain["id"])
     assert nodes[0]["encrypted_private_key"]

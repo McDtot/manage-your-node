@@ -153,6 +153,16 @@ def _render_subscription_links(share_links: list[str], output_format: str = "bas
     return yaml.safe_dump(config, allow_unicode=True, sort_keys=False)
 
 
+def _share_link_with_display_name(share_link: str, display_name: str) -> str:
+    """Return a share link with a subscription-specific fragment/remark."""
+    link = str(share_link).strip()
+    name = str(display_name).strip()
+    if not link or not name:
+        return link
+    parsed = urlparse(link)
+    return parsed._replace(fragment=quote(name, safe="")).geturl()
+
+
 def _redact_native_install_log(line: str, panel_password: str) -> str:
     """Remove credentials emitted by both plain and colorized 3x-ui output."""
     clean = str(line)
@@ -691,9 +701,9 @@ class AppServices:
         protocol = str(payload.get("protocol", "VLESS + REALITY")).strip()
         if protocol != "VLESS + REALITY":
             raise ValueError("only VLESS + REALITY is currently supported")
-        install_method = str(payload.get("installMethod", "dry-run")).strip()
-        if install_method not in {"dry-run", "native"}:
-            raise ValueError("installMethod must be dry-run or native")
+        install_method = str(payload.get("installMethod", "native")).strip() or "native"
+        if install_method != "native":
+            raise ValueError("only native deployments are supported")
         reality_mode = str(payload.get("realityMode", "auto")).strip().lower()
         if reality_mode not in {"auto", "manual"}:
             raise ValueError("realityMode must be auto or manual")
@@ -707,30 +717,25 @@ class AppServices:
                 "realitySni",
             )
         else:
-            candidates = reality_candidates()
-            if install_method == "dry-run":
-                selected_reality_dest, selected_reality_sni = candidates[0]
-            else:
-                selected_reality_dest, selected_reality_sni = "", ""
-        if install_method == "native" and server["status"] != "reachable":
+            selected_reality_dest, selected_reality_sni = "", ""
+        if server["status"] != "reachable":
             raise ValueError("test SSH successfully before starting a native deployment")
-        if install_method == "native":
-            host_key = self.db.query_one(
-                "SELECT trusted FROM ssh_host_keys WHERE server_id = ?",
-                (server_id,),
-            )
-            if not host_key or not bool(host_key["trusted"]):
-                raise ValueError("verify and approve the SSH host key before native deployment")
-            existing = self.db.query_one(
-                "SELECT id FROM deployments WHERE server_id = ? AND install_method = 'native'",
-                (server_id,),
-            )
-            if existing:
-                raise ValueError("this server already has a native 3x-ui deployment")
+        host_key = self.db.query_one(
+            "SELECT trusted FROM ssh_host_keys WHERE server_id = ?",
+            (server_id,),
+        )
+        if not host_key or not bool(host_key["trusted"]):
+            raise ValueError("verify and approve the SSH host key before native deployment")
+        existing = self.db.query_one(
+            "SELECT id FROM deployments WHERE server_id = ? AND install_method = 'native'",
+            (server_id,),
+        )
+        if existing:
+            raise ValueError("this server already has a native 3x-ui deployment")
         panel_path = "/" + secrets.token_urlsafe(8)
         panel_username = "myn_" + secrets.token_urlsafe(5).replace("-", "A").replace("_", "B")
         panel_password = secrets.token_urlsafe(18).replace("-", "A").replace("_", "B")
-        api_token = secrets.token_urlsafe(28) if install_method == "dry-run" else ""
+        api_token = ""
         subscription_url = self._deployment_subscription_url(deployment_id)
 
         with self.db.transaction():
@@ -789,7 +794,7 @@ class AppServices:
 
         thread = threading.Thread(
             target=self._run_deployment,
-            args=(job_id, deployment_id, server, payload),
+            args=(job_id, deployment_id, server),
             daemon=True,
         )
         self._track_worker(thread)
@@ -817,63 +822,18 @@ class AppServices:
         job_id: str,
         deployment_id: str,
         server: dict[str, Any],
-        payload: dict[str, Any],
     ) -> None:
         try:
-            if str(payload.get("installMethod", "dry-run")) == "native":
-                self._run_native_deployment(job_id, deployment_id, server, payload)
-                return
-            self._run_dry_deployment(job_id, deployment_id, server, payload)
+            self._run_native_deployment(job_id, deployment_id, server)
         finally:
             self._release_operation_locks(job_id)
             self._forget_current_worker()
-
-    def _run_dry_deployment(
-        self,
-        job_id: str,
-        deployment_id: str,
-        server: dict[str, Any],
-        payload: dict[str, Any],
-    ) -> None:
-        stages = [
-            "Dry-run: check SSH host identity",
-            "Dry-run: check OS, CPU architecture, and sudo access",
-            "Dry-run: check Docker and Compose plugin",
-            "Dry-run: prepare /opt/manage-node/3x-ui",
-            "Dry-run: generate 3x-ui configuration",
-            "Dry-run: wait for panel health check",
-            "Dry-run: initialize panel credentials and API token",
-            "Dry-run: create default VLESS + REALITY inbound",
-        ]
-        try:
-            for stage in stages:
-                self._append_job_log(job_id, stage)
-                time.sleep(0.35)
-
-            self.db.execute(
-                "UPDATE deployments SET status = ?, updated_at = ? WHERE id = ?",
-                ("ready", now_iso(), deployment_id),
-            )
-            self._append_job_log(
-                job_id,
-                f"Dry-run finished: generated 3x-ui deployment data for {server['host']}",
-            )
-
-            self._finish_job(job_id, "success", None)
-        except Exception as exc:  # noqa: BLE001
-            self.db.execute(
-                "UPDATE deployments SET status = ?, last_error = ?, updated_at = ? "
-                "WHERE id = ?",
-                ("failed", str(exc), now_iso(), deployment_id),
-            )
-            self._finish_job(job_id, "failed", str(exc))
 
     def _run_native_deployment(
         self,
         job_id: str,
         deployment_id: str,
         server: dict[str, Any],
-        payload: dict[str, Any],
     ) -> None:
         install_applied = False
         try:
@@ -1336,9 +1296,16 @@ exit 43
         missing = [deployment_id for deployment_id in ordered_ids if deployment_id not in deployments]
         if missing:
             raise ValueError("selected deployment not found")
-        not_ready = [deployments[deployment_id]["server_name"] for deployment_id in ordered_ids if deployments[deployment_id]["status"] != "ready"]
-        if not_ready:
-            raise ValueError(f"deployment is not ready: {', '.join(not_ready)}")
+        unavailable = [
+            deployments[deployment_id]["server_name"]
+            for deployment_id in ordered_ids
+            if deployments[deployment_id]["install_method"] != "native"
+            or deployments[deployment_id]["status"] != "ready"
+        ]
+        if unavailable:
+            raise ValueError(
+                f"deployment is not a ready native deployment: {', '.join(unavailable)}"
+            )
 
         name = str(payload.get("name", "")).strip()
         if not name:
@@ -1471,10 +1438,6 @@ exit 43
             nodes = self._proxy_chain_full_nodes(chain_id)
             if len(nodes) < 2:
                 raise ValueError("proxy chain requires at least two deployments")
-            if all(node["install_method"] == "dry-run" for node in nodes):
-                self._run_dry_proxy_chain_deployment(job_id, chain_id, chain, nodes)
-                return
-
             invalid = [
                 node["server_name"]
                 for node in nodes
@@ -1487,7 +1450,7 @@ exit 43
                 )
 
             self._append_job_log(job_id, f"Preparing proxy chain: {chain['path']}")
-            nodes = self._prepare_proxy_chain_nodes(job_id, chain_id, nodes, dry_run=False)
+            nodes = self._prepare_proxy_chain_nodes(job_id, chain_id, nodes)
             self._append_job_log(job_id, "Installing chain services from exit to entry")
             for index in range(len(nodes) - 1, -1, -1):
                 node = nodes[index]
@@ -1519,38 +1482,6 @@ exit 43
                 self._append_job_log(job_id, line)
             self._finish_job(job_id, "failed", str(exc))
 
-    def _run_dry_proxy_chain_deployment(
-        self,
-        job_id: str,
-        chain_id: str,
-        chain: dict[str, Any],
-        nodes: list[dict[str, Any]],
-    ) -> None:
-        self._append_job_log(job_id, f"Dry-run: preparing proxy chain {chain['path']}")
-        nodes = self._prepare_proxy_chain_nodes(job_id, chain_id, nodes, dry_run=True)
-        for index, node in enumerate(nodes):
-            role = "exit" if index == len(nodes) - 1 else "relay"
-            protocol = (
-                "VLESS + REALITY"
-                if node["inbound_protocol"] == CHAIN_PROTOCOL_VLESS_REALITY
-                else "Shadowsocks 2022"
-            )
-            self._append_job_log(
-                job_id,
-                f"Dry-run: {node['server_name']} prepared as {role} with {protocol} "
-                f"on port {node['inbound_port']}",
-            )
-            time.sleep(0.15)
-            self.db.execute(
-                """
-                UPDATE proxy_chain_nodes
-                SET status = ?, updated_at = ?
-                WHERE chain_id = ? AND position = ?
-                """,
-                ("ready", now_iso(), chain_id, node["position"]),
-            )
-        self._finish_proxy_chain_deployment(job_id, chain_id, chain["name"])
-
     def _finish_proxy_chain_deployment(self, job_id: str, chain_id: str, name: str) -> None:
         nodes = self._proxy_chain_full_nodes(chain_id)
         if not nodes:
@@ -1574,7 +1505,6 @@ exit 43
         job_id: str,
         chain_id: str,
         nodes: list[dict[str, Any]],
-        dry_run: bool,
     ) -> list[dict[str, Any]]:
         used_ports = {
             int(row["inbound_port"])
@@ -1601,14 +1531,11 @@ exit 43
                 if not node.get("short_id"):
                     update["short_id"] = secrets.token_hex(4)
                 if not node.get("public_key") or not node.get("encrypted_private_key"):
-                    if dry_run:
-                        private_key, public_key = self._dry_reality_keypair()
-                    else:
-                        self._append_job_log(
-                            job_id,
-                            f"Generating REALITY keypair on {node['server_name']}",
-                        )
-                        private_key, public_key = self._remote_x25519_keypair(node)
+                    self._append_job_log(
+                        job_id,
+                        f"Generating REALITY keypair on {node['server_name']}",
+                    )
+                    private_key, public_key = self._remote_x25519_keypair(node)
                     update["encrypted_private_key"] = self.secret_box.seal(private_key)
                     update["public_key"] = public_key
             elif not node.get("encrypted_ss_password"):
@@ -1639,9 +1566,6 @@ exit 43
             if port not in used_ports:
                 return port
         raise ValueError("could not allocate a chain port")
-
-    def _dry_reality_keypair(self) -> tuple[str, str]:
-        return secrets.token_urlsafe(32)[:43], secrets.token_urlsafe(32)[:43]
 
     def _new_ss2022_password(self) -> str:
         return base64.b64encode(secrets.token_bytes(32)).decode("ascii")
@@ -2130,6 +2054,8 @@ echo "Removed $SERVICE_NAME"
 
     def create_client(self, deployment_id: str, payload: dict[str, Any]) -> dict[str, Any]:
         deployment = self.get_deployment(deployment_id)
+        if deployment.get("install_method") != "native":
+            raise ValueError("legacy simulated deployments are no longer supported")
         client_id = new_id("cli")
         client_uuid = str(uuid.uuid4())
         try:
@@ -2247,6 +2173,8 @@ echo "Removed $SERVICE_NAME"
     def update_client(self, client_id: str, payload: dict[str, Any]) -> dict[str, Any]:
         client = self.get_client(client_id)
         deployment = self.get_deployment(client["deployment_id"])
+        if deployment.get("install_method") != "native":
+            raise ValueError("legacy simulated deployments are no longer supported")
         name = str(payload.get("name", client["name"])).strip()
         if not name:
             raise ValueError("name is required")
@@ -2344,6 +2272,8 @@ echo "Removed $SERVICE_NAME"
     def reset_client(self, client_id: str) -> dict[str, Any]:
         client = self.get_client(client_id)
         deployment = self.get_deployment(client["deployment_id"])
+        if deployment.get("install_method") != "native":
+            raise ValueError("legacy simulated deployments are no longer supported")
         if (
             deployment.get("install_method") == "native"
             and deployment.get("status") == "ready"
@@ -2588,7 +2518,7 @@ echo "3x-ui cleanup completed"
         subscription = self.get_subscription(subscription_id)
         selected = self.db.query_all(
             """
-            SELECT node_client_id, quota_bytes
+            SELECT node_client_id, quota_bytes, display_name
             FROM subscription_entries
             WHERE subscription_id = ?
             ORDER BY created_at ASC
@@ -2622,6 +2552,7 @@ echo "3x-ui cleanup completed"
                 {
                     "nodeClientId": row["node_client_id"],
                     "quotaBytes": row["quota_bytes"],
+                    "displayName": row["display_name"],
                 }
                 for row in selected
             ],
@@ -2646,7 +2577,18 @@ echo "3x-ui cleanup completed"
             raise ValueError("chainIds must be a list")
 
         clients = {client["id"]: client for client in self.list_clients()}
-        selected: list[tuple[str, int]] = []
+        existing_display_names = {
+            row["node_client_id"]: row["display_name"]
+            for row in self.db.query_all(
+                """
+                SELECT node_client_id, display_name
+                FROM subscription_entries
+                WHERE subscription_id = ?
+                """,
+                (subscription_id,),
+            )
+        }
+        selected: list[tuple[str, int, str]] = []
         seen = set()
         for item in nodes:
             if not isinstance(item, dict):
@@ -2664,7 +2606,13 @@ echo "3x-ui cleanup completed"
                 raise ValueError("quotaGb must be a number") from exc
             if quota_bytes < 0:
                 raise ValueError("quotaGb must be zero or greater")
-            selected.append((node_id, quota_bytes))
+            if "displayName" in item:
+                display_name = str(item.get("displayName", "")).strip()
+            else:
+                display_name = existing_display_names.get(node_id, "")
+            if len(display_name) > 128:
+                raise ValueError("displayName must be 128 characters or fewer")
+            selected.append((node_id, quota_bytes, display_name))
             seen.add(node_id)
 
         if chain_ids_supplied:
@@ -2696,7 +2644,7 @@ echo "3x-ui cleanup completed"
                 )
             ]
 
-        for node_id, quota_bytes in selected:
+        for node_id, quota_bytes, _display_name in selected:
             client = clients[node_id]
             if int(client["quota_bytes"]) == quota_bytes:
                 continue
@@ -2729,14 +2677,36 @@ echo "3x-ui cleanup completed"
             self.db.executemany(
                 """
                 INSERT INTO subscription_entries (
-                    subscription_id, node_client_id, quota_bytes, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?)
+                    subscription_id, node_client_id, quota_bytes, display_name,
+                    created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?)
                 """,
                 [
-                    (subscription_id, node_id, quota_bytes, stamp, stamp)
-                    for node_id, quota_bytes in selected
+                    (subscription_id, node_id, quota_bytes, display_name, stamp, stamp)
+                    for node_id, quota_bytes, display_name in selected
                 ],
             )
+            default_deployment = self.db.query_one(
+                "SELECT id FROM deployments WHERE ? = 'sub_' || id",
+                (subscription_id,),
+            )
+            if default_deployment:
+                default_deployment_id = default_deployment["id"]
+                self.db.execute(
+                    "DELETE FROM subscription_nodes WHERE subscription_id = ?",
+                    (default_deployment_id,),
+                )
+                self.db.executemany(
+                    """
+                    INSERT INTO subscription_nodes (
+                        subscription_id, node_client_id, display_name, created_at
+                    ) VALUES (?, ?, ?, ?)
+                    """,
+                    [
+                        (default_deployment_id, node_id, display_name, stamp)
+                        for node_id, _quota_bytes, display_name in selected
+                    ],
+                )
             self.db.execute(
                 "DELETE FROM subscription_chain_entries WHERE subscription_id = ?",
                 (subscription_id,),
@@ -2776,7 +2746,7 @@ echo "3x-ui cleanup completed"
             raise ValueError("subscription not found")
         rows = self.db.query_all(
             """
-            SELECT c.share_link
+            SELECT c.share_link, se.display_name
             FROM subscription_entries se
             JOIN clients c ON c.id = se.node_client_id
             WHERE se.subscription_id = ? AND c.enabled = 1
@@ -2795,10 +2765,15 @@ echo "3x-ui cleanup completed"
             (subscription["id"],),
         )
         links = [
-            row["share_link"]
-            for row in [*rows, *chain_rows]
+            _share_link_with_display_name(row["share_link"], row.get("display_name", ""))
+            for row in rows
             if row.get("share_link")
         ]
+        links.extend(
+            row["share_link"]
+            for row in chain_rows
+            if row.get("share_link")
+        )
         return _render_subscription_links(links, output_format)
 
     def get_subscription_config(self, deployment_id: str) -> dict[str, Any]:
@@ -2878,7 +2853,7 @@ echo "3x-ui cleanup completed"
         self.get_deployment(deployment_id)
         rows = self.db.query_all(
             """
-            SELECT c.share_link
+            SELECT c.share_link, sn.display_name
             FROM subscription_nodes sn
             JOIN clients c ON c.id = sn.node_client_id
             WHERE sn.subscription_id = ? AND c.enabled = 1
@@ -2886,7 +2861,11 @@ echo "3x-ui cleanup completed"
             """,
             (deployment_id,),
         )
-        links = [row["share_link"] for row in rows if row.get("share_link")]
+        links = [
+            _share_link_with_display_name(row["share_link"], row["display_name"])
+            for row in rows
+            if row.get("share_link")
+        ]
         return _render_subscription_links(links, output_format)
 
     def get_job(self, job_id: str) -> dict[str, Any]:

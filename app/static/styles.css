@@ -1155,6 +1155,10 @@ input[type="checkbox"] {
   min-width: 0;
 }
 
+.node-option > div {
+  min-width: 0;
+}
+
 .node-option strong,
 .node-option small {
   display: block;
@@ -1183,6 +1187,29 @@ input[type="checkbox"] {
 
 .quota-line input {
   min-height: 35px;
+  padding: 7px 9px;
+}
+
+.node-option-fields {
+  display: grid;
+  grid-template-columns: minmax(180px, 1fr) minmax(96px, 140px);
+  gap: 10px;
+  margin-top: 9px;
+}
+
+.node-option-fields label {
+  display: grid;
+  gap: 5px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 620;
+}
+
+.node-option .node-option-fields input {
+  width: 100%;
+  height: auto;
+  min-height: 35px;
+  margin: 0;
   padding: 7px 9px;
 }
 
@@ -1434,7 +1461,8 @@ input[type="checkbox"] {
 
   .row,
   .sub-link-row,
-  .quota-line {
+  .quota-line,
+  .node-option-fields {
     grid-template-columns: 1fr;
   }
 

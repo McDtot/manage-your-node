@@ -52,7 +52,7 @@ class Database:
                     server_id TEXT NOT NULL,
                     engine TEXT NOT NULL,
                     protocol TEXT NOT NULL,
-                    install_method TEXT NOT NULL DEFAULT 'dry-run',
+                    install_method TEXT NOT NULL DEFAULT 'native',
                     panel_scheme TEXT NOT NULL DEFAULT 'http',
                     panel_port INTEGER NOT NULL,
                     panel_path TEXT NOT NULL,
@@ -93,6 +93,7 @@ class Database:
                 CREATE TABLE IF NOT EXISTS subscription_nodes (
                     subscription_id TEXT NOT NULL,
                     node_client_id TEXT NOT NULL,
+                    display_name TEXT NOT NULL DEFAULT '',
                     created_at TEXT NOT NULL,
                     PRIMARY KEY(subscription_id, node_client_id),
                     FOREIGN KEY(subscription_id) REFERENCES deployments(id) ON DELETE CASCADE,
@@ -111,6 +112,7 @@ class Database:
                     subscription_id TEXT NOT NULL,
                     node_client_id TEXT NOT NULL,
                     quota_bytes INTEGER NOT NULL,
+                    display_name TEXT NOT NULL DEFAULT '',
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
                     PRIMARY KEY(subscription_id, node_client_id),
@@ -233,7 +235,7 @@ class Database:
                     ON operation_locks(job_id);
                 """
             )
-            self._ensure_column("deployments", "install_method", "TEXT NOT NULL DEFAULT 'dry-run'")
+            self._ensure_column("deployments", "install_method", "TEXT NOT NULL DEFAULT 'native'")
             self._ensure_column("ssh_host_keys", "trusted", "INTEGER NOT NULL DEFAULT 1")
             self._ensure_column("deployments", "panel_scheme", "TEXT NOT NULL DEFAULT 'http'")
             self._ensure_column("deployments", "xui_inbound_id", "INTEGER")
@@ -249,6 +251,16 @@ class Database:
                 "clients",
                 "traffic_reset_days",
                 "INTEGER NOT NULL DEFAULT 0",
+            )
+            self._ensure_column(
+                "subscription_nodes",
+                "display_name",
+                "TEXT NOT NULL DEFAULT ''",
+            )
+            self._ensure_column(
+                "subscription_entries",
+                "display_name",
+                "TEXT NOT NULL DEFAULT ''",
             )
             self._ensure_column("jobs", "chain_id", "TEXT")
             self._ensure_column("proxy_chains", "last_error", "TEXT")
@@ -271,6 +283,19 @@ class Database:
             self._ensure_column("proxy_chain_nodes", "remote_service_name", "TEXT")
             self._ensure_column("proxy_chain_nodes", "status", "TEXT NOT NULL DEFAULT 'planned'")
             self._ensure_column("proxy_chain_nodes", "updated_at", "TEXT")
+            self._conn.execute(
+                """
+                UPDATE deployments
+                SET install_method = 'legacy',
+                    status = 'failed',
+                    last_error = CASE
+                        WHEN last_error IS NULL OR last_error = ''
+                        THEN 'Legacy simulated deployments are no longer supported; delete and redeploy.'
+                        ELSE last_error
+                    END
+                WHERE install_method <> 'native'
+                """
+            )
             self._conn.execute(
                 """
                 INSERT OR IGNORE INTO subscription_nodes (
