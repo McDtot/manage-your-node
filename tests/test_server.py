@@ -140,6 +140,8 @@ def test_webui_can_persist_and_apply_public_origin(monkeypatch, tmp_path):
 
     initial = client.get("/api/settings").json()
     assert initial["source"] == "automatic"
+    assert initial["publicOrigin"] == "http://203.0.113.10:8787"
+    assert initial["configuredPublicOrigin"] == ""
     assert initial["publicAccessWarning"] is True
 
     headers = {
@@ -221,6 +223,7 @@ def test_webui_can_persist_and_apply_public_origin(monkeypatch, tmp_path):
     )
     assert restored.status_code == 200
     assert restored.json()["source"] == "automatic"
+    assert restored.json()["publicOrigin"] == "http://127.0.0.1:8787"
     assert db.query_one(
         "SELECT value FROM app_metadata WHERE key = 'public_origin'"
     ) is None

@@ -424,7 +424,7 @@ async def summary(request: Request) -> Response:
 
 
 async def get_web_settings(request: Request) -> Response:
-    return JSONResponse(request.app.state.web_config.as_dict())
+    return JSONResponse(request.app.state.web_config.as_dict(_request_origin(request)))
 
 
 async def update_web_settings(request: Request) -> Response:

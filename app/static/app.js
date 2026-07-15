@@ -205,10 +205,15 @@ async function copy(text) {
   }
 }
 
+function effectivePublicOrigin() {
+  if (state.webSettings?.source === "automatic") return window.location.origin;
+  return state.webSettings?.publicOrigin || window.location.origin;
+}
+
 function absoluteUrl(value) {
   const text = String(value || "");
   if (!text || /^https?:\/\//i.test(text)) return text;
-  const origin = state.webSettings?.publicOrigin || window.location.origin;
+  const origin = effectivePublicOrigin();
   return `${origin}${text.startsWith("/") ? "" : "/"}${text}`;
 }
 
@@ -653,8 +658,9 @@ function renderWebSettings() {
     automatic: "监听地址（自动）",
   };
   const form = $("#webSettingsForm");
-  form.elements.publicOrigin.value = state.webSettings.publicOrigin || "";
-  $("#effectivePublicOrigin").textContent = state.webSettings.publicOrigin || "—";
+  const publicOrigin = effectivePublicOrigin();
+  form.elements.publicOrigin.value = publicOrigin;
+  $("#effectivePublicOrigin").textContent = publicOrigin;
   $("#publicOriginSource").textContent = sourceLabels[state.webSettings.source] || "未知";
   $("#secureCookieStatus").textContent = state.webSettings.cookieSecure ? "已启用" : "未启用";
   $("#resetWebSettingsBtn").disabled = state.webSettings.source !== "webui";

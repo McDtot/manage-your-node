@@ -79,7 +79,7 @@ class WebConfig:
         with self._lock:
             return origin in {self.public_origin, *self._temporary_origins}
 
-    def as_dict(self) -> dict[str, object]:
+    def as_dict(self, request_origin: str = "") -> dict[str, object]:
         with self._lock:
             override = self._public_origin_override
         host = self.settings.host
@@ -88,8 +88,11 @@ class WebConfig:
         source = "webui" if override else (
             "automatic" if self.settings.public_origin == automatic else "environment"
         )
+        public_origin = self.public_origin
+        if source == "automatic" and request_origin:
+            public_origin = request_origin.rstrip("/")
         return {
-            "publicOrigin": self.public_origin,
+            "publicOrigin": public_origin,
             "configuredPublicOrigin": override,
             "source": source,
             "publicAccessWarning": self.public_access_warning,
@@ -134,4 +137,4 @@ class WebConfig:
             for fallback in (previous_origin, current_origin.rstrip("/")):
                 if fallback and fallback != self.public_origin:
                     self._temporary_origins.add(fallback)
-        return self.as_dict()
+        return self.as_dict(current_origin)
