@@ -213,6 +213,25 @@ def test_user_names_are_unique_within_a_node(services):
         services.update_client(second["id"], {"name": "ALICE"})
 
 
+def test_get_client_does_not_load_the_full_client_list(services, monkeypatch):
+    deployment_id = _create_ready_deployment(
+        services,
+        "direct-client",
+        "203.0.113.12",
+    )
+    client = services.create_client(
+        deployment_id,
+        {"name": "direct", "neverExpires": True},
+    )
+    monkeypatch.setattr(
+        services,
+        "list_clients",
+        lambda: pytest.fail("get_client should query by id"),
+    )
+
+    assert services.get_client(client["id"])["name"] == "direct"
+
+
 def test_user_can_be_created_without_expiration(services):
     deployment_id = _create_ready_deployment(
         services,
@@ -715,6 +734,25 @@ def test_recover_orphaned_jobs(services):
     assert db.query_one("SELECT job_id FROM operation_locks WHERE job_id='job1'") is None
 
 
+def test_job_logs_support_incremental_reads(services):
+    services.db.execute(
+        "INSERT INTO jobs (id,type,status,logs,created_at,updated_at)"
+        " VALUES ('job-logs','test','running','[]','t','t')"
+    )
+    services._append_job_log("job-logs", "first")
+    services._append_job_log("job-logs", "second")
+    services._append_job_log("job-logs", "third")
+
+    complete = services.get_job("job-logs")
+    incremental = services.get_job("job-logs", after_seq=1)
+
+    assert [entry["line"] for entry in complete["logs"]] == ["first", "second", "third"]
+    assert complete["last_log_seq"] == 3
+    assert [entry["line"] for entry in incremental["logs"]] == ["second", "third"]
+    assert incremental["last_log_seq"] == 3
+    assert services.db.query_one("SELECT logs FROM jobs WHERE id = 'job-logs'")["logs"] == "[]"
+
+
 def test_reality_defaults(monkeypatch):
     monkeypatch.delenv("REALITY_DEST", raising=False)
     monkeypatch.delenv("REALITY_SNI", raising=False)
@@ -978,9 +1016,9 @@ def test_proxy_chain_failure_triggers_cleanup(services, monkeypatch):
     chain = db.query_one("SELECT status, last_error FROM proxy_chains WHERE id='chain1'")
     assert chain["status"] == "failed"
     assert "at least two" in (chain["last_error"] or "")
-    job = db.query_one("SELECT status, logs FROM jobs WHERE id='job1'")
+    job = services.get_job("job1")
     assert job["status"] == "failed"
-    assert "Rolling back" in job["logs"]
+    assert any("Rolling back" in entry["line"] for entry in job["logs"])
 
 
 def test_mixed_proxy_chain_uses_ss2022_between_overseas_nodes(services, monkeypatch):
@@ -1197,6 +1235,29 @@ def test_proxy_chain_subscription_is_unavailable_until_deployed(services):
     )
     rendered = services.render_proxy_chain_subscription(chain["token"])
     assert base64.b64decode(rendered).decode("utf-8") == "vless://ready-chain"
+
+
+def test_proxy_chain_list_and_get_use_one_query(services, monkeypatch):
+    deployment_ids = [
+        _create_ready_deployment(services, "query-entry", "203.0.113.71"),
+        _create_ready_deployment(services, "query-exit", "203.0.113.72"),
+    ]
+    chain = services.create_proxy_chain(_proxy_chain_payload(deployment_ids))
+    original_query_all = services.db.query_all
+    calls: list[str] = []
+
+    def counted_query_all(sql, params=()):
+        calls.append(sql)
+        return original_query_all(sql, params)
+
+    monkeypatch.setattr(services.db, "query_all", counted_query_all)
+
+    listed = services.list_proxy_chains()
+    assert listed[0]["path"] == "edge-query-entry -> edge-query-exit"
+    assert len(calls) == 1
+    calls.clear()
+    assert services.get_proxy_chain(chain["id"])["id"] == chain["id"]
+    assert len(calls) == 1
 
 
 def test_proxy_chain_subscription_renders_mihomo_yaml(services):

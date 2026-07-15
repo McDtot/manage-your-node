@@ -96,6 +96,31 @@ def test_request_body_limit(monkeypatch, tmp_path):
     assert response.json()["error"] == "request body too large"
 
 
+def test_job_log_api_supports_incremental_cursor(monkeypatch, tmp_path):
+    client, db = _client(monkeypatch, tmp_path)
+    _login(client)
+    db.execute(
+        "INSERT INTO jobs (id,type,status,logs,created_at,updated_at)"
+        " VALUES ('job','test','running','[]','now','now')"
+    )
+    db.executemany(
+        "INSERT INTO job_logs (job_id,seq,at,line) VALUES (?,?,?,?)",
+        [
+            ("job", 1, "one", "first"),
+            ("job", 2, "two", "second"),
+        ],
+    )
+
+    response = client.get("/api/jobs/job?after=1")
+
+    assert response.status_code == 200
+    assert response.json()["logs"] == [
+        {"seq": 2, "at": "two", "line": "second"}
+    ]
+    assert response.json()["last_log_seq"] == 2
+    assert client.get("/api/jobs/job?after=-1").status_code == 400
+
+
 def test_public_http_warning_is_returned_to_web_ui(monkeypatch, tmp_path):
     monkeypatch.setenv("APP_DATA_DIR", str(tmp_path))
     monkeypatch.setenv("HOST", "0.0.0.0")

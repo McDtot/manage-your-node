@@ -1094,18 +1094,28 @@ exit 43
 """
 
     def _append_job_log(self, job_id: str, line: str) -> None:
-        job = self.db.query_one("SELECT logs FROM jobs WHERE id = ?", (job_id,))
-        if not job:
-            return
-        logs = json.loads(job["logs"])
         clean = str(line).replace("\x00", "")[:MAX_JOB_LOG_LINE]
-        logs.append({"at": now_iso(), "line": clean})
-        if len(logs) > MAX_JOB_LOG_ENTRIES:
-            logs = logs[-MAX_JOB_LOG_ENTRIES:]
-        self.db.execute(
-            "UPDATE jobs SET logs = ?, updated_at = ? WHERE id = ?",
-            (json.dumps(logs, ensure_ascii=False), now_iso(), job_id),
-        )
+        stamp = now_iso()
+        with self.db.transaction():
+            job = self.db.query_one("SELECT id FROM jobs WHERE id = ?", (job_id,))
+            if not job:
+                return
+            next_seq = self.db.query_one(
+                "SELECT COALESCE(MAX(seq), 0) + 1 AS value FROM job_logs WHERE job_id = ?",
+                (job_id,),
+            )["value"]
+            self.db.execute(
+                "INSERT INTO job_logs (job_id, seq, at, line) VALUES (?, ?, ?, ?)",
+                (job_id, next_seq, stamp, clean),
+            )
+            self.db.execute(
+                "DELETE FROM job_logs WHERE job_id = ? AND seq <= ?",
+                (job_id, next_seq - MAX_JOB_LOG_ENTRIES),
+            )
+            self.db.execute(
+                "UPDATE jobs SET updated_at = ? WHERE id = ?",
+                (stamp, job_id),
+            )
 
     def _finish_job(self, job_id: str, status: str, error: str | None) -> None:
         self.db.execute(
@@ -1198,9 +1208,11 @@ exit 43
                 verify_tls=False,  # endpoint is authenticated by the pinned SSH tunnel
             )
 
-    def list_clients(self) -> list[dict[str, Any]]:
+    def _client_rows(self, client_id: str | None = None) -> list[dict[str, Any]]:
+        where = "WHERE c.id = ?" if client_id else ""
+        params = (client_id,) if client_id else ()
         return self.db.query_all(
-            """
+            f"""
             SELECT c.id, c.deployment_id, d.server_id, s.name AS server_name,
                    s.host, c.name, c.uuid, c.quota_bytes, c.used_bytes,
                    c.traffic_reset_days, c.expires_at, c.enabled,
@@ -1209,24 +1221,80 @@ exit 43
             FROM clients c
             JOIN deployments d ON d.id = c.deployment_id
             JOIN servers s ON s.id = d.server_id
+            {where}
             ORDER BY c.created_at DESC
-            """
+            """,
+            params,
         )
 
-    def list_proxy_chains(self) -> list[dict[str, Any]]:
+    def list_clients(self) -> list[dict[str, Any]]:
+        return self._client_rows()
+
+    def _query_proxy_chains(self, chain_id: str | None = None) -> list[dict[str, Any]]:
+        where = "WHERE pc.id = ?" if chain_id else ""
+        params = (chain_id,) if chain_id else ()
         rows = self.db.query_all(
-            """
-            SELECT id, name, token, client_uuid, status, share_link,
-                   last_error, created_at, updated_at
-            FROM proxy_chains
-            ORDER BY created_at DESC
-            """
+            f"""
+            SELECT pc.id, pc.name, pc.token, pc.client_uuid,
+                   pc.status AS chain_status, pc.share_link, pc.last_error,
+                   pc.created_at AS chain_created_at, pc.updated_at AS chain_updated_at,
+                   pcn.position, d.id AS deployment_id, s.name AS server_name,
+                   s.host, d.protocol, d.proxy_port, d.status AS deployment_status,
+                   pcn.inbound_protocol, pcn.inbound_port, pcn.client_uuid AS node_client_uuid,
+                   pcn.public_key, pcn.ss_method, pcn.short_id,
+                   pcn.remote_service_name, pcn.status AS node_status
+            FROM proxy_chains pc
+            LEFT JOIN proxy_chain_nodes pcn ON pcn.chain_id = pc.id
+            LEFT JOIN deployments d ON d.id = pcn.deployment_id
+            LEFT JOIN servers s ON s.id = d.server_id
+            {where}
+            ORDER BY pc.created_at DESC, pc.id ASC, pcn.position ASC
+            """,
+            params,
         )
-        for row in rows:
-            nodes = self._proxy_chain_nodes(row["id"])
-            row["nodes"] = nodes
-            row["path"] = " -> ".join(node["server_name"] for node in nodes)
-            row["hops"] = [
+
+        chains: dict[str, dict[str, Any]] = {}
+        for record in rows:
+            current = chains.get(record["id"])
+            if current is None:
+                current = {
+                    "id": record["id"],
+                    "name": record["name"],
+                    "token": record["token"],
+                    "client_uuid": record["client_uuid"],
+                    "status": record["chain_status"],
+                    "share_link": record["share_link"],
+                    "last_error": record["last_error"],
+                    "created_at": record["chain_created_at"],
+                    "updated_at": record["chain_updated_at"],
+                    "nodes": [],
+                }
+                chains[record["id"]] = current
+            if record["deployment_id"] is not None:
+                current["nodes"].append(
+                    {
+                        "position": record["position"],
+                        "deployment_id": record["deployment_id"],
+                        "server_name": record["server_name"],
+                        "host": record["host"],
+                        "protocol": record["protocol"],
+                        "proxy_port": record["proxy_port"],
+                        "status": record["deployment_status"],
+                        "inbound_protocol": record["inbound_protocol"],
+                        "inbound_port": record["inbound_port"],
+                        "client_uuid": record["node_client_uuid"],
+                        "public_key": record["public_key"],
+                        "ss_method": record["ss_method"],
+                        "short_id": record["short_id"],
+                        "remote_service_name": record["remote_service_name"],
+                        "node_status": record["node_status"],
+                    }
+                )
+
+        for chain in chains.values():
+            nodes = chain["nodes"]
+            chain["path"] = " -> ".join(node["server_name"] for node in nodes)
+            chain["hops"] = [
                 {
                     "fromDeploymentId": nodes[index - 1]["deployment_id"],
                     "fromServerName": nodes[index - 1]["server_name"],
@@ -1237,10 +1305,13 @@ exit 43
                 for index, node in enumerate(nodes)
                 if index > 0
             ]
-            row["entry_server_name"] = nodes[0]["server_name"] if nodes else ""
-            row["exit_server_name"] = nodes[-1]["server_name"] if nodes else ""
-            row["subscription_url"] = self._chain_subscription_url(row["token"])
-        return rows
+            chain["entry_server_name"] = nodes[0]["server_name"] if nodes else ""
+            chain["exit_server_name"] = nodes[-1]["server_name"] if nodes else ""
+            chain["subscription_url"] = self._chain_subscription_url(chain["token"])
+        return list(chains.values())
+
+    def list_proxy_chains(self) -> list[dict[str, Any]]:
+        return self._query_proxy_chains()
 
     def create_proxy_chain(self, payload: dict[str, Any]) -> dict[str, Any]:
         deployment_ids = payload.get("deploymentIds") or payload.get("nodeIds") or []
@@ -1429,7 +1500,7 @@ exit 43
                 )
 
     def get_proxy_chain(self, chain_id: str) -> dict[str, Any]:
-        rows = [chain for chain in self.list_proxy_chains() if chain["id"] == chain_id]
+        rows = self._query_proxy_chains(chain_id)
         if not rows:
             raise ValueError("proxy chain not found")
         return rows[0]
@@ -2287,7 +2358,7 @@ echo "Removed $SERVICE_NAME"
         return int(dt.timestamp() * 1000)
 
     def get_client(self, client_id: str) -> dict[str, Any]:
-        rows = [row for row in self.list_clients() if row["id"] == client_id]
+        rows = self._client_rows(client_id)
         if not rows:
             raise ValueError("用户不存在")
         return rows[0]
@@ -2536,47 +2607,56 @@ fi
 echo "3x-ui cleanup completed"
 """
 
-    def list_subscriptions(self) -> list[dict[str, Any]]:
-        rows = self.db.query_all(
-            """
-            SELECT s.id, s.name, s.token, s.created_at, s.updated_at,
-                   (
-                       SELECT COUNT(*)
-                       FROM subscription_entries se
-                       WHERE se.subscription_id = s.id
-                   ) AS node_count,
-                   (
-                       SELECT COUNT(*)
-                       FROM subscription_chain_entries sce
-                       WHERE sce.subscription_id = s.id
-                   ) AS chain_count,
-                   COALESCE((
-                       SELECT SUM(se.quota_bytes)
-                       FROM subscription_entries se
-                       WHERE se.subscription_id = s.id
-                   ), 0) AS quota_bytes,
-                   COALESCE((
-                       SELECT SUM(c.used_bytes)
-                       FROM subscription_entries se
-                       JOIN clients c ON c.id = se.node_client_id
-                       WHERE se.subscription_id = s.id
-                   ), 0) AS used_bytes,
-                   COALESCE((
-                       SELECT SUM(
+    def _subscription_rows(
+        self,
+        subscription_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        where = "WHERE s.id = ?" if subscription_id else ""
+        node_where = "WHERE se.subscription_id = ?" if subscription_id else ""
+        chain_where = "WHERE subscription_id = ?" if subscription_id else ""
+        params = (subscription_id, subscription_id, subscription_id) if subscription_id else ()
+        return self.db.query_all(
+            f"""
+            WITH node_stats AS (
+                SELECT se.subscription_id,
+                       COUNT(*) AS node_count,
+                       SUM(se.quota_bytes) AS quota_bytes,
+                       SUM(c.used_bytes) AS used_bytes,
+                       SUM(
                            CASE
                                WHEN se.quota_bytes > c.used_bytes
                                THEN se.quota_bytes - c.used_bytes
                                ELSE 0
                            END
-                       )
-                       FROM subscription_entries se
-                       JOIN clients c ON c.id = se.node_client_id
-                       WHERE se.subscription_id = s.id
-                   ), 0) AS remaining_bytes
+                       ) AS remaining_bytes
+                FROM subscription_entries se
+                JOIN clients c ON c.id = se.node_client_id
+                {node_where}
+                GROUP BY se.subscription_id
+            ),
+            chain_stats AS (
+                SELECT subscription_id, COUNT(*) AS chain_count
+                FROM subscription_chain_entries
+                {chain_where}
+                GROUP BY subscription_id
+            )
+            SELECT s.id, s.name, s.token, s.created_at, s.updated_at,
+                   COALESCE(ns.node_count, 0) AS node_count,
+                   COALESCE(cs.chain_count, 0) AS chain_count,
+                   COALESCE(ns.quota_bytes, 0) AS quota_bytes,
+                   COALESCE(ns.used_bytes, 0) AS used_bytes,
+                   COALESCE(ns.remaining_bytes, 0) AS remaining_bytes
             FROM subscriptions s
+            LEFT JOIN node_stats ns ON ns.subscription_id = s.id
+            LEFT JOIN chain_stats cs ON cs.subscription_id = s.id
+            {where}
             ORDER BY s.created_at DESC
-            """
+            """,
+            params,
         )
+
+    def list_subscriptions(self) -> list[dict[str, Any]]:
+        rows = self._subscription_rows()
         for row in rows:
             row["subscription_url"] = self._subscription_url(row["token"])
         return rows
@@ -2597,49 +2677,10 @@ echo "3x-ui cleanup completed"
         return self.get_subscription(subscription_id)
 
     def get_subscription(self, subscription_id: str) -> dict[str, Any]:
-        row = self.db.query_one(
-            """
-            SELECT s.id, s.name, s.token, s.created_at, s.updated_at,
-                   (
-                       SELECT COUNT(*)
-                       FROM subscription_entries se
-                       WHERE se.subscription_id = s.id
-                   ) AS node_count,
-                   (
-                       SELECT COUNT(*)
-                       FROM subscription_chain_entries sce
-                       WHERE sce.subscription_id = s.id
-                   ) AS chain_count,
-                   COALESCE((
-                       SELECT SUM(se.quota_bytes)
-                       FROM subscription_entries se
-                       WHERE se.subscription_id = s.id
-                   ), 0) AS quota_bytes,
-                   COALESCE((
-                       SELECT SUM(c.used_bytes)
-                       FROM subscription_entries se
-                       JOIN clients c ON c.id = se.node_client_id
-                       WHERE se.subscription_id = s.id
-                   ), 0) AS used_bytes,
-                   COALESCE((
-                       SELECT SUM(
-                           CASE
-                               WHEN se.quota_bytes > c.used_bytes
-                               THEN se.quota_bytes - c.used_bytes
-                               ELSE 0
-                           END
-                       )
-                       FROM subscription_entries se
-                       JOIN clients c ON c.id = se.node_client_id
-                       WHERE se.subscription_id = s.id
-                   ), 0) AS remaining_bytes
-            FROM subscriptions s
-            WHERE s.id = ?
-            """,
-            (subscription_id,),
-        )
-        if not row:
+        rows = self._subscription_rows(subscription_id)
+        if not rows:
             raise ValueError("subscription not found")
+        row = rows[0]
         row["subscription_url"] = self._subscription_url(row["token"])
         return row
 
@@ -3031,9 +3072,36 @@ echo "3x-ui cleanup completed"
         ]
         return _render_subscription_links(links, output_format)
 
-    def get_job(self, job_id: str) -> dict[str, Any]:
+    def get_job(self, job_id: str, after_seq: int | None = None) -> dict[str, Any]:
         row = self.db.query_one("SELECT * FROM jobs WHERE id = ?", (job_id,))
         if not row:
             raise ValueError("job not found")
-        row["logs"] = json.loads(row["logs"])
+        legacy_raw = row.pop("logs", "[]")
+        safe_after = max(0, int(after_seq or 0))
+        logs = self.db.query_all(
+            """
+            SELECT seq, at, line
+            FROM job_logs
+            WHERE job_id = ? AND seq > ?
+            ORDER BY seq ASC
+            """,
+            (job_id, safe_after),
+        )
+        if not logs:
+            try:
+                legacy_logs = json.loads(legacy_raw)
+            except (TypeError, ValueError, json.JSONDecodeError):
+                legacy_logs = []
+            if isinstance(legacy_logs, list):
+                logs = [
+                    {
+                        "seq": seq,
+                        "at": str(entry.get("at") or "") if isinstance(entry, dict) else "",
+                        "line": str(entry.get("line") or "") if isinstance(entry, dict) else str(entry),
+                    }
+                    for seq, entry in enumerate(legacy_logs, start=1)
+                    if seq > safe_after
+                ]
+        row["logs"] = logs
+        row["last_log_seq"] = logs[-1]["seq"] if logs else safe_after
         return row

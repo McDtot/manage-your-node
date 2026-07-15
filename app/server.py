@@ -485,7 +485,16 @@ async def get_deployment_subscription(request: Request) -> Response:
 
 async def get_job(request: Request) -> Response:
     item_id = request.path_params["item_id"]
-    return await _service_response(lambda: _get_service(request).get_job(item_id))
+    raw_after = request.query_params.get("after", "0")
+    try:
+        after_seq = int(raw_after)
+    except ValueError:
+        return JSONResponse({"error": "after must be a number"}, status_code=400)
+    if after_seq < 0:
+        return JSONResponse({"error": "after must be zero or greater"}, status_code=400)
+    return await _service_response(
+        lambda: _get_service(request).get_job(item_id, after_seq=after_seq)
+    )
 
 
 async def render_subscription(request: Request) -> Response:

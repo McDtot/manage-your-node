@@ -11,6 +11,8 @@ const state = {
   chainPortDraft: {},
   activeJobId: null,
   jobTimer: null,
+  jobLogSeq: 0,
+  jobLogs: [],
 };
 
 const CHAIN_PROTOCOL_VLESS_REALITY = "vless_reality";
@@ -574,8 +576,14 @@ function subscriptionItem(subscription) {
 }
 
 function renderClients() {
+  const clientsByDeployment = new Map();
+  for (const client of state.clients) {
+    const users = clientsByDeployment.get(client.deployment_id) || [];
+    users.push(client);
+    clientsByDeployment.set(client.deployment_id, users);
+  }
   $("#clientList").innerHTML = state.deployments.map((deployment) => {
-    const users = state.clients.filter((client) => client.deployment_id === deployment.id);
+    const users = clientsByDeployment.get(deployment.id) || [];
     return `
       <section class="node-user-group">
         <div class="item-head">
@@ -777,24 +785,39 @@ function closeSubscriptionEdit() {
 }
 
 async function pollJob(jobId) {
-  clearInterval(state.jobTimer);
+  clearTimeout(state.jobTimer);
   state.activeJobId = jobId;
+  state.jobLogSeq = 0;
+  state.jobLogs = [];
   setSection("logs");
 
   const tick = async () => {
-    const job = await api(`/api/jobs/${jobId}`);
-    $("#jobStatus").textContent = job.status;
-    $("#jobStatus").className = `badge ${job.status === "success" ? "ok" : job.status === "failed" ? "bad" : "warn"}`;
-    $("#jobLog").textContent = job.logs.map((entry) => `[${entry.at}] ${entry.line}`).join("\n");
-    $("#jobLog").scrollTop = $("#jobLog").scrollHeight;
-    if (job.status === "success" || job.status === "failed") {
-      clearInterval(state.jobTimer);
-      await refresh();
+    try {
+      const job = await api(`/api/jobs/${jobId}?after=${state.jobLogSeq}`);
+      if (state.activeJobId !== jobId) return;
+      state.jobLogs.push(...job.logs);
+      state.jobLogs = state.jobLogs.slice(-2000);
+      state.jobLogSeq = Number(job.last_log_seq || state.jobLogSeq);
+      $("#jobStatus").textContent = job.status;
+      $("#jobStatus").className = `badge ${job.status === "success" ? "ok" : job.status === "failed" ? "bad" : "warn"}`;
+      $("#jobLog").textContent = state.jobLogs
+        .map((entry) => `[${entry.at}] ${entry.line}`)
+        .join("\n");
+      $("#jobLog").scrollTop = $("#jobLog").scrollHeight;
+      if (job.status === "success" || job.status === "failed") {
+        state.jobTimer = null;
+        await refresh();
+        return;
+      }
+      state.jobTimer = setTimeout(tick, 800);
+    } catch (error) {
+      if (state.activeJobId !== jobId) return;
+      toast(error instanceof Error ? error.message : "任务日志读取失败");
+      state.jobTimer = setTimeout(tick, 2000);
     }
   };
 
   await tick();
-  state.jobTimer = setInterval(tick, 800);
 }
 
 function syncRealityTargetFields() {

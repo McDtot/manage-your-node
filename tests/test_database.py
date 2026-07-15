@@ -30,6 +30,29 @@ def test_online_backup(tmp_path):
     assert backup.query_one("SELECT name FROM subscriptions WHERE id = 'sub'")["name"] == "name"
 
 
+def test_legacy_json_job_logs_are_migrated(tmp_path):
+    path = tmp_path / "legacy-job-logs.sqlite"
+    db = Database(path)
+    db.execute(
+        """
+        INSERT INTO jobs (id, type, status, logs, created_at, updated_at)
+        VALUES ('job', 'legacy', 'success',
+                '[{"at":"2026-01-01T00:00:00+00:00","line":"done"}]',
+                'now', 'now')
+        """
+    )
+    db.close()
+
+    upgraded = Database(path)
+
+    assert upgraded.query_one("SELECT logs FROM jobs WHERE id = 'job'")["logs"] == "[]"
+    assert upgraded.query_all(
+        "SELECT seq, at, line FROM job_logs WHERE job_id = 'job' ORDER BY seq"
+    ) == [
+        {"seq": 1, "at": "2026-01-01T00:00:00+00:00", "line": "done"}
+    ]
+
+
 def test_deployments_default_to_native_and_retire_legacy_simulations(tmp_path):
     path = tmp_path / "deployment-migration.sqlite"
     db = Database(path)

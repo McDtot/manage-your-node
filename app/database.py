@@ -1,3 +1,4 @@
+import json
 import sqlite3
 import threading
 from contextlib import contextmanager
@@ -133,6 +134,15 @@ class Database:
                     finished_at TEXT,
                     FOREIGN KEY(server_id) REFERENCES servers(id) ON DELETE SET NULL,
                     FOREIGN KEY(deployment_id) REFERENCES deployments(id) ON DELETE SET NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS job_logs (
+                    job_id TEXT NOT NULL,
+                    seq INTEGER NOT NULL,
+                    at TEXT NOT NULL,
+                    line TEXT NOT NULL,
+                    PRIMARY KEY(job_id, seq),
+                    FOREIGN KEY(job_id) REFERENCES jobs(id) ON DELETE CASCADE
                 );
 
                 CREATE TABLE IF NOT EXISTS proxy_chains (
@@ -289,6 +299,7 @@ class Database:
             self._ensure_column("proxy_chain_nodes", "remote_service_name", "TEXT")
             self._ensure_column("proxy_chain_nodes", "status", "TEXT NOT NULL DEFAULT 'planned'")
             self._ensure_column("proxy_chain_nodes", "updated_at", "TEXT")
+            self._migrate_legacy_job_logs()
             self._conn.execute(
                 """
                 UPDATE deployments
@@ -303,6 +314,38 @@ class Database:
                 """
             )
             self._conn.commit()
+
+    def _migrate_legacy_job_logs(self) -> None:
+        """Move pre-normalization JSON logs into the append-only log table."""
+        rows = self._conn.execute(
+            "SELECT id, logs FROM jobs WHERE logs <> '[]' AND logs <> ''"
+        ).fetchall()
+        for row in rows:
+            try:
+                legacy_logs = json.loads(row["logs"])
+            except (TypeError, ValueError, json.JSONDecodeError):
+                continue
+            if not isinstance(legacy_logs, list):
+                continue
+
+            entries: list[tuple[Any, ...]] = []
+            for seq, entry in enumerate(legacy_logs, start=1):
+                if isinstance(entry, dict):
+                    at = str(entry.get("at") or "")
+                    line = str(entry.get("line") or "")
+                else:
+                    at = ""
+                    line = str(entry)
+                entries.append((row["id"], seq, at, line))
+            if entries:
+                self._conn.executemany(
+                    """
+                    INSERT OR IGNORE INTO job_logs (job_id, seq, at, line)
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    entries,
+                )
+            self._conn.execute("UPDATE jobs SET logs = '[]' WHERE id = ?", (row["id"],))
 
     def _ensure_column(self, table: str, column: str, definition: str) -> None:
         rows = self._conn.execute(f"PRAGMA table_info({table})").fetchall()
