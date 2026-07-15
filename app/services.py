@@ -317,6 +317,15 @@ def traffic_reset_days_field(payload: dict[str, Any], default: int = 0) -> int:
     return days
 
 
+def boolean_field(payload: dict[str, Any], key: str, default: bool = False) -> bool:
+    raw = payload.get(key, default)
+    if isinstance(raw, bool):
+        return raw
+    if raw in (0, 1):
+        return bool(raw)
+    raise ValueError(f"{key} must be a boolean")
+
+
 def port_field(payload: dict[str, Any], key: str, default: int) -> int:
     value = int_field(payload, key, default)
     if not 1 <= value <= 65535:
@@ -515,7 +524,7 @@ class AppServices:
         soon = (datetime.now(timezone.utc) + timedelta(days=7)).date().isoformat()
         expiring = self.db.query_one(
             "SELECT COUNT(*) AS count FROM clients "
-            "WHERE enabled = 1 AND expires_at <= ?",
+            "WHERE enabled = 1 AND expires_at <> '' AND expires_at <= ?",
             (soon,),
         )["count"]
         return {
@@ -2066,13 +2075,15 @@ echo "Removed $SERVICE_NAME"
             raise ValueError("quotaGb must be between 0 and 1000000")
         quota_bytes = int(quota_gb * 1024 * 1024 * 1024)
         traffic_reset_days = traffic_reset_days_field(payload)
-        expires_at = str(payload.get("expiresAt", "")).strip()
-        if not expires_at:
+        never_expires = boolean_field(payload, "neverExpires")
+        expires_at = "" if never_expires else str(payload.get("expiresAt", "")).strip()
+        if not never_expires and not expires_at:
             expires_at = (datetime.now(timezone.utc) + timedelta(days=30)).date().isoformat()
-        try:
-            date.fromisoformat(expires_at)
-        except ValueError as exc:
-            raise ValueError("expiresAt must be an ISO date (YYYY-MM-DD)") from exc
+        if expires_at:
+            try:
+                date.fromisoformat(expires_at)
+            except ValueError as exc:
+                raise ValueError("expiresAt must be an ISO date (YYYY-MM-DD)") from exc
         name = require_text(payload, "name")
         if len(name) > 128:
             raise ValueError("name must be 128 characters or fewer")
@@ -2198,11 +2209,18 @@ echo "Removed $SERVICE_NAME"
             payload,
             int(client.get("traffic_reset_days") or 0),
         )
-        expires_at = str(payload.get("expiresAt", client["expires_at"]))
-        try:
-            date.fromisoformat(expires_at)
-        except ValueError as exc:
-            raise ValueError("expiresAt must be an ISO date (YYYY-MM-DD)") from exc
+        if "neverExpires" in payload:
+            never_expires = boolean_field(payload, "neverExpires")
+            expires_at = "" if never_expires else str(payload.get("expiresAt", "")).strip()
+            if not never_expires and not expires_at:
+                raise ValueError("expiresAt is required when neverExpires is false")
+        else:
+            expires_at = str(payload.get("expiresAt", client["expires_at"])).strip()
+        if expires_at:
+            try:
+                date.fromisoformat(expires_at)
+            except ValueError as exc:
+                raise ValueError("expiresAt must be an ISO date (YYYY-MM-DD)") from exc
         enabled = 1 if bool(payload.get("enabled", client["enabled"])) else 0
         share_link = client["share_link"]
         if (

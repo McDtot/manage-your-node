@@ -305,6 +305,10 @@
                   <input name="expiresAt" type="date" />
                 </label>
               </div>
+              <label class="check">
+                <input name="neverExpires" type="checkbox" />
+                不限时（忽略到期日）
+              </label>
               <label>
                 流量重置周期（天，0 表示不自动重置）
                 <input name="trafficResetDays" type="number" value="0" min="0" max="3650" step="1" />
@@ -390,6 +394,14 @@
           <input name="quotaGb" type="number" min="0" step="1" required />
         </label>
         <label>
+          到期日
+          <input name="expiresAt" type="date" />
+        </label>
+        <label class="check">
+          <input name="neverExpires" type="checkbox" />
+          不限时（忽略到期日）
+        </label>
+        <label>
           流量重置周期（天，0 表示不自动重置）
           <input name="trafficResetDays" type="number" min="0" max="3650" step="1" required />
         </label>
@@ -424,6 +436,6 @@
     </dialog>
 
     <div class="toast" id="toast" hidden></div>
-    <script src="/static/app.js?v=web-settings-20260715"></script>
+    <script src="/static/app.js?v=unlimited-expiry-20260715"></script>
   </body>
 </html>

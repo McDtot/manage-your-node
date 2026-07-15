@@ -206,6 +206,109 @@ def test_user_names_are_unique_within_a_node(services):
         services.update_client(second["id"], {"name": "ALICE"})
 
 
+def test_user_can_be_created_without_expiration(services):
+    deployment_id = _create_ready_deployment(
+        services,
+        "never-expires",
+        "203.0.113.31",
+    )
+    services._ensure_deployment_subscription(deployment_id, "edge-never-expires")
+
+    client = services.create_client(
+        deployment_id,
+        {"name": "permanent-user", "neverExpires": True},
+    )
+
+    assert client["expires_at"] == ""
+    assert services._expires_ms(client["expires_at"]) == 0
+    assert services.summary()["expiringClients"] == 0
+
+
+def test_user_without_expiration_syncs_zero_to_remote(services, monkeypatch):
+    deployment_id = _create_ready_deployment(
+        services,
+        "never-expires-remote",
+        "203.0.113.32",
+    )
+    services._ensure_deployment_subscription(deployment_id, "edge-never-expires-remote")
+    services.db.execute(
+        "UPDATE deployments SET xui_inbound_id = 45 WHERE id = ?",
+        (deployment_id,),
+    )
+    created_payloads = []
+
+    class FakeXui:
+        def wait_ready(self, seconds):
+            pass
+
+        def login(self):
+            pass
+
+        def create_client(self, **payload):
+            created_payloads.append(payload)
+            return []
+
+    monkeypatch.setattr(services, "_xui_session", lambda _deployment: nullcontext(FakeXui()))
+
+    client = services.create_client(
+        deployment_id,
+        {"name": "remote-permanent-user", "neverExpires": True},
+    )
+
+    assert client["expires_at"] == ""
+    assert created_payloads[0]["expires_ms"] == 0
+
+
+def test_user_expiration_can_be_removed_and_restored(services, monkeypatch):
+    deployment_id = _create_ready_deployment(
+        services,
+        "edit-expiration",
+        "203.0.113.33",
+    )
+    services._ensure_deployment_subscription(deployment_id, "edge-edit-expiration")
+    client = services.create_client(
+        deployment_id,
+        {"name": "editable-expiration", "expiresAt": "2030-01-01"},
+    )
+    services.db.execute(
+        "UPDATE deployments SET xui_inbound_id = 46 WHERE id = ?",
+        (deployment_id,),
+    )
+    updated_payloads = []
+
+    class FakeXui:
+        def wait_ready(self, seconds):
+            pass
+
+        def login(self):
+            pass
+
+        def get_client(self, email):
+            return {"client": {"uuid": client["uuid"], "email": email}}
+
+        def update_client(self, email, payload):
+            updated_payloads.append((email, payload))
+
+        def client_links(self, email):
+            return []
+
+        def restart_xray(self):
+            pass
+
+    monkeypatch.setattr(services, "_xui_session", lambda _deployment: nullcontext(FakeXui()))
+
+    permanent = services.update_client(client["id"], {"neverExpires": True})
+    restored = services.update_client(
+        client["id"],
+        {"neverExpires": False, "expiresAt": "2035-06-30"},
+    )
+
+    assert permanent["expires_at"] == ""
+    assert updated_payloads[0][1]["expiryTime"] == 0
+    assert restored["expires_at"] == "2035-06-30"
+    assert updated_payloads[1][1]["expiryTime"] == services._expires_ms("2035-06-30")
+
+
 def test_user_traffic_reset_period_can_be_configured(services):
     deployment_id = _create_ready_deployment(
         services,

@@ -64,6 +64,14 @@ function formData(form) {
   return data;
 }
 
+function syncNeverExpires(form, requireDate = false) {
+  const neverExpires = form.elements.neverExpires;
+  const expiresAt = form.elements.expiresAt;
+  if (!neverExpires || !expiresAt) return;
+  expiresAt.disabled = neverExpires.checked;
+  expiresAt.required = requireDate && !neverExpires.checked;
+}
+
 function toast(message) {
   const node = $("#toast");
   node.textContent = message;
@@ -550,12 +558,13 @@ function clientItem(client) {
     : 0;
   const resetDays = Number(client.traffic_reset_days || 0);
   const resetLabel = resetDays > 0 ? `每 ${resetDays} 天自动重置` : "不自动重置";
+  const expirationLabel = client.expires_at || "不限时";
   return `
     <article class="item">
       <div class="item-head">
         <div class="item-title">
           <strong>${escapeHtml(client.name)}</strong>
-          <small>节点 ${escapeHtml(client.server_name)} · 到期 ${escapeHtml(client.expires_at)}</small>
+          <small>节点 ${escapeHtml(client.server_name)} · 到期 ${escapeHtml(expirationLabel)}</small>
         </div>
         ${statusBadge(client.enabled ? "enabled" : "disabled")}
       </div>
@@ -599,12 +608,17 @@ function openClientEdit(clientId) {
   form.elements.name.value = client.name;
   form.elements.quotaGb.value = gb(client.quota_bytes);
   form.elements.trafficResetDays.value = Number(client.traffic_reset_days || 0);
+  form.elements.expiresAt.value = client.expires_at || "";
+  form.elements.neverExpires.checked = !client.expires_at;
+  syncNeverExpires(form, true);
   $("#clientEditDialog").showModal();
 }
 
 function closeClientEdit() {
   $("#clientEditDialog").close();
-  $("#clientEditForm").reset();
+  const form = $("#clientEditForm");
+  form.reset();
+  syncNeverExpires(form, true);
 }
 
 async function openSubscriptionEdit(subscriptionId) {
@@ -737,6 +751,16 @@ function syncRealityTargetFields() {
 function bindEvents() {
   $("#realityMode").addEventListener("change", syncRealityTargetFields);
   syncRealityTargetFields();
+  const clientForm = $("#clientForm");
+  const clientEditForm = $("#clientEditForm");
+  clientForm.elements.neverExpires.addEventListener("change", () => {
+    syncNeverExpires(clientForm);
+  });
+  clientEditForm.elements.neverExpires.addEventListener("change", () => {
+    syncNeverExpires(clientEditForm, true);
+  });
+  syncNeverExpires(clientForm);
+  syncNeverExpires(clientEditForm, true);
   $$(".nav-item").forEach((button) => {
     button.addEventListener("click", () => setSection(button.dataset.section));
   });
@@ -875,6 +899,7 @@ function bindEvents() {
       body: JSON.stringify(data),
     });
     form.reset();
+    syncNeverExpires(form);
     await refresh();
     form.elements.deploymentId.value = deploymentId;
     form.elements.name.focus();
@@ -927,7 +952,8 @@ function bindEvents() {
         name: data.name,
         quotaGb: data.quotaGb,
         trafficResetDays: data.trafficResetDays,
-        expiresAt: client.expires_at,
+        expiresAt: data.expiresAt,
+        neverExpires: data.neverExpires,
         enabled: Boolean(client.enabled),
       }),
     });
@@ -1186,6 +1212,7 @@ function bindEvents() {
           name: client.name,
           quotaGb: gb(client.quota_bytes),
           expiresAt: client.expires_at,
+          neverExpires: !client.expires_at,
           enabled: Number(target.dataset.enabled) === 1,
         }),
       });
