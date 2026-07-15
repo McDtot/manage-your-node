@@ -1,339 +1,409 @@
 # Manage Your Node
 
-本地 Web 面板：录入 VPS、部署并管理 3x-ui 节点、创建用户/订阅，以及把多台机器编排成链式代理。
+一个自托管的 VPS 节点管理面板。通过浏览器即可录入服务器、部署 3x-ui、创建独立用户和订阅，并把多台 VPS 编排成代理链。
 
-面向自用 / 小规模运维。Docker 默认可通过公网 IP 访问；未配置域名与 HTTPS 时，WebUI 会持续显示安全提示。
+[最新版本](https://github.com/McDtot/manage-your-node/releases/latest) · [更新记录](https://github.com/McDtot/manage-your-node/releases) · [问题反馈](https://github.com/McDtot/manage-your-node/issues)
 
----
+> [!IMPORTANT]
+> 本项目适合个人或小规模运维，当前为单管理员模式。应用本身不提供 HTTPS；公网使用前请配置反向代理和 TLS，并遵守所在地法律法规及服务商条款。
 
-## 当前版本：v0.7.0
+## 主要功能
 
-[v0.7.0](https://github.com/McDtot/manage-your-node/releases/tag/v0.7.0) 支持直接从 WebUI 配置外部访问地址：
-
-- 在“设置 → 外部访问设置”填写 HTTPS 域名，订阅链接会立即改用该地址
-- 外部地址持久化到数据库，并同步更新 Host 白名单、CSRF 来源校验与 Secure Cookie
-- `.env` 中的 `PUBLIC_ORIGIN` 保留为首次启动与恢复兜底，支持一键恢复服务器配置
-- 严格校验并规范化协议、域名和端口；错误配置可通过 loopback / SSH 端口转发恢复
-- 设置页已适配桌面与移动布局，并补充完整的配置、API 与安全回归测试
-
-已有部署可进入原项目目录执行 `git pull --ff-only` 后重新运行 `sudo bash install.sh` 完成升级。
-
----
-
-## 能做什么
-
-| 能力 | 说明 |
+| 功能 | 说明 |
 | --- | --- |
-| 控制台 | 本机运行默认 `127.0.0.1:8787`；Docker 默认发布 `0.0.0.0:8787`，带登录鉴权 |
-| 服务器 | 录入 VPS，SSH 连通性检测，首次指纹需人工核验与批准 |
-| 部署 | 通过 SSH 真实安装 3x-ui + 默认 `VLESS + REALITY` |
-| 用户 | 在同一节点创建多个独立用户，支持启停、手动或周期重置流量、修改额度，以及设置到期日或不限时 |
-| 订阅 | 按需手动创建订阅链接，支持为每条订阅单独设置节点显示名称 |
-| 代理链 | 例如 `A → C → B`：为每个节点指定对等映射端口，入口固定 VLESS Reality，节点间可逐跳选择 Reality 或 SS2022；远端为独立 `myn-chain-*` systemd 服务 |
-| 容器 | `Dockerfile` + `docker-compose.yml` |
+| Web 控制台 | 中文界面，登录鉴权，集中查看服务器、部署、用户和任务状态 |
+| 服务器管理 | 保存 VPS SSH 信息、测试连通性，并在首次连接时人工核验主机指纹 |
+| 节点部署 | 通过 SSH 安装固定版本的 3x-ui，自动创建 VLESS + REALITY 入站 |
+| 用户管理 | 同一节点可创建多个独立用户，支持启停、流量额度、手动/周期重置和到期时间 |
+| 订阅分发 | 按需创建订阅，自由组合普通用户和代理链，并为每个条目设置显示名称 |
+| 代理链 | 将多个可用节点按顺序组成入口、中继和出口，节点间支持 REALITY 或 SS2022 |
+| 运维与安全 | 任务日志、审计记录、在线备份、敏感信息加密、登录限流和 CSRF 防护 |
 
----
+## 快速部署
 
-## 用户一键部署
+### 1. 准备管理服务器
 
-要求：一台使用 Ubuntu、Debian、Fedora、CentOS 或 RHEL 的 Linux 服务器。若未安装 Docker，脚本会通过 Docker 官方软件源自动安装 Engine、CLI、Buildx 和 Compose 插件。
+一键安装脚本支持以下 Linux 发行版：
 
-```bash
+- Ubuntu / Debian
+- Fedora / CentOS / RHEL
+
+服务器需要能够访问 GitHub 和 Docker 官方软件源，并允许当前用户使用 root 或 sudo。未安装 Docker 时，脚本会自动安装 Docker Engine、CLI、Buildx 和 Compose 插件。
+
+### 2. 运行安装脚本
+
+~~~bash
 git clone https://github.com/McDtot/manage-your-node.git
 cd manage-your-node
 sudo bash install.sh
-```
+~~~
 
-脚本会自动完成：
+首次安装时，脚本会提示设置管理员密码。密码至少 12 个字符，输入过程不会显示。
 
-- 检查 Docker 与 Compose 权限
-- 未安装时从 Docker 官方软件源安装并启动 Docker
-- 生成 `.env` 和应用主密钥
-- 提示用户隐藏输入管理员密码，并要求再次确认
-- 构建并启动容器
-- 等待健康检查通过
-- 输出访问地址和管理员用户名（不会回显用户设置的密码）
+脚本会自动：
 
-首次交互部署时，脚本会在终端中提示设置至少 12 个字符的管理员密码，输入内容不会显示。无交互终端且未提供密码文件时，脚本会生成随机密码并在部署完成后显示一次。
+1. 检查或安装 Docker；
+2. 生成 <code>.env</code> 和应用主密钥；
+3. 构建并启动容器；
+4. 等待健康检查通过；
+5. 输出访问地址和管理员用户名。
 
-默认通过 `0.0.0.0:8787` 提供临时公网 HTTP 访问。常用选项：
+默认访问地址：
 
-```bash
-# 自定义端口和管理员用户名
+~~~text
+http://管理服务器IP:8787
+~~~
+
+默认管理员用户名为 <code>admin</code>。如果管理服务器启用了云防火墙或安全组，请临时放行 TCP 8787（或自定义的面板端口）；配置 HTTPS 后应关闭该公网端口。
+
+### 常用安装选项
+
+~~~bash
+# 修改管理面板端口和管理员用户名
 sudo bash install.sh --panel-port 8080 --admin-user operator
 
-# 已经配置好 HTTPS 反向代理时使用；会默认只绑定 127.0.0.1
+# 已经配置好 HTTPS 反向代理时，初始化域名并只监听本机
 sudo bash install.sh --domain panel.example.com
 
-# 使用预先创建的密码文件，避免密码进入命令历史
+# 从文件读取管理员密码，避免密码出现在命令历史中
 sudo bash install.sh --admin-password-file /root/manage-node-admin-password
-```
+~~~
 
-重复执行脚本会保留已有 `.env`、密钥和 Docker 数据卷，用当前项目代码重新构建服务；已有 Docker 不会被重复安装，也不会覆盖已有项目配置。其他 Linux 发行版需先按 [Docker 官方文档](https://docs.docker.com/engine/install/)安装 Docker。
+可运行 <code>sudo bash install.sh --help</code> 查看所有选项。
 
-已经部署过时，请进入原项目目录执行升级，不要在项目目录里再次 `git clone` 出同名的嵌套目录。Docker 数据卷必须始终与原来的 `secrets/app_secret.txt` 配套；安装器会在启动前校验二者，发现旧数据卷但缺少原密钥或密钥不匹配时会安全停止，不会替换正在运行的服务。
+> [!NOTE]
+> 安装选项只在首次生成 <code>.env</code> 时写入配置。重复运行脚本会保留现有 <code>.env</code>、密钥和 Docker 数据卷，并使用当前代码重新构建服务。
 
-自动安装需要 root / sudo 权限，且不会主动卸载系统中可能冲突的 `containerd`、`runc` 等软件；若包管理器报告冲突，脚本会停止并保留现场供管理员处理。
+## 第一次使用
 
-升级已部署实例：
+### 1. 添加 VPS
 
-```bash
+进入“服务器”，填写：
+
+- 名称和 IP / 域名；
+- SSH 端口与用户名；
+- SSH 私钥、密码，或选择 SSH Agent / 默认密钥。
+
+目标 VPS 需要满足：
+
+- 管理服务器能够通过 SSH 访问；
+- 使用 root，或使用具备免密码 sudo 权限的普通用户；
+- 能够访问 GitHub 以下载经过版本与哈希固定的 3x-ui；
+- 用于代理链时需使用 systemd；
+- 代理端口已在云安全组、NAT 映射和系统防火墙中正确配置。
+
+暂不支持直接粘贴带 passphrase 的私钥；可以改用 ssh-agent。
+
+### 2. 核验 SSH 指纹
+
+点击“测试 SSH”后，首次发现的主机指纹只会记录，不会直接信任。请通过云厂商控制台或 VPS 本机核对指纹，确认完全一致后点击“核验后信任”，再测试一次连接。
+
+如果 VPS 重装后指纹发生变化，连接会被拒绝。确认是预期变更后，先重置旧指纹，再重新核验。
+
+### 3. 部署节点
+
+进入“部署”并选择已通过 SSH 测试的服务器：
+
+- 协议模板：当前使用 VLESS + REALITY；
+- REALITY 伪装目标：建议选择“自动检测并固定”；
+- 代理端口：默认 443，必须在目标 VPS 上可从公网访问；
+- 面板端口：可留空自动生成，仅通过 SSH 隧道访问，无需向公网开放。
+
+部署完成并显示“可用”后，3x-ui 面板会被限制在目标 VPS 的 <code>127.0.0.1</code>，Manage Your Node 通过固定主机指纹的 SSH 隧道调用其 API。
+
+### 4. 创建用户
+
+进入“用户”，选择一个可用部署并设置：
+
+- 用户名；
+- 流量额度；
+- 到期日，或勾选“不限时”；
+- 流量自动重置周期，填 0 表示不自动重置。
+
+每名用户拥有独立 UUID，可随时启停、修改额度与到期时间，或手动重置流量。
+
+### 5. 创建订阅
+
+订阅不会自动创建。进入“订阅”：
+
+1. 新建一条订阅；
+2. 点击“分发和调整”；
+3. 选择要加入的普通用户和已下发代理链；
+4. 按需设置订阅内的显示名称与额度；
+5. 保存并复制订阅链接。
+
+订阅链接支持两种格式：
+
+| 格式 | 用法 |
+| --- | --- |
+| Mihomo / Clash YAML | 在链接后添加 <code>?format=mihomo</code> |
+| 通用 Base64 | 在链接后添加 <code>?format=base64</code> |
+
+不指定格式时，会根据客户端 User-Agent 自动识别 Mihomo / Clash，其他客户端默认返回 Base64。订阅令牌泄露后，任何人都可以读取对应内容；请及时在面板中轮换令牌。
+
+## 代理链
+
+代理链适合把多台已部署节点组成固定路径。例如：
+
+~~~text
+用户 ─ VLESS + REALITY → 香港入口 ─ REALITY / SS2022 → 日本中继 ─ REALITY / SS2022 → 美国出口 → Internet
+~~~
+
+使用方法：
+
+1. 确保至少两台 native 部署处于“可用”状态；
+2. 进入“代理链”，按入口到出口的顺序添加节点；
+3. 为每个节点填写 NAT 商家分配的、内外一致的链路端口；
+4. 为节点间链路选择 VLESS + REALITY 或 SS2022；
+5. 保存后点击“下发远端”；
+6. 下发成功后复制独立订阅，或把代理链加入组合订阅。
+
+端口规则：
+
+- 用户设备到入口固定使用 VLESS + REALITY；
+- REALITY 链路只需映射 TCP；
+- SS2022 链路必须在同一端口同时映射 TCP 和 UDP；
+- 入口端口供用户设备连接，其余节点端口供上一跳连接；
+- 当前只支持公网端口与本机监听端口相同的 NAT 映射，不支持端口转换。
+
+保存时会检查与 SSH、3x-ui 面板、普通代理及其他代理链的端口冲突；下发前还会检查远端实际监听占用。链路服务独立运行，不会改写 3x-ui 主配置：
+
+~~~text
+/opt/manage-node/chains/myn-chain-*
+/etc/systemd/system/myn-chain-*.service
+~~~
+
+删除代理链、部署或服务器时，系统会尽力移除相关远端服务。自动添加的防火墙规则不会自动删除，以免误删已有规则；不再使用的端口请确认后手动关闭。
+
+## 配置 HTTPS
+
+默认的公网 HTTP 只适合首次安装。明文传输可能暴露登录信息、SSH 密码或私钥，正式使用前请完成以下配置：
+
+1. 将域名的 A / AAAA 记录指向管理服务器；
+2. 使用 Caddy、Nginx 或其他反向代理申请证书并转发到 <code>127.0.0.1:8787</code>（自定义端口时使用实际的 <code>PANEL_PORT</code>）；
+3. 在 <code>.env</code> 中设置 <code>BIND_ADDRESS=127.0.0.1</code>；
+4. 重新运行 <code>sudo bash install.sh</code>；
+5. 从 HTTPS 域名登录，在“设置 → 外部访问设置”保存完整地址，例如 <code>https://panel.example.com</code>；
+6. 关闭安全组中临时开放的 8787 端口，只保留 HTTPS 入口。
+
+仓库提供了可直接修改的配置示例：
+
+- [Caddy 配置](examples/Caddyfile)
+- [Nginx 配置](examples/nginx.conf)
+
+如果首次安装前已经配置好反向代理，可以直接运行：
+
+~~~bash
+sudo bash install.sh --domain panel.example.com
+~~~
+
+这会初始化 HTTPS 外部地址，并默认将 Docker 端口绑定到 <code>127.0.0.1</code>。
+
+> [!WARNING]
+> WebUI 中的“外部访问设置”会更新订阅地址、Host 白名单、CSRF 来源和 Secure Cookie，但不能修改 Docker 的宿主机端口绑定。是否公开监听仍由 <code>.env</code> 中的 <code>BIND_ADDRESS</code> 决定。
+
+## 升级
+
+请始终在原项目目录升级，不要重新克隆到嵌套目录：
+
+~~~bash
+cd /path/to/manage-your-node
 git pull --ff-only
 sudo bash install.sh
-```
+~~~
 
-升级前建议按“备份”章节保存一次数据库与 `APP_SECRET`。
+安装器会保留现有配置、主密钥、管理员密码和 Docker 数据卷，并在替换运行中服务前检查数据库与主密钥是否匹配。
 
----
-
-## 本地开发
-
-```powershell
-pip install -r requirements.txt
-$env:APP_SECRET = "replace-with-a-long-random-secret"
-$env:ADMIN_USERNAME = "admin"
-$env:ADMIN_PASSWORD = "replace-with-a-strong-password"
-python -m app.server
-```
-
-浏览器打开：<http://127.0.0.1:8787>
-
-本地若未设 `ADMIN_PASSWORD`，会回退为 `APP_SECRET`（仅 loopback / 开发模式）。非本地绑定会强制要求显式密钥，否则拒绝启动。
-
-### 手动使用 Docker
-
-```powershell
-Copy-Item .env.example .env
-New-Item -ItemType Directory -Force secrets
-python -c "from pathlib import Path; import secrets; Path('secrets/app_secret.txt').write_text(secrets.token_urlsafe(48))"
-# 手工写入一个强管理员密码，不要复用 APP_SECRET
-Set-Content -NoNewline secrets/admin_password.txt 'replace-with-a-strong-password'
-# 域名与 HTTPS 可稍后配置；未配置时 WebUI 会提示
-docker compose up --build -d
-```
-
-Compose 默认把端口发布到宿主机 `0.0.0.0:8787`；密钥通过 Docker secrets
-挂载，应用以 UID/GID `10001` 非 root 运行，数据保存在命名卷
-`manage-node-data`。在 Linux 上，一键脚本会把 `secrets/` 目录保持为 `0700`，
-并把两个密钥文件设为 `0444`，使 Compose 绑定挂载后的文件可由容器内的非 root
-进程读取；其他宿主机用户仍无法穿过私有目录读取密钥。配置本机反向代理后，
-应把 `BIND_ADDRESS` 改成 `127.0.0.1`。
-
----
-
-## 推荐使用流程
-
-1. **服务器** — 添加 VPS → 测试 SSH → 通过云厂商控制台核验并批准指纹 → 再测试
-2. **部署** — 创建 3x-ui 部署；伪装目标建议选“自动检测并固定”
-3. **用户** — 部署成功后可在同一节点创建多个用户
-4. **订阅** — 配置并分发订阅链接，可把普通节点用户与已下发的代理链汇总到同一链接
-5. **代理链**（可选）— 选择 ready 的 native 节点排序 → 为每台机填写已分配的对等映射端口 → 逐跳选择协议 → 保存 →「下发远端」
-
-代理链语义（UI 从上到下）：
-
-```text
-用户 ─ VLESS + REALITY → A ─ SS2022 / Reality → C ─ SS2022 / Reality → B → Internet
-```
-
-- 第一台是入口（用户设备只连接它）
-- 中间是中继  
-- 最后一台是出口  
-- 每个节点需要一个内外一致的链路端口：入口端口供用户设备连接，其余节点端口供上一跳连接；程序不会随机选择端口
-- 用户设备到入口固定为 `VLESS + REALITY`；节点间默认使用只需 TCP 的 Reality，也可以逐跳切换为 SS2022
-- Reality 链路端口只需映射 TCP；SS2022 链路端口必须同时映射 TCP 与 UDP
-- 保存时会检查端口范围，以及与 SSH、3x-ui 面板、普通代理和其他代理链的冲突；下发前还会在远端检查实际监听占用
-- SS2022 使用 `2022-blake3-aes-256-gcm` 与逐跳独立密钥；密钥经 `APP_SECRET` 加密存库，不下发给用户设备
-- 固定发布包内的 Xray 目前可以运行 SS2022，但已输出未来可能移除 Shadowsocks 的兼容性警告；新建链路时可逐跳选择 Reality
-- 订阅 `/sub/chains/{token}?format=mihomo` 返回可直接导入 Mihomo / Clash 的 YAML；`format=base64` 返回传统 Base64 入口链接。无参数时会根据客户端 User-Agent 自动选择，其他客户端默认保持 Base64 兼容。代理链加入组合订阅时，可以单独设置该订阅内的显示名称，不会改动代理链原始名称。
-
-链路不改写 3x-ui 主配置，而是在每台机上装独立服务：
-
-```text
-/opt/manage-node/chains/myn-chain-*/
-/etc/systemd/system/myn-chain-*.service
-```
-
-删除链路 / 部署 / 服务器时，会尽力停掉并移除对应远端服务。自动放行的系统防火墙端口不会擅自删除，避免移除用户原有规则；不用的端口应在确认后手动关闭。
-
----
-
-## 部署流程
-
-经 SSH 在目标机上：
-
-1. 下载固定 commit 的 3x-ui unattended 安装器并校验 SHA-256
-2. 安装固定的 3x-ui release，并按架构校验 release archive SHA-256
-3. 强制面板只监听远端 `127.0.0.1`
-4. 读 `/etc/x-ui/install-result.env`，敏感行不写任务日志
-5. 从目标 VPS 对候选伪装站连续执行两次 TLS 1.3 与证书校验，把首个通过的目标固定保存到该部署；手动模式也会先校验
-6. 经 **SSH 隧道** 调面板 API，使用该部署自己的伪装目标创建默认 `VLESS + REALITY` inbound
-7. 部署完成后，在“用户”页面为该节点创建用户并获取分享链接
-
-要求：
-
-- SSH 可达；非 root 需无密码 sudo  
-- 支持未加密私钥、密码或 ssh-agent；暂不支持带 passphrase 的私钥粘贴  
-- 代理链节点须为 native + ready，且目标机有 systemd  
-- 每个代理链节点都要准备一个对等映射端口；Reality 放行 TCP，SS2022 同时放行 TCP 与 UDP
-
-失败时：代理链会尽力清理已装的 `myn-chain-*`；若 native 安装结果已写入后再失败，会尝试卸载远端 3x-ui。清理均为 best-effort。
-
----
-
-## 安全
-
-### 安全模式 vs 本地开发
-
-| | 本地开发（绑定 `127.0.0.1` / `localhost`） | 安全模式（如 `0.0.0.0`） |
-| --- | --- | --- |
-| 默认 | `APP_ALLOW_INSECURE` 自动为真 | 强制校验密钥 |
-| `APP_SECRET` | 可用内置开发默认值 | 必须显式设置，且 ≥ 16 字符，不能是内置默认 |
-| `ADMIN_PASSWORD` | 未设则回退 `APP_SECRET` | 必须显式设置、≥ 12 字符，且不能等于 `APP_SECRET` |
-| `PUBLIC_ORIGIN` | 自动使用本地地址 | 可暂不设置；WebUI 会提示缺少域名/HTTPS |
-
-`APP_ALLOW_INSECURE=1` 只允许与 loopback 监听地址一起使用；非本地绑定会拒绝启动。
-
-### 默认公网访问与域名提示
-
-Docker Compose 默认把 `8787` 发布到 `0.0.0.0`，部署后可以先通过公网 IP 直接访问，不需要额外开关。未设置 HTTPS 域名时，登录后的 WebUI 顶部会显示黄色安全提示；强 `APP_SECRET`、强管理员密码、CSRF、登录限流与审计仍然启用。
-
-非容器运行若也要对外监听，只需设置：
-
-```text
-HOST=0.0.0.0
-```
-
-以后配置好反向代理后，可以直接进入 WebUI 的“设置 → 外部访问设置”，填写 `https://域名`。保存后订阅链接、Host 白名单、CSRF 来源校验和安全 Cookie 会立即切换到新地址；配置持久化在数据库中，重启后仍然有效。`.env` 中的 `PUBLIC_ORIGIN` 继续作为首次启动和“恢复服务器配置”时的兜底。
-
-如果反向代理与应用在同一台机器，仍应在 `.env` 中把 `BIND_ADDRESS` 改为 `127.0.0.1`，因为 Docker 的宿主机端口绑定无法由容器内的 WebUI 修改。WebUI 只接受完整的 HTTPS 公网域名，并要求应用已经关闭 `APP_ALLOW_INSECURE`、使用生产密钥。
-
-保存时当前会话使用的旧访问地址会临时保留到进程重启，便于立即测试和撤销。若旧会话已经失效或错误配置后已经重启，可在服务器本机访问，或通过 SSH 将 `127.0.0.1:8787` 转发到本地；loopback 恢复入口会使用严格的同源校验和非 Secure 恢复 Cookie，不受错误公网域名阻断。
-
-未配置 HTTPS 时仍是明文 HTTP，传输中的登录信息、SSH 密码或私钥可能被链路监听，因此只建议作为部署初期的过渡状态。
-
-### 已内置
-
-- 敏感数据（SSH 密钥、面板密码、API token）用 Fernet + scrypt 加密；旧 `v1` 密文可读，下次写入升为 `v2`  
-- Starlette + Uvicorn 提供 ASGI Web 服务；请求 Host 白名单、请求体上限与就绪检查
-- 登录失败限流持久化到 SQLite：默认 5 分钟内失败 5 次 → 锁定完整 15 分钟（429）
-- SSH 首次主机密钥只记录为待批准；必须带外核验后才能认证和 native 部署；变化时拒绝连接
-- 3x-ui 面板强制绑定远端 `127.0.0.1`，API 一律经固定主机指纹的 SSH 隧道访问
-- 写 API 使用与 session 绑定的 CSRF 双提交令牌，并校验 Origin / Fetch Metadata
-- Session Cookie：`HttpOnly`、`SameSite=Strict`；生产环境使用 `Secure` 与 `__Host-` 前缀
-- CSP、HSTS、`nosniff`、拒绝 framing、无 Referrer 等安全响应头
-- `X-Forwarded-For` 默认不信任；启用时还必须用 `TRUSTED_PROXY_IPS` 限制来源
-- 公开订阅接口按来源地址限流，订阅与代理链 token 可在 UI 中轮换
-- 500 对外只回通用信息，细节进服务端日志  
-- 管理变更同时写进程日志和持久化 `audit_events` 表，可经 `/api/audit` 查询
-- 部署使用数据库互斥锁；启动时恢复孤儿任务并清理遗留锁
-
-### 正式公网前还要做的
-
-- 前面加反向代理终结 TLS（应用本身不提供 HTTPS）  
-- 绑定 `127.0.0.1`，只让代理访问面板  
-- 在 WebUI 设置准确的外部访问地址，或使用 `PUBLIC_ORIGIN`、`ALLOWED_HOSTS` 作为服务器端兜底
-- 只有确认反向代理来源地址后才启用 `TRUST_X_FORWARDED_FOR`
-- 定期执行一致性备份与恢复演练，并离线保管 `APP_SECRET`
-
-`examples/Caddyfile` 与 `examples/nginx.conf` 有现成示例。
-
----
-
-## 环境变量
-
-| 变量 | 默认 | 说明 |
-| --- | --- | --- |
-| `APP_DATA_DIR` | `data` | SQLite 目录 |
-| `APP_SECRET` | `development-only-secret` | 加密与 session 签名；安全模式必填且足够强 |
-| `APP_SECRET_FILE` | （无） | 从文件读取主密钥；优先于 `APP_SECRET` |
-| `ADMIN_USERNAME` | `admin` | 管理员用户名 |
-| `ADMIN_PASSWORD` | （无） | 管理员密码；安全模式必填 |
-| `ADMIN_PASSWORD_FILE` | （无） | 从文件读取管理员密码；优先于环境变量 |
-| `SESSION_HOURS` | `12` | Session 有效小时数 |
-| `HOST` | `127.0.0.1` | 监听地址 |
-| `PORT` | `8787` | 监听端口 |
-| `APP_ALLOW_INSECURE` | loopback 时为真 | 强制开发模式 |
-| `BIND_ADDRESS` | `0.0.0.0` | Docker 发布地址；配置本机反代后改为 `127.0.0.1` |
-| `PANEL_PORT` | `8787` | Docker 发布到宿主机的管理面板端口 |
-| `SESSION_COOKIE_SECURE` | HTTPS origin 时为真 | Cookie 是否带 `Secure` |
-| `TRUST_X_FORWARDED_FOR` | `0` | 是否采信 `X-Forwarded-For` |
-| `TRUSTED_PROXY_IPS` | `127.0.0.1,::1` | Uvicorn 可采信转发头的代理 IP/CIDR |
-| `PUBLIC_ORIGIN` | 自动使用监听地址 | 外部访问地址的首次启动 / 恢复兜底；WebUI 保存值会优先使用 |
-| `ALLOWED_HOSTS` | 未配域名时允许当前 Host | 服务器端附加 Host 白名单；WebUI 外部地址的域名会自动加入 |
-| `MAX_BODY_BYTES` | `1048576` | 请求体上限 |
-| `SUBSCRIPTION_RATE_LIMIT` | `120` | 单来源每分钟订阅请求上限 |
-| `REALITY_CANDIDATES` | Yahoo、Apple、Amazon | 自动模式按顺序从目标 VPS 检测的 `host:port` 列表，逗号分隔 |
-| `REALITY_DEST` | `www.yahoo.com:443` | 旧部署的全局回落目标；显式设置且未设置候选列表时，也作为唯一自动候选 |
-| `REALITY_SNI` | `REALITY_DEST` 的 host | 旧部署 / 单一全局目标的 SNI |
-
-更换已有数据的 `APP_SECRET` 后，旧的 SSH 密钥 / 面板密码 / API token 将无法解密。
-
----
+升级前建议先备份。不要删除或重新生成原来的 <code>secrets/app_secret.txt</code>，否则数据库中的 SSH 密钥、面板密码和 API token 将无法解密。
 
 ## 备份
 
-备份本身应加密并复制到另一台机器；`APP_SECRET` 必须独立离线保管。
+完整备份至少需要同时保存：
 
-一致性在线备份示例：
+- SQLite 数据库备份；
+- <code>secrets/app_secret.txt</code>；
+- <code>secrets/admin_password.txt</code> 和 <code>.env</code>（建议一并保存）。
 
-```powershell
-python -m app.maintenance backup
-python -m app.maintenance check
-```
+Docker 部署可执行：
 
-Docker 中可先写到数据卷，再复制出来：
+~~~bash
+docker compose exec manage-your-node \
+  python -m app.maintenance backup /data/manage-node-backup.db
 
-```powershell
-docker compose exec manage-your-node python -m app.maintenance backup /data/manage-node-backup.db
-docker cp manage-your-node:/data/manage-node-backup.db ./backups/manage-node-backup.db
-```
+docker cp manage-your-node:/data/manage-node-backup.db \
+  ./backups/manage-node-backup.db
+~~~
 
----
+检查当前数据库与主密钥：
 
-## 测试
+~~~bash
+docker compose exec manage-your-node python -m app.maintenance check
+~~~
 
-```powershell
+备份应加密后复制到另一台机器，主密钥还应独立离线保管。不要运行 <code>docker compose down -v</code>，除非你明确要删除全部应用数据。
+
+## 常用运维命令
+
+~~~bash
+# 查看服务状态
+docker compose ps
+
+# 持续查看日志
+docker compose logs -f manage-your-node
+
+# 重新构建并启动
+sudo bash install.sh
+
+# 停止服务但保留数据卷
+docker compose down
+
+# 启动已有服务
+docker compose up -d
+~~~
+
+## 常见问题
+
+### 安装完成后无法访问面板
+
+依次检查：
+
+1. <code>docker compose ps</code> 中服务是否健康；
+2. <code>docker compose logs --tail=100 manage-your-node</code> 是否有启动错误；
+3. 云安全组和系统防火墙是否允许当前面板端口；
+4. <code>.env</code> 中的 <code>BIND_ADDRESS</code> 是否为 <code>0.0.0.0</code>；
+5. 如果绑定为 <code>127.0.0.1</code>，是否已通过本机反向代理访问。
+
+### 部署提示必须先信任主机指纹
+
+这是正常的安全流程。第一次测试 SSH 只记录指纹，请从云厂商控制台核对后再批准，随后重新测试。
+
+### 使用普通 SSH 用户时部署失败
+
+普通用户必须具备免密码 sudo 权限。部署任务无法在后台交互输入 sudo 密码。
+
+### 配错外部域名后无法登录
+
+可以通过 SSH 把管理服务器的 loopback 端口转发到本机：
+
+~~~bash
+ssh -L 8787:127.0.0.1:8787 user@管理服务器IP
+~~~
+
+然后打开 <http://127.0.0.1:8787>，进入“设置”修正地址或恢复服务器配置。使用了自定义 <code>PANEL_PORT</code> 时，请同步替换 SSH 转发命令两处的 8787。
+
+### 代理链下发失败
+
+确认每台 VPS：
+
+- 使用的是 native 且状态为“可用”的部署；
+- 链路端口没有被其他程序占用；
+- NAT 公网端口与本机监听端口一致；
+- REALITY 已放行 TCP，SS2022 已同时放行 TCP 和 UDP；
+- 系统使用 systemd，SSH 用户有 root 或免密码 sudo 权限。
+
+## 安全设计
+
+- SSH 密钥、面板密码和 API token 使用 Fernet + scrypt 加密后存入 SQLite；
+- 首次 SSH 主机指纹必须带外核验，指纹变化时拒绝连接；
+- 3x-ui 面板仅监听目标 VPS 的 loopback，API 通过 SSH 隧道访问；
+- 管理端写操作使用与会话绑定的 CSRF 令牌，并校验 Origin；
+- 登录失败次数持久化限流，默认 5 分钟内失败 5 次后锁定 15 分钟；
+- Session Cookie 使用 <code>HttpOnly</code> 和 <code>SameSite=Strict</code>，HTTPS 下启用 <code>Secure</code>；
+- 内置 Host 白名单、请求体上限、安全响应头、订阅限流和持久化审计记录；
+- 容器使用非 root 用户、只读根文件系统、移除 Linux capabilities，并禁止提权。
+
+如果启用 <code>TRUST_X_FORWARDED_FOR</code>，必须同时把 <code>TRUSTED_PROXY_IPS</code> 限制为真实反向代理的来源 IP 或网段。
+
+## 环境变量
+
+通常只需通过安装脚本和 WebUI 配置。需要手动调整时，编辑项目根目录下的 <code>.env</code>，然后重新运行 <code>sudo bash install.sh</code>。
+
+| 变量 | 默认值 | 说明 |
+| --- | --- | --- |
+| <code>ADMIN_USERNAME</code> | <code>admin</code> | 管理员用户名 |
+| <code>PANEL_PORT</code> | <code>8787</code> | Docker 发布到宿主机的面板端口 |
+| <code>BIND_ADDRESS</code> | <code>0.0.0.0</code> | Docker 发布地址；本机反代后改为 <code>127.0.0.1</code> |
+| <code>PUBLIC_ORIGIN</code> | 自动推导 | WebUI 外部地址的首次启动/恢复兜底 |
+| <code>ALLOWED_HOSTS</code> | 自动推导 | 额外允许的 Host，多个值用逗号分隔 |
+| <code>SESSION_HOURS</code> | <code>12</code> | 登录会话有效小时数 |
+| <code>SUBSCRIPTION_RATE_LIMIT</code> | <code>120</code> | 单来源每分钟订阅请求上限 |
+| <code>TRUST_X_FORWARDED_FOR</code> | <code>0</code> | 是否采信反向代理传入的客户端 IP |
+| <code>TRUSTED_PROXY_IPS</code> | <code>127.0.0.1,::1</code> | 允许传递代理头的来源 IP/CIDR |
+| <code>REALITY_CANDIDATES</code> | Yahoo、Apple、Amazon | 自动检测的 <code>host:port</code> 候选列表 |
+| <code>REALITY_DEST</code> | <code>www.yahoo.com:443</code> | 旧部署/单一候选的回落目标 |
+| <code>REALITY_SNI</code> | 目标域名 | 旧部署/单一全局目标的 SNI |
+
+非容器运行还支持：
+
+| 变量 | 默认值 | 说明 |
+| --- | --- | --- |
+| <code>APP_DATA_DIR</code> | <code>data</code> | SQLite 数据目录 |
+| <code>HOST</code> | <code>127.0.0.1</code> | 应用监听地址 |
+| <code>PORT</code> | <code>8787</code> | 应用监听端口 |
+| <code>APP_SECRET</code> | 开发默认值 | 生产环境必须显式设置且至少 16 个字符 |
+| <code>APP_SECRET_FILE</code> | 无 | 从文件读取主密钥，优先于 <code>APP_SECRET</code> |
+| <code>ADMIN_PASSWORD</code> | 无 | 生产环境必须显式设置且至少 12 个字符 |
+| <code>ADMIN_PASSWORD_FILE</code> | 无 | 从文件读取管理员密码，优先于环境变量 |
+| <code>APP_ALLOW_INSECURE</code> | loopback 时开启 | 仅限本地开发，不能与公网监听同时使用 |
+| <code>SESSION_COOKIE_SECURE</code> | HTTPS 时开启 | 是否为 Session Cookie 添加 <code>Secure</code> |
+| <code>MAX_BODY_BYTES</code> | <code>1048576</code> | 请求体大小上限 |
+
+完整示例见 [.env.example](.env.example)。
+
+## 本地开发
+
+需要 Python 3.12：
+
+~~~powershell
+python -m venv .venv
+.venv\Scripts\Activate.ps1
 pip install -r requirements-dev.txt
+
+$env:APP_SECRET = "replace-with-a-long-random-secret"
+$env:ADMIN_USERNAME = "admin"
+$env:ADMIN_PASSWORD = "replace-with-a-strong-password"
+
+python -m app.server
+~~~
+
+浏览器打开 <http://127.0.0.1:8787>。
+
+运行测试：
+
+~~~powershell
 pytest
-```
-
-覆盖：密文（含旧 `v1`）、session / CSRF、持久化登录限流、安全模式配置、
-ASGI 路由与安全响应头、事务回滚、在线备份、订阅令牌轮换、SSH 指纹批准、
-孤儿任务恢复、安装器固定与校验、代理链失败回滚触发。
-
----
+~~~
 
 ## 项目结构
 
-```text
+~~~text
 app/
-  auth.py           Session 签名、校验、登录限流
+  auth.py           登录、Session 与限流
   config.py         环境变量与安全模式
-  database.py       SQLite schema / 迁移（WAL）
-  web_config.py     WebUI 外部地址持久化与运行时安全策略
+  database.py       SQLite schema、迁移与备份
+  maintenance.py    数据库备份和主密钥检查
   provisioning.py   3x-ui 安装脚本生成
-  security.py       密文封装（Fernet + scrypt）
-  server.py         Starlette 路由、中间件与 Uvicorn 启动
-  maintenance.py    备份与数据库/主密钥检查
-  services.py       业务逻辑、部署、代理链下发与回滚
-  ssh_runner.py     Paramiko + SSH 主机密钥捕获/批准/固定
-  ssh_tunnel.py     SSH 本地端口转发（面板 API）
+  security.py       敏感信息加密
+  server.py         Starlette 路由与中间件
+  services.py       部署、用户、订阅和代理链逻辑
+  ssh_runner.py     SSH 连接与主机指纹
+  ssh_tunnel.py     3x-ui API 的 SSH 隧道
+  web_config.py     WebUI 外部地址与运行时安全策略
   xui_api.py        3x-ui API 客户端
-  static/           前端 HTML/CSS/JS
-tests/              pytest
-examples/           Caddy / Nginx 反向代理示例
-.env.example        环境变量模板
-```
-
----
+  static/           前端页面、样式与脚本
+examples/           Caddy / Nginx 配置示例
+tests/              pytest 测试
+install.sh          Linux 一键安装与升级脚本
+docker-compose.yml  容器编排配置
+~~~
 
 ## 已知限制
 
-- 单管理员，无多用户 / RBAC  
-- 代理链 Xray 服务不出现在 3x-ui 面板里  
-- NAT 代理链目前只支持公网端口与本机监听端口相同的对等映射，不支持端口转换
-- 远端失败清理是 best-effort  
-- 订阅 token 泄露即可读取对应订阅内容  
-- 暂不支持带 passphrase 的 SSH 私钥粘贴  
-- 无内置 MFA；正式环境应再通过 VPN、访问控制或支持 MFA 的身份代理保护管理面
-- 支持文件型 secret，但未直接集成云 KMS / Vault，也未提供在线主密钥轮换
+- 单管理员，不支持多用户或 RBAC；
+- 不提供内置 HTTPS 和 MFA；
+- 代理链的 Xray 服务不会显示在 3x-ui 面板中；
+- NAT 代理链不支持公网端口与本机端口转换；
+- 暂不支持直接粘贴带 passphrase 的 SSH 私钥；
+- 远端失败清理为 best-effort，需要在异常后检查残留服务和端口；
+- 订阅令牌本身就是访问凭据，泄露后需立即轮换；
+- 主密钥没有在线轮换流程，也未直接集成 KMS 或 Vault。
