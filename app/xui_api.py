@@ -243,6 +243,31 @@ class XuiApiClient:
             raise XuiApiError("3x-ui did not return client details")
         return client
 
+    def get_inbound(self, inbound_id: int) -> dict[str, Any]:
+        result = self.get_json(f"panel/api/inbounds/get/{inbound_id}")
+        inbound = result.get("obj")
+        if not isinstance(inbound, dict):
+            raise XuiApiError("3x-ui did not return inbound details")
+        return inbound
+
+    def client_traffic_totals(self, inbound_id: int) -> dict[str, int]:
+        """Return a mapping of client email to total (up + down) bytes used."""
+        inbound = self.get_inbound(inbound_id)
+        stats = inbound.get("clientStats")
+        totals: dict[str, int] = {}
+        if not isinstance(stats, list):
+            return totals
+        for row in stats:
+            if not isinstance(row, dict):
+                continue
+            email = str(row.get("email") or "")
+            if not email:
+                continue
+            up = int(row.get("up") or 0)
+            down = int(row.get("down") or 0)
+            totals[email] = up + down
+        return totals
+
     def update_client(self, email: str, client: dict[str, Any]) -> None:
         self.post_json(f"panel/api/clients/update/{quote(email, safe='')}", client)
 

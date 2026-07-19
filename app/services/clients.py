@@ -1,4 +1,5 @@
 import math
+import threading
 import uuid
 from contextlib import suppress
 from datetime import UTC, date, datetime, timedelta
@@ -294,6 +295,95 @@ class ClientsService(DeploymentsService):
             ),
         )
         return self.get_client(client_id)
+
+    def refresh_deployment_traffic(self, deployment: dict[str, Any]) -> int:
+        """Pull real per-client usage from 3x-ui into the local database.
+
+        Returns the number of clients whose ``used_bytes`` were updated.
+        """
+        if (
+            deployment.get("install_method") != "native"
+            or deployment.get("status") != "ready"
+            or not deployment.get("xui_inbound_id")
+        ):
+            return 0
+        with self._xui_session(deployment) as xui:
+            xui.wait_ready(seconds=20)
+            xui.login()
+            totals = xui.client_traffic_totals(int(deployment["xui_inbound_id"]))
+        if not totals:
+            return 0
+        stamp = now_iso()
+        updated = 0
+        with self.db.transaction():
+            rows = self.db.query_all(
+                "SELECT id, name, used_bytes FROM clients WHERE deployment_id = ?",
+                (deployment["id"],),
+            )
+            for row in rows:
+                if row["name"] not in totals:
+                    continue
+                used = totals[row["name"]]
+                if used == row["used_bytes"]:
+                    continue
+                self.db.execute(
+                    "UPDATE clients SET used_bytes = ?, updated_at = ? WHERE id = ?",
+                    (used, stamp, row["id"]),
+                )
+                updated += 1
+        return updated
+
+    def refresh_all_traffic(self) -> dict[str, Any]:
+        """Refresh usage for every ready native deployment.
+
+        Failures on individual deployments (e.g. a temporarily unreachable
+        host) are collected instead of aborting the whole sweep.
+        """
+        summaries = self.list_deployments()
+        target_ids = [
+            item["id"]
+            for item in summaries
+            if item.get("status") == "ready"
+            and item.get("install_method") == "native"
+            and item.get("xui_inbound_id")
+        ]
+        updated = 0
+        synced = 0
+        errors: list[dict[str, str]] = []
+        for deployment_id in target_ids:
+            try:
+                deployment = self.get_deployment(deployment_id)
+                updated += self.refresh_deployment_traffic(deployment)
+                synced += 1
+            except Exception as exc:  # noqa: BLE001
+                errors.append({"deploymentId": deployment_id, "error": str(exc)})
+        return {
+            "deployments": synced,
+            "updatedClients": updated,
+            "errors": errors,
+        }
+
+    def start_traffic_sync(self, interval_seconds: int) -> None:
+        """Start a background loop that periodically syncs traffic usage."""
+        if interval_seconds <= 0 or self._traffic_thread is not None:
+            return
+        self._traffic_stop.clear()
+
+        def loop() -> None:
+            while not self._traffic_stop.wait(interval_seconds):
+                with suppress(Exception):
+                    self.refresh_all_traffic()
+
+        thread = threading.Thread(target=loop, name="traffic-sync", daemon=True)
+        self._traffic_thread = thread
+        thread.start()
+
+    def stop_traffic_sync(self) -> None:
+        self._traffic_stop.set()
+        thread = self._traffic_thread
+        if thread is not None:
+            thread.join(timeout=5)
+            self._traffic_thread = None
 
     def reset_client(self, client_id: str) -> dict[str, Any]:
         client = self.get_client(client_id)

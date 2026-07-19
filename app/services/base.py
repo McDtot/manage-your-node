@@ -28,6 +28,8 @@ class ServicesBase:
         self.ssh = SshRunner(secret_box, db)
         self._workers: set[threading.Thread] = set()
         self._workers_lock = threading.Lock()
+        self._traffic_stop = threading.Event()
+        self._traffic_thread: threading.Thread | None = None
 
     def _track_worker(self, worker: threading.Thread) -> None:
         with self._workers_lock:
