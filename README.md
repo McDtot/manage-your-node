@@ -387,7 +387,7 @@ app/
   provisioning.py   3x-ui 安装脚本生成
   security.py       敏感信息加密
   server.py         Starlette 路由与中间件
-  services.py       部署、用户、订阅和代理链逻辑
+  services/         部署、用户、订阅和代理链逻辑(按领域拆分)
   ssh_runner.py     SSH 连接与主机指纹
   ssh_tunnel.py     3x-ui API 的 SSH 隧道
   web_config.py     WebUI 外部地址与运行时安全策略
