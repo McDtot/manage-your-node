@@ -3,7 +3,7 @@ import logging
 import threading
 import time
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
@@ -13,7 +13,13 @@ from starlette.concurrency import run_in_threadpool
 from starlette.middleware import Middleware
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
-from starlette.responses import FileResponse, JSONResponse, PlainTextResponse, RedirectResponse, Response
+from starlette.responses import (
+    FileResponse,
+    JSONResponse,
+    PlainTextResponse,
+    RedirectResponse,
+    Response,
+)
 from starlette.routing import Route
 
 from .auth import AuthManager
@@ -93,7 +99,7 @@ class AuditMiddleware(BaseHTTPMiddleware):
             token = _cookie_value(request.cookies, SESSION_COOKIE_NAMES)
             actor = self.auth.admin_username if self.auth.verify_session(token) else "anonymous"
             client_ip = request.client.host if request.client else "unknown"
-            stamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
+            stamp = datetime.now(UTC).isoformat(timespec="seconds")
             try:
                 await run_in_threadpool(
                     self.db.execute,

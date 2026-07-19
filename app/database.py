@@ -1,9 +1,10 @@
 import json
 import sqlite3
 import threading
+from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any
 
 
 class Database:
@@ -362,6 +363,13 @@ class Database:
         with self._lock:
             row = self._conn.execute(sql, params).fetchone()
             return dict(row) if row else None
+
+    def query_row(self, sql: str, params: tuple[Any, ...] = ()) -> dict[str, Any]:
+        """Like query_one, for queries guaranteed to return a row (e.g. aggregates)."""
+        row = self.query_one(sql, params)
+        if row is None:
+            raise RuntimeError("query unexpectedly returned no rows")
+        return row
 
     def execute(self, sql: str, params: tuple[Any, ...] = ()) -> None:
         with self._lock:

@@ -1,15 +1,15 @@
 import base64
 import hashlib
 import io
-import socket
 import time
 from collections.abc import Callable
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 import paramiko
 
 from .security import SecretBox
+
 
 def _build_host_key_classes() -> dict[str, type]:
     mapping: dict[str, str] = {
@@ -33,7 +33,7 @@ def _build_host_key_classes() -> dict[str, type]:
 _HOST_KEY_CLASSES = _build_host_key_classes()
 
 
-def _private_key_classes() -> tuple[type, ...]:
+def _private_key_classes() -> tuple[type[paramiko.PKey], ...]:
     names = ("Ed25519Key", "RSAKey", "ECDSAKey", "DSSKey")
     return tuple(getattr(paramiko, name) for name in names if getattr(paramiko, name, None))
 
@@ -108,11 +108,14 @@ class SshRunner:
         command = " ".join(remote_args)
         client = self._connect(server)
         try:
-            channel = client.get_transport().open_session()
+            transport = client.get_transport()
+            if transport is None:
+                raise SshError("SSH connection lost before the command could start")
+            channel = transport.open_session()
             channel.settimeout(1.0)
             channel.exec_command(f"{command} 2>&1")
             if stdin is not None:
-                channel.sendall(stdin)
+                channel.sendall(stdin.encode("utf-8"))
                 channel.shutdown_write()
 
             return self._read_channel(channel, log, timeout)
@@ -148,7 +151,7 @@ class SshRunner:
                 key.get_base64(),
                 _fingerprint(key),
                 1 if trusted else 0,
-                datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                datetime.now(UTC).isoformat(timespec="seconds"),
             ),
         )
 
@@ -239,13 +242,7 @@ class SshRunner:
                 "This may indicate a man-in-the-middle attack. If the host was legitimately "
                 "reinstalled, remove its stored host key and re-test the connection."
             ) from exc
-        except (
-            paramiko.AuthenticationException,
-            paramiko.BadAuthenticationType,
-            paramiko.SSHException,
-            socket.timeout,
-            OSError,
-        ) as exc:
+        except (TimeoutError, paramiko.AuthenticationException, paramiko.BadAuthenticationType, paramiko.SSHException, OSError) as exc:
             client.close()
             raise SshError(f"SSH connection failed: {exc}") from exc
 

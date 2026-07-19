@@ -57,7 +57,7 @@ class SecretBox:
         if not hmac.compare_digest(mac, expected):
             raise ValueError("Secret authentication failed")
         stream = self._legacy_stream(nonce, len(cipher))
-        data = bytes(a ^ b for a, b in zip(cipher, stream))
+        data = bytes(a ^ b for a, b in zip(cipher, stream, strict=True))
         return data.decode("utf-8")
 
     def _legacy_stream(self, nonce: bytes, length: int) -> bytes:

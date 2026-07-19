@@ -110,7 +110,7 @@ def _normalize_origin(value: str) -> str:
             or not all(char.isalnum() or char == "-" for char in label)
             for label in labels
         ):
-            raise ConfigError("PUBLIC_ORIGIN contains an invalid hostname")
+            raise ConfigError("PUBLIC_ORIGIN contains an invalid hostname") from None
 
     rendered_host = f"[{normalized_host}]" if ":" in normalized_host else normalized_host
     default_port = 443 if parsed.scheme.lower() == "https" else 80

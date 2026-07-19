@@ -23,7 +23,7 @@ def _legacy_seal(secret: str, value: str) -> str:
 
     data = value.encode("utf-8")
     nonce = os.urandom(16)
-    cipher = bytes(a ^ b for a, b in zip(data, stream(nonce, len(data))))
+    cipher = bytes(a ^ b for a, b in zip(data, stream(nonce, len(data)), strict=True))
     mac = hmac.new(key, b"v1" + nonce + cipher, hashlib.sha256).digest()
     return "v1." + base64.urlsafe_b64encode(nonce + mac + cipher).decode("ascii")
 

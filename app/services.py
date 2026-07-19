@@ -10,9 +10,10 @@ import socket
 import threading
 import time
 import uuid
-from contextlib import contextmanager
 from collections.abc import Iterator
-from datetime import date, datetime, time as datetime_time, timedelta, timezone
+from contextlib import contextmanager, suppress
+from datetime import UTC, date, datetime, timedelta
+from datetime import time as datetime_time
 from typing import Any
 from urllib.parse import parse_qs, quote, unquote, urlencode, urlparse
 
@@ -24,7 +25,6 @@ from .security import SecretBox
 from .ssh_runner import SshRunner
 from .ssh_tunnel import SshTunnel
 from .xui_api import XuiApiClient
-
 
 DEFAULT_REALITY_DEST = "www.yahoo.com:443"
 DEFAULT_REALITY_CANDIDATES = (
@@ -278,7 +278,7 @@ def _deployment_reality_settings(deployment: dict[str, Any]) -> tuple[str, str]:
 
 
 def now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+    return datetime.now(UTC).isoformat(timespec="seconds")
 
 
 def new_id(prefix: str) -> str:
@@ -511,18 +511,18 @@ class AppServices:
         return len(orphaned)
 
     def summary(self) -> dict[str, Any]:
-        servers = self.db.query_one("SELECT COUNT(*) AS count FROM servers")["count"]
-        ready = self.db.query_one(
+        servers = self.db.query_row("SELECT COUNT(*) AS count FROM servers")["count"]
+        ready = self.db.query_row(
             "SELECT COUNT(*) AS count FROM deployments WHERE status = 'ready'"
         )["count"]
-        clients = self.db.query_one("SELECT COUNT(*) AS count FROM clients")["count"]
-        chains = self.db.query_one("SELECT COUNT(*) AS count FROM proxy_chains")["count"]
-        traffic = self.db.query_one(
+        clients = self.db.query_row("SELECT COUNT(*) AS count FROM clients")["count"]
+        chains = self.db.query_row("SELECT COUNT(*) AS count FROM proxy_chains")["count"]
+        traffic = self.db.query_row(
             "SELECT COALESCE(SUM(used_bytes), 0) AS used, "
             "COALESCE(SUM(quota_bytes), 0) AS quota FROM clients"
         )
-        soon = (datetime.now(timezone.utc) + timedelta(days=7)).date().isoformat()
-        expiring = self.db.query_one(
+        soon = (datetime.now(UTC) + timedelta(days=7)).date().isoformat()
+        expiring = self.db.query_row(
             "SELECT COUNT(*) AS count FROM clients "
             "WHERE enabled = 1 AND expires_at <> '' AND expires_at <= ?",
             (soon,),
@@ -1100,7 +1100,7 @@ exit 43
             job = self.db.query_one("SELECT id FROM jobs WHERE id = ?", (job_id,))
             if not job:
                 return
-            next_seq = self.db.query_one(
+            next_seq = self.db.query_row(
                 "SELECT COALESCE(MAX(seq), 0) + 1 AS value FROM job_logs WHERE job_id = ?",
                 (job_id,),
             )["value"]
@@ -2248,7 +2248,7 @@ echo "Removed $SERVICE_NAME"
         never_expires = boolean_field(payload, "neverExpires")
         expires_at = "" if never_expires else str(payload.get("expiresAt", "")).strip()
         if not never_expires and not expires_at:
-            expires_at = (datetime.now(timezone.utc) + timedelta(days=30)).date().isoformat()
+            expires_at = (datetime.now(UTC) + timedelta(days=30)).date().isoformat()
         if expires_at:
             try:
                 date.fromisoformat(expires_at)
@@ -2354,7 +2354,7 @@ echo "Removed $SERVICE_NAME"
         if not expires_at:
             return 0
         parsed = date.fromisoformat(expires_at)
-        dt = datetime.combine(parsed, datetime_time.min, tzinfo=timezone.utc)
+        dt = datetime.combine(parsed, datetime_time.min, tzinfo=UTC)
         return int(dt.timestamp() * 1000)
 
     def get_client(self, client_id: str) -> dict[str, Any]:
@@ -2442,10 +2442,8 @@ echo "Removed $SERVICE_NAME"
                         )
                 except Exception:  # noqa: BLE001
                     pass
-                try:
+                with suppress(Exception):
                     xui.restart_xray()
-                except Exception:  # noqa: BLE001
-                    pass
         else:
             share_link = self._default_share_link(deployment, client["uuid"], name)
         stamp = now_iso()
@@ -2496,7 +2494,7 @@ echo "Removed $SERVICE_NAME"
         deployment = self.get_deployment(deployment_id)
         self._assert_not_busy("server", deployment["server_id"])
         chain_logs = self._cleanup_proxy_chains_for_deployments([deployment_id])
-        other_native = self.db.query_one(
+        other_native = self.db.query_row(
             """
             SELECT COUNT(*) AS count
             FROM deployments

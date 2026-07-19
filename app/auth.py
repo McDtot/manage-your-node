@@ -6,7 +6,7 @@ import json
 import secrets
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 
@@ -32,8 +32,8 @@ class AuthManager:
         self.lockout_seconds = lockout_seconds
         self.db = db
         self.cookie_name = cookie_name
-        self._key = hashlib.sha256(f"auth:{app_secret}".encode("utf-8")).digest()
-        self._csrf_key = hashlib.sha256(f"csrf:{app_secret}".encode("utf-8")).digest()
+        self._key = hashlib.sha256(f"auth:{app_secret}".encode()).digest()
+        self._csrf_key = hashlib.sha256(f"csrf:{app_secret}".encode()).digest()
         self._failures: dict[str, list[float]] = {}
         self._locked_until: dict[str, float] = {}
         self._lock = threading.Lock()
@@ -86,7 +86,7 @@ class AuthManager:
                         client_key,
                         json.dumps(attempts),
                         locked_until,
-                        datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                        datetime.now(UTC).isoformat(timespec="seconds"),
                     ),
                 )
             return
