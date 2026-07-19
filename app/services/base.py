@@ -67,6 +67,8 @@ class ServicesBase:
             ("servers", "encrypted_secret"),
             ("deployments", "encrypted_panel_password"),
             ("deployments", "encrypted_api_token"),
+            ("deployments", "encrypted_ss_password"),
+            ("clients", "encrypted_ss_password"),
             ("proxy_chain_nodes", "encrypted_private_key"),
             ("proxy_chain_nodes", "encrypted_ss_password"),
         ]
@@ -327,9 +329,11 @@ class ServicesBase:
             row["subscription_url"] = self._deployment_subscription_url(row["id"])
         encrypted_password = row.pop("encrypted_panel_password", "")
         encrypted_token = row.pop("encrypted_api_token", "")
+        encrypted_ss_password = row.pop("encrypted_ss_password", "")
         if reveal:
             row["panel_password"] = self.secret_box.open(encrypted_password)
             row["api_token"] = self.secret_box.open(encrypted_token)
+            row["ss_password"] = self.secret_box.open(encrypted_ss_password)
 
     def _client_rows(self, client_id: str | None = None) -> list[dict[str, Any]]:
         where = "WHERE c.id = ?" if client_id else ""

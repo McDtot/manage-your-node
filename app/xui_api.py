@@ -134,6 +134,76 @@ class XuiApiClient:
             raise XuiApiError("3x-ui did not return the created inbound id")
         return inbound
 
+    def create_shadowsocks_inbound(
+        self,
+        port: int,
+        remark: str,
+        method: str,
+        server_password: str,
+    ) -> dict[str, Any]:
+        payload = {
+            "enable": True,
+            "remark": remark,
+            "listen": "",
+            "port": port,
+            "protocol": "shadowsocks",
+            "expiryTime": 0,
+            "total": 0,
+            "settings": {
+                "method": method,
+                "password": server_password,
+                "network": "tcp,udp",
+                "clients": [],
+            },
+            "streamSettings": {
+                "network": "tcp",
+            },
+            "sniffing": {
+                "enabled": True,
+                "destOverride": ["http", "tls", "quic", "fakedns"],
+                "metadataOnly": False,
+                "routeOnly": False,
+                "ipsExcluded": [],
+                "domainsExcluded": [],
+            },
+        }
+        result = self.post_json("panel/api/inbounds/add", payload)
+        inbound = result.get("obj")
+        if not isinstance(inbound, dict) or not inbound.get("id"):
+            raise XuiApiError("3x-ui did not return the created inbound id")
+        return inbound
+
+    def create_ss_client(
+        self,
+        inbound_id: int,
+        email: str,
+        password: str,
+        sub_id: str,
+        quota_bytes: int,
+        expires_ms: int,
+        reset_days: int,
+    ) -> list[str]:
+        payload = {
+            "client": {
+                "password": password,
+                "email": email,
+                "limitIp": 0,
+                "totalGB": quota_bytes,
+                "expiryTime": expires_ms,
+                "enable": True,
+                "tgId": 0,
+                "subId": sub_id,
+                "comment": "",
+                "reset": reset_days,
+            },
+            "inboundIds": [inbound_id],
+        }
+        self.post_json("panel/api/clients/add", payload)
+        links = self.get_json(f"panel/api/clients/links/{quote(email, safe='')}").get("obj") or []
+        if not isinstance(links, list):
+            return []
+        return [str(link) for link in links]
+
     def create_client(
         self,
         inbound_id: int,
