@@ -275,6 +275,20 @@ function renderServers() {
     empty("暂无服务器");
 }
 
+function healthLabel(server) {
+  const labels = {
+    reachable: "可达",
+    auth_failed: "认证失败",
+    unreachable: "不可达",
+    new: "未检查",
+  };
+  const latency = Number(server.last_latency_ms);
+  if (server.status === "reachable" && Number.isFinite(latency)) {
+    return `可达 · ${latency} ms`;
+  }
+  return escapeHtml(labels[server.status] || server.status || "未知");
+}
+
 function serverItem(server, options = {}) {
   return `
     <article class="item">
@@ -286,6 +300,8 @@ function serverItem(server, options = {}) {
         ${statusBadge(server.status)}
       </div>
       <div class="meta">认证：${escapeHtml(server.auth_type)} · 密钥：${escapeHtml(server.secret_label)}</div>
+      <div class="meta">健康：${healthLabel(server)} · 最近检查 ${server.last_check_at ? escapeHtml(server.last_check_at) : "从未"}</div>
+      ${server.last_health_error ? `<div class="meta">最近错误：<span class="mono">${escapeHtml(server.last_health_error)}</span></div>` : ""}
       ${server.host_key_fingerprint ? `<div class="meta">SSH 指纹：<span class="mono">${escapeHtml(server.host_key_fingerprint)}</span> · ${server.host_key_trusted ? "已信任" : "等待核验"}</div>` : ""}
       <div class="item-actions">
         <button class="secondary" data-test-server="${server.id}">测试连接</button>
@@ -880,6 +896,21 @@ function bindEvents() {
       );
     } catch (error) {
       toast(error instanceof Error ? error.message : "刷新用量失败");
+    } finally {
+      button.disabled = false;
+    }
+  });
+  $("#healthCheckBtn").addEventListener("click", async (event) => {
+    const button = event.currentTarget;
+    button.disabled = true;
+    try {
+      const result = await api("/api/servers/health-check", { method: "POST", body: "{}" });
+      await refresh();
+      toast(
+        `健康检查完成：${result.reachable} 可达 · ${result.authFailed} 认证失败 · ${result.unreachable} 不可达`,
+      );
+    } catch (error) {
+      toast(error instanceof Error ? error.message : "健康检查失败");
     } finally {
       button.disabled = false;
     }
