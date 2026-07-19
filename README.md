@@ -7,6 +7,16 @@
 > [!IMPORTANT]
 > 本项目适合个人或小规模运维，当前为单管理员模式。应用本身不提供 HTTPS；公网使用前请配置反向代理和 TLS，并遵守所在地法律法规及服务商条款。
 
+## v0.10.0 更新亮点
+
+- 单节点部署新增 Shadowsocks 2022，可与现有 VLESS + REALITY 节点混合订阅；
+- 周期性同步 3x-ui 真实流量用量，并支持从 WebUI 手动刷新；
+- 周期性检查节点 SSH 可达性与 TCP 延迟，并支持一键批量健康检查；
+- 分享链接、订阅和代理链入口均可生成二维码；
+- 将大型服务模块按领域拆分，并加入 Ruff、Mypy、Pytest 与 Docker 构建 CI。
+
+完整变更和升级注意事项见 [v0.10.0 发布说明](https://github.com/McDtot/manage-your-node/releases/tag/v0.10.0)。
+
 ## 主要功能
 
 | 功能 | 说明 |
@@ -214,6 +224,9 @@ git pull --ff-only
 sudo bash install.sh
 ~~~
 
+> [!NOTE]
+> 从 v0.9.1 升级到 v0.10.0 时，应用会自动添加健康监控和 Shadowsocks 2022 所需的数据库列；重建镜像时会自动安装二维码依赖 `segno`。升级前仍建议先备份数据库、`.env` 与 `secrets/`。
+
 安装器会保留现有配置、主密钥、管理员密码和 Docker 数据卷，并在替换运行中服务前检查数据库与主密钥是否匹配。
 
 升级前建议先备份。不要删除或重新生成原来的 <code>secrets/app_secret.txt</code>，否则数据库中的 SSH 密钥、面板密码和 API token 将无法解密。
@@ -329,6 +342,8 @@ ssh -L 8787:127.0.0.1:8787 user@管理服务器IP
 | <code>ALLOWED_HOSTS</code> | 自动推导 | 额外允许的 Host，多个值用逗号分隔 |
 | <code>SESSION_HOURS</code> | <code>12</code> | 登录会话有效小时数 |
 | <code>SUBSCRIPTION_RATE_LIMIT</code> | <code>120</code> | 单来源每分钟订阅请求上限 |
+| <code>TRAFFIC_SYNC_SECONDS</code> | <code>300</code> | 从 3x-ui 同步真实流量用量的周期；设为 <code>0</code> 可关闭 |
+| <code>HEALTH_CHECK_SECONDS</code> | <code>120</code> | 批量检查节点健康状态的周期；设为 <code>0</code> 可关闭 |
 | <code>TRUST_X_FORWARDED_FOR</code> | <code>0</code> | 是否采信反向代理传入的客户端 IP |
 | <code>TRUSTED_PROXY_IPS</code> | <code>127.0.0.1,::1</code> | 允许传递代理头的来源 IP/CIDR |
 | <code>REALITY_CANDIDATES</code> | Yahoo、Apple、Amazon | 自动检测的 <code>host:port</code> 候选列表 |
