@@ -348,6 +348,7 @@ function chainItem(chain) {
         ${subscriptionReady ? `<button class="secondary" data-copy="${escapeHtml(base64SubscriptionUrl)}">复制通用 Base64 订阅</button>` : ""}
         <button class="secondary" data-rotate-chain-token="${chain.id}">轮换订阅令牌</button>
         ${chain.share_link ? `<button class="secondary" data-copy="${escapeHtml(chain.share_link)}">复制入口节点</button>` : ""}
+        ${chain.share_link ? `<button class="ghost" data-qr="${escapeHtml(chain.share_link)}" data-qr-title="${escapeHtml(chain.name)}">二维码</button>` : ""}
         <button class="danger" data-delete-chain="${chain.id}">删除</button>
       </div>
     </article>
@@ -564,6 +565,7 @@ function subscriptionItem(subscription) {
       <div class="sub-link-row compact">
         <span class="mono">${escapeHtml(subscriptionUrl)}</span>
         <button class="secondary" data-copy="${escapeHtml(subscriptionUrl)}">复制链接</button>
+        <button class="ghost" data-qr="${escapeHtml(subscriptionUrl)}" data-qr-title="${escapeHtml(subscription.name)}">二维码</button>
       </div>
       <div class="meta">普通节点流量：剩余 ${bytes(subscription.remaining_bytes)} · 已用 ${bytes(subscription.used_bytes)} / 总量 ${bytes(subscription.quota_bytes)}</div>
       <div class="item-actions">
@@ -624,6 +626,7 @@ function clientItem(client) {
       <div class="mono">${escapeHtml(client.share_link)}</div>
       <div class="item-actions">
         <button class="secondary" data-copy="${escapeHtml(client.share_link)}">复制连接</button>
+        <button class="ghost" data-qr="${escapeHtml(client.share_link)}" data-qr-title="${escapeHtml(client.name)}">二维码</button>
         <button class="ghost" data-edit-client="${client.id}">编辑</button>
         <button class="ghost" data-reset-client="${client.id}">重置流量</button>
         <button class="ghost" data-toggle-client="${client.id}" data-enabled="${client.enabled ? 0 : 1}">
@@ -649,6 +652,20 @@ function renderSelects() {
 
 function empty(text) {
   return `<div class="empty">${text}</div>`;
+}
+
+function openQr(data, title) {
+  const value = String(data || "");
+  if (!value) return toast("没有可生成二维码的内容");
+  const absolute = value.startsWith("/") ? new URL(value, window.location.origin).href : value;
+  $("#qrImage").src = `/api/qrcode?data=${encodeURIComponent(absolute)}`;
+  $("#qrTitle").textContent = title ? `二维码 · ${title}` : "二维码";
+  $("#qrDialog").showModal();
+}
+
+function closeQr() {
+  $("#qrDialog").close();
+  $("#qrImage").removeAttribute("src");
 }
 
 function openClientEdit(clientId) {
@@ -849,6 +866,24 @@ function bindEvents() {
     button.addEventListener("click", () => setSection(button.dataset.sectionJump));
   });
   $("#refreshBtn").addEventListener("click", () => refresh().then(() => toast("已刷新")));
+  $("#refreshTrafficBtn").addEventListener("click", async (event) => {
+    const button = event.currentTarget;
+    button.disabled = true;
+    try {
+      const result = await api("/api/traffic/refresh", { method: "POST", body: "{}" });
+      const failed = (result.errors || []).length;
+      await refresh();
+      toast(
+        failed
+          ? `已同步 ${result.deployments} 个部署，${failed} 个失败`
+          : `已同步 ${result.deployments} 个部署的用量`,
+      );
+    } catch (error) {
+      toast(error instanceof Error ? error.message : "刷新用量失败");
+    } finally {
+      button.disabled = false;
+    }
+  });
   $("#logoutBtn").addEventListener("click", () => logout());
 
   $("#webSettingsForm").addEventListener("submit", async (event) => {
@@ -1140,6 +1175,14 @@ function bindEvents() {
 
     if (target.dataset.closeClientEdit !== undefined) {
       closeClientEdit();
+    }
+
+    if (target.dataset.closeQr !== undefined) {
+      closeQr();
+    }
+
+    if (target.dataset.qr !== undefined) {
+      openQr(target.dataset.qr, target.dataset.qrTitle);
     }
 
     if (target.dataset.closeSubscriptionEdit !== undefined) {
