@@ -174,10 +174,13 @@
               </label>
               <label>
                 协议模板
-                <select name="protocol">
+                <select name="protocol" id="deployProtocol">
                   <option value="VLESS + REALITY">VLESS + REALITY</option>
+                  <option value="Shadowsocks 2022">Shadowsocks 2022</option>
                 </select>
+                <span class="meta">Shadowsocks 2022 使用 2022-blake3-aes-256-gcm，需要 TCP + UDP 端口放行，无需伪装域名。</span>
               </label>
+              <div id="realityFields">
               <label>
                 REALITY 伪装目标
                 <select name="realityMode" id="realityMode">
@@ -197,6 +200,7 @@
                     <input name="realitySni" placeholder="默认使用目标域名" />
                   </label>
                 </div>
+              </div>
               </div>
               <div class="row">
                 <label>

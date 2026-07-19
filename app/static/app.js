@@ -821,13 +821,16 @@ async function pollJob(jobId) {
 }
 
 function syncRealityTargetFields() {
-  const manual = $("#realityMode").value === "manual";
+  const isReality = $("#deployProtocol").value === "VLESS + REALITY";
+  $("#realityFields").hidden = !isReality;
+  const manual = isReality && $("#realityMode").value === "manual";
   $("#realityManualFields").hidden = !manual;
   $("#deployForm").realityDest.required = manual;
 }
 
 function bindEvents() {
   $("#realityMode").addEventListener("change", syncRealityTargetFields);
+  $("#deployProtocol").addEventListener("change", syncRealityTargetFields);
   syncRealityTargetFields();
   const clientForm = $("#clientForm");
   const clientEditForm = $("#clientEditForm");
