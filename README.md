@@ -13,7 +13,7 @@
 | --- | --- |
 | Web 控制台 | 中文界面，登录鉴权，集中查看服务器、部署、用户和任务状态 |
 | 服务器管理 | 保存 VPS SSH 信息、测试连通性，并在首次连接时人工核验主机指纹 |
-| 节点部署 | 通过 SSH 安装固定版本的 3x-ui，自动创建 VLESS + REALITY 入站 |
+| 节点部署 | 通过 SSH 安装固定版本的 3x-ui，自动创建 VLESS + REALITY 或 Shadowsocks 2022 入站 |
 | 用户管理 | 同一节点可创建多个独立用户，支持启停、流量额度、手动/周期重置和到期时间 |
 | 订阅分发 | 按需创建订阅，自由组合普通用户和代理链，并为每个条目设置显示名称 |
 | 代理链 | 将多个可用节点按顺序组成入口、中继和出口，节点间支持 REALITY 或 SS2022 |
@@ -104,9 +104,9 @@ sudo bash install.sh --admin-password-file /root/manage-node-admin-password
 
 进入“部署”并选择已通过 SSH 测试的服务器：
 
-- 协议模板：当前使用 VLESS + REALITY；
-- REALITY 伪装目标：建议选择“自动检测并固定”；
-- 代理端口：默认 443，必须在目标 VPS 上可从公网访问；
+- 协议模板：可选 VLESS + REALITY 或 Shadowsocks 2022（2022-blake3-aes-256-gcm）；
+- REALITY 伪装目标：仅 VLESS + REALITY 需要，建议选择“自动检测并固定”；
+- 代理端口：默认 443，必须在目标 VPS 上可从公网访问；Shadowsocks 2022 需同时放行 TCP 和 UDP；
 - 面板端口：可留空自动生成，仅通过 SSH 隧道访问，无需向公网开放。
 
 部署完成并显示“可用”后，3x-ui 面板会被限制在目标 VPS 的 <code>127.0.0.1</code>，Manage Your Node 通过固定主机指纹的 SSH 隧道调用其 API。
