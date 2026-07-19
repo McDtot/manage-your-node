@@ -3,17 +3,17 @@ import uuid
 from contextlib import suppress
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
-from urllib.parse import quote
 
 from .deployments import DeploymentsService
 from .helpers import (
+    DEPLOYMENT_PROTOCOL_SHADOWSOCKS_2022,
     _normalize_client_share_link_host,
     boolean_field,
     new_id,
+    new_ss2022_password,
     now_iso,
     require_text,
     traffic_reset_days_field,
-    url_host,
 )
 
 
@@ -65,10 +65,13 @@ class ClientsService(DeploymentsService):
         if len(name) > 128:
             raise ValueError("name must be 128 characters or fewer")
         self._assert_user_name_available(deployment_id, name)
-        tag = quote(name)
-        share_link = (
-            f"vless://{client_uuid}@{url_host(deployment['host'])}:{deployment['proxy_port']}"
-            f"?security=reality&type=tcp&flow=xtls-rprx-vision#{tag}"
+        is_shadowsocks = deployment.get("protocol") == DEPLOYMENT_PROTOCOL_SHADOWSOCKS_2022
+        ss_password = new_ss2022_password() if is_shadowsocks else ""
+        share_link = self._default_share_link(
+            deployment,
+            client_uuid,
+            name,
+            ss_password=ss_password,
         )
         sub_id = client_id[-12:]
         if (
@@ -79,15 +82,27 @@ class ClientsService(DeploymentsService):
             with self._xui_session(deployment) as xui:
                 xui.wait_ready(seconds=30)
                 xui.login()
-                links = xui.create_client(
-                    inbound_id=int(deployment["xui_inbound_id"]),
-                    email=name,
-                    client_uuid=client_uuid,
-                    sub_id=sub_id,
-                    quota_bytes=quota_bytes,
-                    expires_ms=self._expires_ms(expires_at),
-                    reset_days=traffic_reset_days,
-                )
+                if is_shadowsocks:
+                    xui.create_ss_client(
+                        inbound_id=int(deployment["xui_inbound_id"]),
+                        email=name,
+                        password=ss_password,
+                        sub_id=sub_id,
+                        quota_bytes=quota_bytes,
+                        expires_ms=self._expires_ms(expires_at),
+                        reset_days=traffic_reset_days,
+                    )
+                    links = []
+                else:
+                    links = xui.create_client(
+                        inbound_id=int(deployment["xui_inbound_id"]),
+                        email=name,
+                        client_uuid=client_uuid,
+                        sub_id=sub_id,
+                        quota_bytes=quota_bytes,
+                        expires_ms=self._expires_ms(expires_at),
+                        reset_days=traffic_reset_days,
+                    )
             if links:
                 share_link = _normalize_client_share_link_host(
                     links[0],
@@ -99,10 +114,10 @@ class ClientsService(DeploymentsService):
                 """
                 INSERT INTO clients (
                     id, deployment_id, name, uuid, quota_bytes, used_bytes,
-                    traffic_reset_days, expires_at, enabled, share_link,
-                    subscription_url,
+                    traffic_reset_days, expires_at, enabled, encrypted_ss_password,
+                    share_link, subscription_url,
                     created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     client_id,
@@ -114,6 +129,7 @@ class ClientsService(DeploymentsService):
                     traffic_reset_days,
                     expires_at,
                     1,
+                    self.secret_box.seal(ss_password),
                     share_link,
                     deployment["subscription_url"],
                     stamp,
@@ -156,6 +172,15 @@ class ClientsService(DeploymentsService):
             raise ValueError("用户不存在")
         return rows[0]
 
+    def _client_ss_password(self, client_id: str) -> str:
+        row = self.db.query_one(
+            "SELECT encrypted_ss_password FROM clients WHERE id = ?",
+            (client_id,),
+        )
+        if not row:
+            return ""
+        return self.secret_box.open(row["encrypted_ss_password"])
+
     def update_client(self, client_id: str, payload: dict[str, Any]) -> dict[str, Any]:
         client = self.get_client(client_id)
         deployment = self.get_deployment(client["deployment_id"])
@@ -197,6 +222,8 @@ class ClientsService(DeploymentsService):
             except ValueError as exc:
                 raise ValueError("expiresAt must be an ISO date (YYYY-MM-DD)") from exc
         enabled = 1 if bool(payload.get("enabled", client["enabled"])) else 0
+        is_shadowsocks = deployment.get("protocol") == DEPLOYMENT_PROTOCOL_SHADOWSOCKS_2022
+        ss_password = self._client_ss_password(client_id) if is_shadowsocks else ""
         share_link = client["share_link"]
         if (
             deployment.get("install_method") == "native"
@@ -211,9 +238,10 @@ class ClientsService(DeploymentsService):
                 if not isinstance(remote_client, dict):
                     raise ValueError("3x-ui client payload is invalid")
                 updated_remote = dict(remote_client)
-                remote_uuid = str(updated_remote.get("uuid") or client["uuid"])
-                updated_remote["id"] = remote_uuid
-                updated_remote.pop("uuid", None)
+                if not is_shadowsocks:
+                    remote_uuid = str(updated_remote.get("uuid") or client["uuid"])
+                    updated_remote["id"] = remote_uuid
+                    updated_remote.pop("uuid", None)
                 if isinstance(updated_remote.get("allowedIPs"), str):
                     updated_remote["allowedIPs"] = [
                         item.strip()
@@ -226,19 +254,26 @@ class ClientsService(DeploymentsService):
                 updated_remote["reset"] = traffic_reset_days
                 updated_remote["enable"] = bool(enabled)
                 xui.update_client(client["name"], updated_remote)
-                try:
-                    links = xui.client_links(name)
-                    if links:
-                        share_link = _normalize_client_share_link_host(
-                            links[0],
-                            deployment["host"],
-                        )
-                except Exception:  # noqa: BLE001
-                    pass
+                if is_shadowsocks:
+                    share_link = self._default_share_link(
+                        deployment, client["uuid"], name, ss_password=ss_password
+                    )
+                else:
+                    try:
+                        links = xui.client_links(name)
+                        if links:
+                            share_link = _normalize_client_share_link_host(
+                                links[0],
+                                deployment["host"],
+                            )
+                    except Exception:  # noqa: BLE001
+                        pass
                 with suppress(Exception):
                     xui.restart_xray()
         else:
-            share_link = self._default_share_link(deployment, client["uuid"], name)
+            share_link = self._default_share_link(
+                deployment, client["uuid"], name, ss_password=ss_password
+            )
         stamp = now_iso()
         self.db.execute(
             """

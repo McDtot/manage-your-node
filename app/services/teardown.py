@@ -6,9 +6,14 @@ from typing import Any
 
 from ..provisioning import native_3xui_script
 from .helpers import (
+    DEPLOYMENT_PROTOCOL_SHADOWSOCKS_2022,
+    DEPLOYMENT_PROTOCOL_VLESS_REALITY,
+    DEPLOYMENT_PROTOCOLS,
+    DEPLOYMENT_SS_METHOD,
     _redact_native_install_log,
     host_field,
     new_id,
+    new_ss2022_password,
     now_iso,
     parse_reality_destination,
     port_field,
@@ -30,26 +35,33 @@ class TeardownService(SubscriptionsService):
         panel_port = port_field(payload, "panelPort", random.randint(32000, 39000))
         if proxy_port == panel_port:
             raise ValueError("proxyPort and panelPort must be different")
-        protocol = str(payload.get("protocol", "VLESS + REALITY")).strip()
-        if protocol != "VLESS + REALITY":
-            raise ValueError("only VLESS + REALITY is currently supported")
+        protocol = str(payload.get("protocol", DEPLOYMENT_PROTOCOL_VLESS_REALITY)).strip()
+        if protocol not in DEPLOYMENT_PROTOCOLS:
+            raise ValueError("only VLESS + REALITY and Shadowsocks 2022 are supported")
         install_method = str(payload.get("installMethod", "native")).strip() or "native"
         if install_method != "native":
             raise ValueError("only native deployments are supported")
-        reality_mode = str(payload.get("realityMode", "auto")).strip().lower()
-        if reality_mode not in {"auto", "manual"}:
-            raise ValueError("realityMode must be auto or manual")
-        if reality_mode == "manual":
-            selected_reality_dest, target_host = parse_reality_destination(
-                require_text(payload, "realityDest")
-            )
-            selected_reality_sni = str(payload.get("realitySni", "")).strip()
-            selected_reality_sni = host_field(
-                {"realitySni": selected_reality_sni or target_host},
-                "realitySni",
-            )
-        else:
+        is_shadowsocks = protocol == DEPLOYMENT_PROTOCOL_SHADOWSOCKS_2022
+        if is_shadowsocks:
+            reality_mode = "manual"
             selected_reality_dest, selected_reality_sni = "", ""
+            ss_password = new_ss2022_password()
+        else:
+            ss_password = ""
+            reality_mode = str(payload.get("realityMode", "auto")).strip().lower()
+            if reality_mode not in {"auto", "manual"}:
+                raise ValueError("realityMode must be auto or manual")
+            if reality_mode == "manual":
+                selected_reality_dest, target_host = parse_reality_destination(
+                    require_text(payload, "realityDest")
+                )
+                selected_reality_sni = str(payload.get("realitySni", "")).strip()
+                selected_reality_sni = host_field(
+                    {"realitySni": selected_reality_sni or target_host},
+                    "realitySni",
+                )
+            else:
+                selected_reality_dest, selected_reality_sni = "", ""
         if server["status"] != "reachable":
             raise ValueError("test SSH successfully before starting a native deployment")
         host_key = self.db.query_one(
@@ -76,8 +88,9 @@ class TeardownService(SubscriptionsService):
                     id, server_id, engine, protocol, install_method, panel_scheme, panel_port, panel_path,
                     panel_username, encrypted_panel_password, encrypted_api_token,
                     proxy_port, reality_mode, reality_dest, reality_sni,
+                    ss_method, encrypted_ss_password,
                     subscription_configured, status, subscription_url, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     deployment_id,
@@ -95,6 +108,8 @@ class TeardownService(SubscriptionsService):
                     reality_mode,
                     selected_reality_dest,
                     selected_reality_sni,
+                    DEPLOYMENT_SS_METHOD,
+                    self.secret_box.seal(ss_password),
                     0,
                     "provisioning",
                     "",
@@ -193,24 +208,37 @@ class TeardownService(SubscriptionsService):
                 self._apply_install_result(deployment_id, result)
                 install_applied = True
             deployment = self.get_deployment(deployment_id)
-            selected_reality_dest, selected_reality_sni = self._resolve_reality_target(
-                job_id,
-                deployment_id,
-                server,
-                deployment,
-            )
-            deployment = self.get_deployment(deployment_id)
+            is_shadowsocks = deployment.get("protocol") == DEPLOYMENT_PROTOCOL_SHADOWSOCKS_2022
+            if not is_shadowsocks:
+                selected_reality_dest, selected_reality_sni = self._resolve_reality_target(
+                    job_id,
+                    deployment_id,
+                    server,
+                    deployment,
+                )
+                deployment = self.get_deployment(deployment_id)
             self._append_job_log(job_id, "Waiting for 3x-ui API to become ready over SSH tunnel")
             with self._xui_session(deployment) as xui:
                 xui.wait_ready()
                 xui.login()
-                self._append_job_log(job_id, "Creating default VLESS + REALITY inbound through 3x-ui API")
-                inbound = xui.create_vless_reality_inbound(
-                    port=deployment["proxy_port"],
-                    remark=f"myn-{server['name']}-{deployment['proxy_port']}",
-                    target=selected_reality_dest,
-                    server_names=[selected_reality_sni],
-                )
+                if is_shadowsocks:
+                    self._append_job_log(
+                        job_id, "Creating default Shadowsocks 2022 inbound through 3x-ui API"
+                    )
+                    inbound = xui.create_shadowsocks_inbound(
+                        port=deployment["proxy_port"],
+                        remark=f"myn-{server['name']}-{deployment['proxy_port']}",
+                        method=deployment.get("ss_method") or DEPLOYMENT_SS_METHOD,
+                        server_password=deployment.get("ss_password") or "",
+                    )
+                else:
+                    self._append_job_log(job_id, "Creating default VLESS + REALITY inbound through 3x-ui API")
+                    inbound = xui.create_vless_reality_inbound(
+                        port=deployment["proxy_port"],
+                        remark=f"myn-{server['name']}-{deployment['proxy_port']}",
+                        target=selected_reality_dest,
+                        server_names=[selected_reality_sni],
+                    )
                 self.db.execute(
                     "UPDATE deployments SET xui_inbound_id = ?, updated_at = ? WHERE id = ?",
                     (int(inbound["id"]), now_iso(), deployment_id),

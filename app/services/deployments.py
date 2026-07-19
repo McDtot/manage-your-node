@@ -5,6 +5,8 @@ from urllib.parse import quote, urlparse
 
 from ..provisioning import shell_quote
 from .helpers import (
+    DEPLOYMENT_PROTOCOL_SHADOWSOCKS_2022,
+    DEPLOYMENT_SS_METHOD,
     _render_subscription_links,
     _share_link_with_display_name,
     host_field,
@@ -12,6 +14,7 @@ from .helpers import (
     parse_reality_destination,
     reality_candidates,
     reality_dest,
+    ss_share_link,
     url_host,
 )
 from .servers import ServersService
@@ -25,7 +28,8 @@ class DeploymentsService(ServersService):
                    d.engine, d.protocol, d.install_method, d.panel_scheme, d.panel_port,
                    d.panel_path, d.panel_username, d.encrypted_panel_password,
                    d.encrypted_api_token, d.proxy_port, d.reality_mode,
-                   d.reality_dest, d.reality_sni, d.xui_inbound_id, d.status,
+                   d.reality_dest, d.reality_sni, d.ss_method, d.encrypted_ss_password,
+                   d.xui_inbound_id, d.status,
                    d.subscription_url, d.last_error, d.created_at, d.updated_at,
                    COUNT(c.id) AS client_count,
                    (
@@ -213,7 +217,8 @@ exit 43
                    d.engine, d.protocol, d.install_method, d.panel_scheme, d.panel_port,
                    d.panel_path, d.panel_username, d.encrypted_panel_password,
                    d.encrypted_api_token, d.proxy_port, d.reality_mode,
-                   d.reality_dest, d.reality_sni, d.xui_inbound_id, d.status,
+                   d.reality_dest, d.reality_sni, d.ss_method, d.encrypted_ss_password,
+                   d.xui_inbound_id, d.status,
                    d.subscription_url, d.last_error, d.created_at, d.updated_at,
                    (
                        SELECT COUNT(*)
@@ -231,7 +236,22 @@ exit 43
         self._attach_deployment_secrets(row, reveal=reveal_secrets)
         return row
 
-    def _default_share_link(self, deployment: dict[str, Any], client_uuid: str, name: str) -> str:
+    def _default_share_link(
+        self,
+        deployment: dict[str, Any],
+        client_uuid: str,
+        name: str,
+        ss_password: str = "",
+    ) -> str:
+        if deployment.get("protocol") == DEPLOYMENT_PROTOCOL_SHADOWSOCKS_2022:
+            return ss_share_link(
+                method=deployment.get("ss_method") or DEPLOYMENT_SS_METHOD,
+                server_password=deployment.get("ss_password") or "",
+                user_password=ss_password,
+                host=deployment["host"],
+                port=int(deployment["proxy_port"]),
+                name=name,
+            )
         tag = quote(name)
         return (
             f"vless://{client_uuid}@{url_host(deployment['host'])}:{deployment['proxy_port']}"

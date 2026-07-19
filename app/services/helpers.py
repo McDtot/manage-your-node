@@ -22,6 +22,13 @@ CHAIN_PROTOCOLS = {
     CHAIN_PROTOCOL_SHADOWSOCKS_2022,
 }
 CHAIN_SS_METHOD = "2022-blake3-aes-256-gcm"
+DEPLOYMENT_PROTOCOL_VLESS_REALITY = "VLESS + REALITY"
+DEPLOYMENT_PROTOCOL_SHADOWSOCKS_2022 = "Shadowsocks 2022"
+DEPLOYMENT_PROTOCOLS = {
+    DEPLOYMENT_PROTOCOL_VLESS_REALITY,
+    DEPLOYMENT_PROTOCOL_SHADOWSOCKS_2022,
+}
+DEPLOYMENT_SS_METHOD = CHAIN_SS_METHOD
 MAX_JOB_LOG_ENTRIES = 2000
 MAX_JOB_LOG_LINE = 4096
 MIHOMO_SUBSCRIPTION_FORMATS = {"clash", "mihomo", "yaml"}
@@ -94,6 +101,95 @@ def _mihomo_proxy_from_vless(
     return proxy
 
 
+def new_ss2022_password() -> str:
+    """Return a base64-encoded 32-byte PSK for 2022-blake3-aes-256-gcm."""
+    return base64.b64encode(secrets.token_bytes(32)).decode("ascii")
+
+
+def ss_share_link(
+    method: str,
+    server_password: str,
+    user_password: str,
+    host: str,
+    port: int,
+    name: str,
+) -> str:
+    """Build a SIP002-style Shadowsocks 2022 share link.
+
+    Multi-user SS2022 uses ``serverPSK:userPSK`` as the client password, and the
+    userinfo section carries ``method:serverPSK:userPSK`` base64-encoded, which
+    is the layout 3x-ui and mainstream clients expect.
+    """
+    userinfo = f"{method}:{server_password}:{user_password}"
+    encoded = base64.b64encode(userinfo.encode("utf-8")).decode("ascii")
+    tag = quote(name)
+    return f"ss://{encoded}@{url_host(host)}:{port}#{tag}"
+
+
+def _decode_ss_userinfo(share_link: str) -> tuple[str, str]:
+    """Return ``(method, password)`` from a Shadowsocks share link userinfo."""
+    parsed = urlparse(share_link)
+    userinfo = parsed.username or ""
+    if parsed.password is not None:
+        userinfo = f"{parsed.username or ''}:{parsed.password}"
+    userinfo = unquote(userinfo)
+    if ":" not in userinfo:
+        try:
+            padded = userinfo + "=" * (-len(userinfo) % 4)
+            userinfo = base64.urlsafe_b64decode(padded.encode("ascii")).decode("utf-8")
+        except (ValueError, UnicodeDecodeError) as exc:
+            raise ValueError("invalid Shadowsocks subscription link") from exc
+    method, separator, password = userinfo.partition(":")
+    if not separator or not method or not password:
+        raise ValueError("invalid Shadowsocks subscription link")
+    return method, password
+
+
+def _mihomo_proxy_from_ss(
+    share_link: str,
+    index: int,
+    used_names: set[str],
+) -> dict[str, Any]:
+    parsed = urlparse(share_link)
+    method, password = _decode_ss_userinfo(share_link)
+    server = parsed.hostname
+    try:
+        port = parsed.port
+    except ValueError as exc:
+        raise ValueError("invalid Shadowsocks subscription port") from exc
+    if not server or port is None:
+        raise ValueError("invalid Shadowsocks subscription link")
+
+    base_name = unquote(parsed.fragment).strip() or f"节点 {index}"
+    name = base_name
+    suffix = 2
+    while name in used_names or name in {"AUTO", "DIRECT", "PROXY", "REJECT"}:
+        name = f"{base_name} {suffix}"
+        suffix += 1
+    used_names.add(name)
+
+    return {
+        "name": name,
+        "type": "ss",
+        "server": server,
+        "port": port,
+        "cipher": method,
+        "password": password,
+        "udp": True,
+    }
+
+
+def _mihomo_proxy_from_link(
+    share_link: str,
+    index: int,
+    used_names: set[str],
+) -> dict[str, Any]:
+    scheme = urlparse(share_link).scheme.lower()
+    if scheme == "ss":
+        return _mihomo_proxy_from_ss(share_link, index, used_names)
+    return _mihomo_proxy_from_vless(share_link, index, used_names)
+
+
 def _render_subscription_links(share_links: list[str], output_format: str = "base64") -> str:
     normalized = str(output_format or "base64").strip().lower()
     links = [str(link).strip() for link in share_links if str(link).strip()]
@@ -105,7 +201,7 @@ def _render_subscription_links(share_links: list[str], output_format: str = "bas
 
     used_names: set[str] = set()
     proxies = [
-        _mihomo_proxy_from_vless(link, index, used_names)
+        _mihomo_proxy_from_link(link, index, used_names)
         for index, link in enumerate(links, start=1)
     ]
     proxy_names = [proxy["name"] for proxy in proxies]
