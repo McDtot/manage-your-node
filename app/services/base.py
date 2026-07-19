@@ -30,6 +30,8 @@ class ServicesBase:
         self._workers_lock = threading.Lock()
         self._traffic_stop = threading.Event()
         self._traffic_thread: threading.Thread | None = None
+        self._health_stop = threading.Event()
+        self._health_thread: threading.Thread | None = None
 
     def _track_worker(self, worker: threading.Thread) -> None:
         with self._workers_lock:

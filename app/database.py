@@ -36,6 +36,8 @@ class Database:
                     arch TEXT,
                     status TEXT NOT NULL,
                     last_check_at TEXT,
+                    last_latency_ms INTEGER,
+                    last_health_error TEXT,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 );
@@ -251,6 +253,8 @@ class Database:
                 """
             )
             self._ensure_column("deployments", "install_method", "TEXT NOT NULL DEFAULT 'native'")
+            self._ensure_column("servers", "last_latency_ms", "INTEGER")
+            self._ensure_column("servers", "last_health_error", "TEXT")
             self._ensure_column("ssh_host_keys", "trusted", "INTEGER NOT NULL DEFAULT 1")
             self._ensure_column("deployments", "panel_scheme", "TEXT NOT NULL DEFAULT 'http'")
             self._ensure_column("deployments", "xui_inbound_id", "INTEGER")
