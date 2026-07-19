@@ -22,6 +22,8 @@ services:
       REALITY_CANDIDATES: ${REALITY_CANDIDATES:-}
       REALITY_DEST: ${REALITY_DEST:-www.yahoo.com:443}
       REALITY_SNI: ${REALITY_SNI:-}
+      TRAFFIC_SYNC_SECONDS: ${TRAFFIC_SYNC_SECONDS:-300}
+      HEALTH_CHECK_SECONDS: ${HEALTH_CHECK_SECONDS:-120}
     secrets:
       - app_secret
       - admin_password

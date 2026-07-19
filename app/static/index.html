@@ -69,6 +69,8 @@
             </div>
             <div class="top-actions">
               <button class="secondary icon-label" id="refreshBtn"><span aria-hidden="true">↻</span>刷新</button>
+              <button class="secondary icon-label" id="refreshTrafficBtn"><span aria-hidden="true">⟳</span>刷新用量</button>
+              <button class="secondary icon-label" id="healthCheckBtn"><span aria-hidden="true">♥</span>健康检查</button>
               <button class="secondary" id="logoutBtn">退出</button>
               <button class="primary" id="topAddServerBtn" data-section-jump="servers" hidden>＋ 添加服务器</button>
             </div>
@@ -174,10 +176,13 @@
               </label>
               <label>
                 协议模板
-                <select name="protocol">
+                <select name="protocol" id="deployProtocol">
                   <option value="VLESS + REALITY">VLESS + REALITY</option>
+                  <option value="Shadowsocks 2022">Shadowsocks 2022</option>
                 </select>
+                <span class="meta">Shadowsocks 2022 使用 2022-blake3-aes-256-gcm，需要 TCP + UDP 端口放行，无需伪装域名。</span>
               </label>
+              <div id="realityFields">
               <label>
                 REALITY 伪装目标
                 <select name="realityMode" id="realityMode">
@@ -197,6 +202,7 @@
                     <input name="realitySni" placeholder="默认使用目标域名" />
                   </label>
                 </div>
+              </div>
               </div>
               <div class="row">
                 <label>
@@ -435,7 +441,20 @@
       </form>
     </dialog>
 
+    <dialog class="dialog" id="qrDialog">
+      <div class="dialog-panel">
+        <div class="panel-head">
+          <h2 id="qrTitle">二维码</h2>
+        </div>
+        <div class="qr-wrap"><img id="qrImage" alt="二维码" /></div>
+        <p class="meta">使用客户端扫码即可导入。</p>
+        <div class="dialog-actions">
+          <button class="primary" type="button" data-close-qr>关闭</button>
+        </div>
+      </div>
+    </dialog>
+
     <div class="toast" id="toast" hidden></div>
-    <script src="/static/app.js?v=chain-display-name-20260715"></script>
+    <script src="/static/app.js?v=traffic-qr-20260719"></script>
   </body>
 </html>

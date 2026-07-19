@@ -1,9 +1,10 @@
 import json
 import sqlite3
 import threading
+from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any
 
 
 class Database:
@@ -35,6 +36,8 @@ class Database:
                     arch TEXT,
                     status TEXT NOT NULL,
                     last_check_at TEXT,
+                    last_latency_ms INTEGER,
+                    last_health_error TEXT,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 );
@@ -64,6 +67,8 @@ class Database:
                     reality_mode TEXT NOT NULL DEFAULT 'manual',
                     reality_dest TEXT NOT NULL DEFAULT '',
                     reality_sni TEXT NOT NULL DEFAULT '',
+                    ss_method TEXT NOT NULL DEFAULT '2022-blake3-aes-256-gcm',
+                    encrypted_ss_password TEXT NOT NULL DEFAULT '',
                     xui_inbound_id INTEGER,
                     subscription_configured INTEGER NOT NULL DEFAULT 0,
                     status TEXT NOT NULL,
@@ -84,6 +89,7 @@ class Database:
                     traffic_reset_days INTEGER NOT NULL DEFAULT 0,
                     expires_at TEXT NOT NULL,
                     enabled INTEGER NOT NULL,
+                    encrypted_ss_password TEXT NOT NULL DEFAULT '',
                     share_link TEXT NOT NULL,
                     subscription_url TEXT NOT NULL,
                     created_at TEXT NOT NULL,
@@ -247,6 +253,8 @@ class Database:
                 """
             )
             self._ensure_column("deployments", "install_method", "TEXT NOT NULL DEFAULT 'native'")
+            self._ensure_column("servers", "last_latency_ms", "INTEGER")
+            self._ensure_column("servers", "last_health_error", "TEXT")
             self._ensure_column("ssh_host_keys", "trusted", "INTEGER NOT NULL DEFAULT 1")
             self._ensure_column("deployments", "panel_scheme", "TEXT NOT NULL DEFAULT 'http'")
             self._ensure_column("deployments", "xui_inbound_id", "INTEGER")
@@ -259,9 +267,24 @@ class Database:
             self._ensure_column("deployments", "reality_dest", "TEXT NOT NULL DEFAULT ''")
             self._ensure_column("deployments", "reality_sni", "TEXT NOT NULL DEFAULT ''")
             self._ensure_column(
+                "deployments",
+                "ss_method",
+                "TEXT NOT NULL DEFAULT '2022-blake3-aes-256-gcm'",
+            )
+            self._ensure_column(
+                "deployments",
+                "encrypted_ss_password",
+                "TEXT NOT NULL DEFAULT ''",
+            )
+            self._ensure_column(
                 "clients",
                 "traffic_reset_days",
                 "INTEGER NOT NULL DEFAULT 0",
+            )
+            self._ensure_column(
+                "clients",
+                "encrypted_ss_password",
+                "TEXT NOT NULL DEFAULT ''",
             )
             self._ensure_column(
                 "subscription_nodes",
@@ -362,6 +385,13 @@ class Database:
         with self._lock:
             row = self._conn.execute(sql, params).fetchone()
             return dict(row) if row else None
+
+    def query_row(self, sql: str, params: tuple[Any, ...] = ()) -> dict[str, Any]:
+        """Like query_one, for queries guaranteed to return a row (e.g. aggregates)."""
+        row = self.query_one(sql, params)
+        if row is None:
+            raise RuntimeError("query unexpectedly returned no rows")
+        return row
 
     def execute(self, sql: str, params: tuple[Any, ...] = ()) -> None:
         with self._lock:

@@ -1,19 +1,28 @@
+import io
 import json
 import logging
+import os
 import threading
 import time
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
+import segno
 import uvicorn
 from starlette.applications import Starlette
 from starlette.concurrency import run_in_threadpool
 from starlette.middleware import Middleware
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
-from starlette.responses import FileResponse, JSONResponse, PlainTextResponse, RedirectResponse, Response
+from starlette.responses import (
+    FileResponse,
+    JSONResponse,
+    PlainTextResponse,
+    RedirectResponse,
+    Response,
+)
 from starlette.routing import Route
 
 from .auth import AuthManager
@@ -93,7 +102,7 @@ class AuditMiddleware(BaseHTTPMiddleware):
             token = _cookie_value(request.cookies, SESSION_COOKIE_NAMES)
             actor = self.auth.admin_username if self.auth.verify_session(token) else "anonymous"
             client_ip = request.client.host if request.client else "unknown"
-            stamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
+            stamp = datetime.now(UTC).isoformat(timespec="seconds")
             try:
                 await run_in_threadpool(
                     self.db.execute,
@@ -483,6 +492,24 @@ async def get_deployment_subscription(request: Request) -> Response:
     return await _service_response(lambda: _get_service(request).get_subscription_config(item_id))
 
 
+async def qrcode_svg(request: Request) -> Response:
+    blocked = _auth_guard(request)
+    if blocked:
+        return blocked
+    data = request.query_params.get("data", "")
+    if not data:
+        return JSONResponse({"error": "data is required"}, status_code=400)
+    if len(data) > 4096:
+        return JSONResponse({"error": "data is too long"}, status_code=400)
+    buffer = io.BytesIO()
+    segno.make(data, error="m").save(buffer, kind="svg", scale=6, border=2)
+    return Response(
+        buffer.getvalue(),
+        media_type="image/svg+xml",
+        headers={"Cache-Control": "no-store"},
+    )
+
+
 async def get_job(request: Request) -> Response:
     item_id = request.path_params["item_id"]
     raw_after = request.query_params.get("after", "0")
@@ -551,6 +578,8 @@ async def mutate(request: Request) -> Response:
         ("POST", "deploy_server"): (lambda: services.start_deployment(item_id, body), 201),
         ("POST", "create_client"): (lambda: services.create_client(item_id, body), 201),
         ("POST", "reset_client"): (lambda: services.reset_client(item_id), 200),
+        ("POST", "refresh_traffic"): (lambda: services.refresh_all_traffic(), 200),
+        ("POST", "check_health"): (lambda: services.check_all_servers_health(), 200),
         ("POST", "rotate_subscription_token"): (
             lambda: services.rotate_subscription_token(item_id),
             200,
@@ -630,9 +659,22 @@ def create_app(
         cookie_name="myn_session",
     )
 
+    try:
+        traffic_sync_seconds = int(os.getenv("TRAFFIC_SYNC_SECONDS", "300"))
+    except ValueError:
+        traffic_sync_seconds = 300
+    try:
+        health_check_seconds = int(os.getenv("HEALTH_CHECK_SECONDS", "120"))
+    except ValueError:
+        health_check_seconds = 120
+
     @asynccontextmanager
     async def lifespan(_application: Starlette):
+        services.start_traffic_sync(traffic_sync_seconds)
+        services.start_health_monitor(health_check_seconds)
         yield
+        services.stop_traffic_sync()
+        services.stop_health_monitor()
         finished = await run_in_threadpool(services.wait_for_workers, 25.0)
         if not finished:
             LOGGER.warning(
@@ -648,6 +690,7 @@ def create_app(
         Route("/api/auth/logout", logout, methods=["POST"]),
         Route("/api/auth/session", auth_session, methods=["GET"]),
         Route("/api/summary", summary, methods=["GET"]),
+        Route("/api/qrcode", qrcode_svg, methods=["GET"]),
         Route("/api/settings", get_web_settings, methods=["GET"]),
         Route("/api/servers", list_servers, methods=["GET"]),
         Route("/api/deployments", list_deployments, methods=["GET"]),
@@ -680,6 +723,8 @@ def create_app(
         Route("/api/servers/{item_id}/deploy", mutation_endpoint("deploy_server"), methods=["POST"]),
         Route("/api/deployments/{item_id}/clients", mutation_endpoint("create_client"), methods=["POST"]),
         Route("/api/clients/{item_id}/reset", mutation_endpoint("reset_client"), methods=["POST"]),
+        Route("/api/traffic/refresh", mutation_endpoint("refresh_traffic"), methods=["POST"]),
+        Route("/api/servers/health-check", mutation_endpoint("check_health"), methods=["POST"]),
         Route(
             "/api/subscriptions/{item_id}/rotate-token",
             mutation_endpoint("rotate_subscription_token"),

@@ -1173,6 +1173,20 @@ input[type="checkbox"] {
   margin-top: 4px;
 }
 
+.qr-wrap {
+  display: flex;
+  justify-content: center;
+  padding: 14px;
+  background: #ffffff;
+  border-radius: var(--radius-lg);
+}
+
+.qr-wrap img {
+  width: min(260px, 60vw);
+  height: auto;
+  image-rendering: pixelated;
+}
+
 .sub-link-row {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;

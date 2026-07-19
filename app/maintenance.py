@@ -1,5 +1,5 @@
 import argparse
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 from .config import load_settings
@@ -72,7 +72,7 @@ def main() -> None:
     try:
         try:
             if args.command == "backup":
-                stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+                stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
                 target = (
                     Path(args.target)
                     if args.target

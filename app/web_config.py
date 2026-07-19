@@ -10,7 +10,6 @@ from .config import (
 )
 from .database import Database
 
-
 PUBLIC_ORIGIN_KEY = "public_origin"
 
 
