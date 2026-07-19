@@ -368,10 +368,12 @@ python -m app.server
 
 浏览器打开 <http://127.0.0.1:8787>。
 
-运行测试：
+运行测试与静态检查（与 CI 相同）：
 
 ~~~powershell
 pytest
+ruff check app tests
+mypy
 ~~~
 
 ## 项目结构
