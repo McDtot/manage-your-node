@@ -2,6 +2,7 @@ import json
 import random
 import secrets
 import threading
+from collections.abc import Callable
 from typing import Any
 
 from ..provisioning import native_3xui_script
@@ -298,13 +299,18 @@ class TeardownService(SubscriptionsService):
             """,
             (deployment["server_id"], deployment_id),
         )["count"]
-        remote_logs = self._cleanup_remote_deployment(
-            deployment,
-            uninstall_panel=deployment.get("install_method") == "native" and other_native == 0,
+        remote_logs, remote_cleanup_ok = self._best_effort_remote_cleanup(
+            lambda: self._cleanup_remote_deployment(
+                deployment,
+                uninstall_panel=(
+                    deployment.get("install_method") == "native" and other_native == 0
+                ),
+            )
         )
         self._delete_deployment_records(deployment_id)
         return {
             "deleted": deployment_id,
+            "remoteCleanupOk": remote_cleanup_ok,
             "remoteLogs": (chain_logs + remote_logs)[-20:],
         }
 
@@ -319,16 +325,34 @@ class TeardownService(SubscriptionsService):
             [deployment["id"] for deployment in deployments]
         )
         remote_logs: list[str] = []
+        remote_cleanup_ok = True
         if any(row["install_method"] == "native" for row in deployments):
-            remote_logs = self._uninstall_remote_xui(server)
+            remote_logs, remote_cleanup_ok = self._best_effort_remote_cleanup(
+                lambda: self._uninstall_remote_xui(server)
+            )
         with self.db.transaction():
             for deployment in deployments:
                 self._delete_default_subscription(deployment["id"])
             self.db.execute("DELETE FROM servers WHERE id = ?", (server_id,))
         return {
             "deleted": server_id,
+            "remoteCleanupOk": remote_cleanup_ok,
             "remoteLogs": (chain_logs + remote_logs)[-20:],
         }
+
+    def _best_effort_remote_cleanup(
+        self,
+        cleanup: Callable[[], list[str]],
+    ) -> tuple[list[str], bool]:
+        """Run remote cleanup without blocking local record deletion."""
+        try:
+            logs = cleanup()
+            return list(logs or []), True
+        except Exception as exc:  # noqa: BLE001
+            return (
+                [f"Remote cleanup failed (local record deleted anyway): {exc}"],
+                False,
+            )
 
     def _delete_deployment_records(self, deployment_id: str) -> None:
         with self.db.transaction():

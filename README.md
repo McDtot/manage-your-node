@@ -7,15 +7,11 @@
 > [!IMPORTANT]
 > 本项目适合个人或小规模运维，当前为单管理员模式。应用本身不提供 HTTPS；公网使用前请配置反向代理和 TLS，并遵守所在地法律法规及服务商条款。
 
-## v0.10.0 更新亮点
+## v0.10.1 更新亮点
 
-- 单节点部署新增 Shadowsocks 2022，可与现有 VLESS + REALITY 节点混合订阅；
-- 周期性同步 3x-ui 真实流量用量，并支持从 WebUI 手动刷新；
-- 周期性检查节点 SSH 可达性与 TCP 延迟，并支持一键批量健康检查；
-- 分享链接、订阅和代理链入口均可生成二维码；
-- 将大型服务模块按领域拆分，并加入 Ruff、Mypy、Pytest 与 Docker 构建 CI。
+- 删除服务器或部署时，若远端 SSH 不可达，仍会删除本地记录（远端清理改为 best-effort），并在界面提示可能残留。
 
-完整变更和升级注意事项见 [v0.10.0 发布说明](https://github.com/McDtot/manage-your-node/releases/tag/v0.10.0)。
+完整变更见 [v0.10.1 发布说明](https://github.com/McDtot/manage-your-node/releases/tag/v0.10.1)。此前 v0.10.0 引入了 SS2022、流量同步、健康检查与二维码等能力，见 [v0.10.0](https://github.com/McDtot/manage-your-node/releases/tag/v0.10.0)。
 
 ## 主要功能
 
@@ -423,6 +419,6 @@ docker-compose.yml  容器编排配置
 - 代理链的 Xray 服务不会显示在 3x-ui 面板中；
 - NAT 代理链不支持公网端口与本机端口转换；
 - 暂不支持直接粘贴带 passphrase 的 SSH 私钥；
-- 远端失败清理为 best-effort，需要在异常后检查残留服务和端口；
+- 远端失败清理为 best-effort：删除服务器或部署时若 SSH 不可达，仍会删除本地记录，远端残留服务和端口需手工检查；
 - 订阅令牌本身就是访问凭据，泄露后需立即轮换；
 - 主密钥没有在线轮换流程，也未直接集成 KMS 或 Vault。

@@ -5,6 +5,7 @@ __pycache__/
 venv/
 data/
 .env
+.dev-credentials.json
 secrets/
 backups/
 *.log

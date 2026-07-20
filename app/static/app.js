@@ -1293,21 +1293,41 @@ function bindEvents() {
 
     if (target.dataset.deleteServer) {
       const server = state.servers.find((item) => item.id === target.dataset.deleteServer);
-      if (!confirm(`删除服务器 ${server?.name || ""}？这会同步卸载远端 3x-ui 并删除本地记录。`)) return;
-      await api(`/api/servers/${target.dataset.deleteServer}`, {
+      if (
+        !confirm(
+          `删除服务器 ${server?.name || ""}？会尝试卸载远端 3x-ui 并删除本地记录。若远端不可达，仍会删除本地记录，远端可能需手工清理。`,
+        )
+      ) {
+        return;
+      }
+      const result = await api(`/api/servers/${target.dataset.deleteServer}`, {
         method: "DELETE",
       });
-      toast("服务器已删除");
+      toast(
+        result.remoteCleanupOk === false
+          ? "服务器本地记录已删除，远端清理失败，请检查残留"
+          : "服务器已删除",
+      );
       await refresh();
     }
 
     if (target.dataset.deleteDeployment) {
       const deployment = state.deployments.find((item) => item.id === target.dataset.deleteDeployment);
-      if (!confirm(`删除部署 ${deployment?.server_name || ""}？这会同步清理远端部署内容并删除本地记录。`)) return;
-      await api(`/api/deployments/${target.dataset.deleteDeployment}`, {
+      if (
+        !confirm(
+          `删除部署 ${deployment?.server_name || ""}？会尝试清理远端部署内容并删除本地记录。若远端不可达，仍会删除本地记录，远端可能需手工清理。`,
+        )
+      ) {
+        return;
+      }
+      const result = await api(`/api/deployments/${target.dataset.deleteDeployment}`, {
         method: "DELETE",
       });
-      toast("部署已删除");
+      toast(
+        result.remoteCleanupOk === false
+          ? "部署本地记录已删除，远端清理失败，请检查残留"
+          : "部署已删除",
+      );
       await refresh();
     }
 
