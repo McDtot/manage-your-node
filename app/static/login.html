@@ -5,12 +5,125 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>登录 · Manage Your Node</title>
     <link rel="stylesheet" href="/static/styles.css?v=users-20260714" />
+    <style>
+      /* Liquid Glass 登录页增强：装饰光晕 + 面板高光 + 3D 视差倾斜过渡 */
+      .login-panel {
+        position: relative;
+        transition: transform 0.28s cubic-bezier(0.22, 0.61, 0.36, 1);
+        will-change: transform;
+      }
+
+      /* 面板顶部高光带 + 1px 内发光描边（液态玻璃折射高光） */
+      .login-panel-glint {
+        position: absolute;
+        inset: 1px;
+        border-radius: 29px;
+        pointer-events: none;
+        background: linear-gradient(
+          180deg,
+          rgba(255, 255, 255, 0.6) 0%,
+          rgba(255, 255, 255, 0.18) 14%,
+          rgba(255, 255, 255, 0) 30%
+        );
+        box-shadow:
+          inset 0 1px 0 rgba(255, 255, 255, 0.85),
+          inset 0 0 0 1px rgba(255, 255, 255, 0.22),
+          inset 0 -1px 0 rgba(255, 255, 255, 0.12);
+      }
+
+      /* 新增环境光晕：低饱和渐变 + 柔化 + 缓慢漂浮 */
+      .login-orb-three {
+        top: 8%;
+        left: -12vw;
+        width: 34vw;
+        height: 34vw;
+        filter: blur(46px);
+        opacity: 0.5;
+        background: radial-gradient(
+          circle at 40% 45%,
+          rgba(94, 200, 190, 0.55),
+          rgba(90, 160, 220, 0.32) 52%,
+          rgba(90, 160, 220, 0) 74%
+        );
+        animation: login-orb-drift-three 22s ease-in-out infinite alternate;
+      }
+
+      .login-orb-four {
+        right: -8vw;
+        bottom: 4%;
+        width: 28vw;
+        height: 28vw;
+        filter: blur(52px);
+        opacity: 0.42;
+        background: radial-gradient(
+          circle at 55% 40%,
+          rgba(255, 200, 150, 0.5),
+          rgba(240, 160, 190, 0.26) 50%,
+          rgba(240, 160, 190, 0) 74%
+        );
+        animation: login-orb-drift-four 27s ease-in-out infinite alternate;
+      }
+
+      @keyframes login-orb-drift-three {
+        from {
+          transform: translate3d(0, 0, 0) scale(1);
+        }
+        to {
+          transform: translate3d(4vw, 5vh, 0) scale(1.08);
+        }
+      }
+
+      @keyframes login-orb-drift-four {
+        from {
+          transform: translate3d(0, 0, 0) scale(1.05);
+        }
+        to {
+          transform: translate3d(-3.5vw, -4vh, 0) scale(0.96);
+        }
+      }
+
+      @media (prefers-color-scheme: dark) {
+        .login-panel-glint {
+          background: linear-gradient(
+            180deg,
+            rgba(255, 255, 255, 0.12) 0%,
+            rgba(255, 255, 255, 0.04) 16%,
+            rgba(255, 255, 255, 0) 32%
+          );
+          box-shadow:
+            inset 0 1px 0 rgba(255, 255, 255, 0.16),
+            inset 0 0 0 1px rgba(255, 255, 255, 0.06);
+        }
+
+        .login-orb-three {
+          opacity: 0.3;
+        }
+
+        .login-orb-four {
+          opacity: 0.24;
+        }
+      }
+
+      @media (prefers-reduced-motion: reduce) {
+        .login-orb-three,
+        .login-orb-four {
+          animation: none;
+        }
+
+        .login-panel {
+          transition: none;
+        }
+      }
+    </style>
   </head>
   <body class="login-page">
     <main class="login-shell">
       <div class="login-orb login-orb-one" aria-hidden="true"></div>
       <div class="login-orb login-orb-two" aria-hidden="true"></div>
+      <div class="login-orb login-orb-three" aria-hidden="true"></div>
+      <div class="login-orb login-orb-four" aria-hidden="true"></div>
       <form class="login-panel form" id="loginForm">
+        <span class="login-panel-glint" aria-hidden="true"></span>
         <div class="brand login-brand">
           <span class="brand-mark" aria-hidden="true"><span></span><span></span><span></span></span>
           <div class="brand-copy">
@@ -35,6 +148,6 @@
         <p class="login-footnote">受 Session、CSRF 与登录限流保护</p>
       </form>
     </main>
-    <script src="/static/login.js?v=ios-20260713"></script>
+    <script src="/static/login.js?v=lg-20260715"></script>
   </body>
 </html>

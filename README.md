@@ -7,11 +7,11 @@
 > [!IMPORTANT]
 > 本项目适合个人或小规模运维，当前为单管理员模式。应用本身不提供 HTTPS；公网使用前请配置反向代理和 TLS，并遵守所在地法律法规及服务商条款。
 
-## v0.10.1 更新亮点
+## v0.11.0 更新亮点
 
-- 删除服务器或部署时，若远端 SSH 不可达，仍会删除本地记录（远端清理改为 best-effort），并在界面提示可能残留。
+- WebUI 整体美化并引入液态玻璃（Liquid Glass）视觉：环境光晕背景、玻璃折射高光、渐变描边与细腻的悬浮/按压动效，登录页支持 3D 视差倾斜，同时保留暗色模式与 `prefers-reduced-motion` 适配。
 
-完整变更见 [v0.10.1 发布说明](https://github.com/McDtot/manage-your-node/releases/tag/v0.10.1)。此前 v0.10.0 引入了 SS2022、流量同步、健康检查与二维码等能力，见 [v0.10.0](https://github.com/McDtot/manage-your-node/releases/tag/v0.10.0)。
+完整变更见 [v0.11.0 发布说明](https://github.com/McDtot/manage-your-node/releases/tag/v0.11.0)。此前 v0.10.1 允许在远端 SSH 不可达时删除本地记录，见 [v0.10.1](https://github.com/McDtot/manage-your-node/releases/tag/v0.10.1)。
 
 ## 主要功能
 

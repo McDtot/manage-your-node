@@ -24,6 +24,19 @@
   --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.04), 0 8px 22px rgba(0, 0, 0, 0.04);
   --shadow: 0 18px 48px rgba(17, 24, 39, 0.08);
   --blur: saturate(180%) blur(24px);
+  /* Liquid Glass tokens */
+  --glass-fill: linear-gradient(165deg, rgba(255, 255, 255, 0.66) 0%, rgba(255, 255, 255, 0.38) 100%);
+  --glass-edge: linear-gradient(
+    140deg,
+    rgba(255, 255, 255, 0.95) 0%,
+    rgba(255, 255, 255, 0.28) 30%,
+    rgba(148, 163, 184, 0.16) 58%,
+    rgba(255, 255, 255, 0.5) 100%
+  );
+  --glass-specular: inset 0 1px 0 rgba(255, 255, 255, 0.72);
+  --glass-underlight: inset 0 -18px 30px -22px rgba(255, 255, 255, 0.6);
+  --glass-shadow: 0 1px 2px rgba(15, 23, 42, 0.05), 0 14px 34px -12px rgba(15, 23, 42, 0.1);
+  --ease-spring: cubic-bezier(0.22, 1, 0.36, 1);
 }
 
 * {
@@ -40,12 +53,15 @@ html {
 }
 
 body {
+  position: relative;
   min-width: 320px;
   min-height: 100vh;
   margin: 0;
   background:
-    radial-gradient(circle at 92% 2%, rgba(0, 122, 255, 0.09), transparent 28rem),
-    radial-gradient(circle at 22% 96%, rgba(175, 82, 222, 0.06), transparent 34rem),
+    radial-gradient(50rem 36rem at 88% -8%, rgba(64, 156, 255, 0.15), transparent 62%),
+    radial-gradient(42rem 32rem at -10% 18%, rgba(94, 234, 212, 0.11), transparent 60%),
+    radial-gradient(48rem 38rem at 10% 98%, rgba(255, 176, 120, 0.1), transparent 62%),
+    radial-gradient(54rem 42rem at 64% 114%, rgba(196, 158, 255, 0.11), transparent 62%),
     var(--bg);
   color: var(--ink);
   font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "SF Pro Text",
@@ -56,8 +72,59 @@ body {
   text-rendering: optimizeLegibility;
 }
 
+/* 缓慢漂移的环境光晕，营造液态玻璃背后的流动感 */
+body::before {
+  position: fixed;
+  inset: -12%;
+  z-index: -1;
+  background:
+    radial-gradient(34rem 26rem at 24% 30%, rgba(0, 122, 255, 0.07), transparent 66%),
+    radial-gradient(30rem 24rem at 78% 62%, rgba(50, 173, 230, 0.06), transparent 66%),
+    radial-gradient(28rem 22rem at 52% 88%, rgba(255, 149, 0, 0.05), transparent 66%),
+    radial-gradient(26rem 22rem at 84% 14%, rgba(175, 82, 222, 0.05), transparent 66%);
+  content: "";
+  pointer-events: none;
+  animation: ambient-drift 72s ease-in-out infinite alternate;
+  will-change: transform;
+}
+
+@keyframes ambient-drift {
+  0% {
+    transform: translate3d(-1.5%, -1%, 0) scale(1);
+  }
+  50% {
+    transform: translate3d(1%, 1.5%, 0) scale(1.04);
+  }
+  100% {
+    transform: translate3d(1.5%, -1%, 0) scale(1.02);
+  }
+}
+
 ::selection {
-  background: rgba(0, 122, 255, 0.2);
+  background: rgba(0, 122, 255, 0.22);
+  text-shadow: none;
+}
+
+/* 滚动条统一抛光 */
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  border: 3px solid transparent;
+  border-radius: 999px;
+  background: rgba(60, 60, 67, 0.24);
+  background-clip: padding-box;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(60, 60, 67, 0.38);
+  background-clip: padding-box;
 }
 
 button,
@@ -109,8 +176,9 @@ p {
   flex-direction: column;
   padding: 24px 18px 20px;
   overflow: hidden;
-  border-right: 1px solid var(--line);
-  background: rgba(249, 249, 251, 0.72);
+  border-right: 1px solid rgba(255, 255, 255, 0.5);
+  background: linear-gradient(180deg, rgba(250, 250, 252, 0.68), rgba(246, 246, 250, 0.52));
+  box-shadow: inset -1px 0 0 rgba(60, 60, 67, 0.06);
   backdrop-filter: var(--blur);
   -webkit-backdrop-filter: var(--blur);
 }
@@ -136,13 +204,18 @@ p {
   border: 1px solid rgba(255, 255, 255, 0.7);
   border-radius: 14px;
   background: linear-gradient(145deg, #3fa0ff 0%, #007aff 52%, #5856d6 100%);
-  box-shadow: 0 10px 22px rgba(0, 122, 255, 0.24), inset 0 1px 0 rgba(255, 255, 255, 0.42);
+  box-shadow:
+    0 10px 22px rgba(0, 122, 255, 0.24),
+    inset 0 1px 0 rgba(255, 255, 255, 0.52),
+    inset 0 -8px 14px -8px rgba(10, 40, 110, 0.35);
 }
 
 .brand-mark::after {
   position: absolute;
   inset: 0;
-  background: linear-gradient(135deg, rgba(255, 255, 255, 0.28), transparent 48%);
+  background:
+    linear-gradient(135deg, rgba(255, 255, 255, 0.34), transparent 48%),
+    radial-gradient(120% 60% at 50% -18%, rgba(255, 255, 255, 0.5), transparent 60%);
   content: "";
 }
 
@@ -216,18 +289,26 @@ p {
   color: var(--muted-strong);
   padding: 0 13px;
   text-align: left;
-  transition: color 160ms ease, background 160ms ease, transform 160ms ease;
+  transition: color 160ms ease, background 160ms ease, transform 160ms ease,
+    box-shadow 200ms var(--ease-spring);
 }
 
 .nav-item:hover {
-  background: rgba(118, 118, 128, 0.08);
+  background: rgba(255, 255, 255, 0.55);
   color: var(--ink);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.6);
 }
 
+/* 选中态：玻璃胶囊 */
 .nav-item.is-active {
-  background: rgba(0, 122, 255, 0.12);
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.9), rgba(255, 255, 255, 0.58));
   color: var(--blue);
   font-weight: 680;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.9),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.5),
+    inset 0 -8px 14px -10px rgba(0, 122, 255, 0.18),
+    0 6px 16px -6px rgba(0, 40, 90, 0.14);
 }
 
 .nav-item.is-active::after {
@@ -237,6 +318,7 @@ p {
   height: 5px;
   border-radius: 50%;
   background: currentColor;
+  box-shadow: 0 0 8px rgba(0, 122, 255, 0.55);
   content: "";
 }
 
@@ -263,10 +345,13 @@ p {
   align-items: center;
   gap: 10px;
   margin-top: auto;
-  border: 1px solid var(--line);
+  border: 1px solid rgba(255, 255, 255, 0.55);
   border-radius: 15px;
-  background: rgba(255, 255, 255, 0.58);
+  background: rgba(255, 255, 255, 0.52);
   padding: 11px 12px;
+  box-shadow: var(--glass-specular), 0 4px 14px -8px rgba(15, 23, 42, 0.12);
+  backdrop-filter: blur(14px) saturate(160%);
+  -webkit-backdrop-filter: blur(14px) saturate(160%);
 }
 
 .sidebar-footer > span:last-child {
@@ -296,7 +381,7 @@ p {
   border: 2px solid rgba(52, 199, 89, 0.24);
   border-radius: 50%;
   background: var(--green);
-  box-shadow: 0 0 0 4px rgba(52, 199, 89, 0.1);
+  box-shadow: 0 0 0 4px rgba(52, 199, 89, 0.1), 0 0 10px rgba(52, 199, 89, 0.45);
 }
 
 .workspace {
@@ -317,11 +402,12 @@ p {
   background: rgba(255, 248, 232, 0.82);
   color: #9b5b00;
   padding: 13px 16px 13px 46px;
-  box-shadow: var(--shadow-sm);
+  box-shadow: var(--shadow-sm), inset 0 1px 0 rgba(255, 255, 255, 0.6);
   font-size: 13px;
   font-weight: 560;
   line-height: 1.5;
   backdrop-filter: var(--blur);
+  -webkit-backdrop-filter: var(--blur);
 }
 
 .security-warning::before {
@@ -339,6 +425,7 @@ p {
   content: "!";
   font-size: 13px;
   font-weight: 800;
+  box-shadow: 0 0 12px rgba(255, 149, 0, 0.4), inset 0 1px 0 rgba(255, 255, 255, 0.4);
 }
 
 .topbar {
@@ -409,51 +496,86 @@ h3 {
   padding: 0 14px;
   font-size: 13px;
   font-weight: 650;
-  transition: transform 150ms ease, box-shadow 150ms ease, background 150ms ease,
-    border-color 150ms ease;
+  transition: transform 180ms var(--ease-spring), box-shadow 180ms ease,
+    background 180ms ease, border-color 180ms ease;
 }
 
+/* 主按钮：品牌蓝 + 玻璃高光 + 按压回弹 */
 .primary {
-  background: linear-gradient(180deg, #1687ff 0%, var(--blue) 100%);
+  background: linear-gradient(180deg, #2f94ff 0%, var(--blue) 55%, #0063e0 100%);
   color: #fff;
-  box-shadow: 0 7px 16px rgba(0, 122, 255, 0.2), inset 0 1px 0 rgba(255, 255, 255, 0.28);
+  box-shadow:
+    0 8px 20px -4px rgba(0, 122, 255, 0.34),
+    inset 0 1px 0 rgba(255, 255, 255, 0.5),
+    inset 0 -1px 0 rgba(0, 52, 120, 0.24);
+  text-shadow: 0 1px 1px rgba(0, 50, 120, 0.16);
 }
 
 .primary:hover {
-  background: linear-gradient(180deg, #087ef7 0%, var(--blue-strong) 100%);
-  box-shadow: 0 9px 20px rgba(0, 122, 255, 0.25);
+  background: linear-gradient(180deg, #1c8bff 0%, var(--blue-strong) 100%);
+  box-shadow:
+    0 12px 26px -6px rgba(0, 122, 255, 0.4),
+    inset 0 1px 0 rgba(255, 255, 255, 0.55),
+    inset 0 -1px 0 rgba(0, 52, 120, 0.24);
   transform: translateY(-1px);
 }
 
+.primary:active {
+  transform: scale(0.97);
+  box-shadow:
+    0 4px 12px -4px rgba(0, 122, 255, 0.32),
+    inset 0 1px 0 rgba(255, 255, 255, 0.4),
+    inset 0 2px 6px rgba(0, 40, 100, 0.18);
+}
+
+/* 次按钮 / 幽灵按钮：磨砂玻璃 */
 .secondary {
-  border-color: var(--line);
-  background: var(--surface);
+  border-color: rgba(255, 255, 255, 0.6);
+  background: rgba(255, 255, 255, 0.5);
   color: var(--ink);
-  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.025);
-  backdrop-filter: blur(12px);
+  box-shadow: var(--glass-specular), 0 1px 2px rgba(0, 0, 0, 0.03);
+  backdrop-filter: blur(14px) saturate(160%);
+  -webkit-backdrop-filter: blur(14px) saturate(160%);
 }
 
-.secondary:hover,
-.ghost:hover {
-  border-color: var(--line-strong);
-  background: var(--surface-solid);
+.secondary:hover {
+  border-color: rgba(255, 255, 255, 0.8);
+  background: rgba(255, 255, 255, 0.72);
+  box-shadow: var(--glass-specular), 0 6px 16px -8px rgba(15, 23, 42, 0.16);
   transform: translateY(-1px);
+}
+
+.secondary:active,
+.ghost:active,
+.danger:active {
+  transform: scale(0.97);
 }
 
 .ghost {
-  border-color: transparent;
-  background: rgba(0, 122, 255, 0.08);
+  border-color: rgba(0, 122, 255, 0.12);
+  background: rgba(0, 122, 255, 0.07);
   color: var(--blue);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.4);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+}
+
+.ghost:hover {
+  border-color: rgba(0, 122, 255, 0.22);
+  background: rgba(0, 122, 255, 0.11);
+  transform: translateY(-1px);
 }
 
 .danger {
-  border-color: transparent;
-  background: rgba(255, 59, 48, 0.09);
+  border-color: rgba(255, 59, 48, 0.1);
+  background: rgba(255, 59, 48, 0.08);
   color: var(--red);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.4);
 }
 
 .danger:hover {
-  background: rgba(255, 59, 48, 0.14);
+  border-color: rgba(255, 59, 48, 0.2);
+  background: rgba(255, 59, 48, 0.13);
   transform: translateY(-1px);
 }
 
@@ -505,16 +627,47 @@ h3 {
   margin-bottom: 18px;
 }
 
+/* 液态玻璃卡片：渐变描边 + 顶部高光 + 底部柔光 */
 .metric {
   position: relative;
   min-height: 154px;
   overflow: hidden;
-  border: 1px solid var(--line);
+  border: 1px solid transparent;
   border-radius: var(--radius-lg);
-  background: var(--surface);
+  background:
+    var(--glass-fill) padding-box,
+    var(--glass-edge) border-box;
   padding: 19px 20px;
-  box-shadow: var(--shadow-sm);
-  backdrop-filter: blur(18px);
+  box-shadow: var(--glass-shadow), var(--glass-specular), var(--glass-underlight);
+  backdrop-filter: blur(20px) saturate(170%);
+  -webkit-backdrop-filter: blur(20px) saturate(170%);
+  transition: transform 220ms var(--ease-spring), box-shadow 220ms ease;
+}
+
+/* 顶部折射高光带，hover 时轻微位移 */
+.metric::before {
+  position: absolute;
+  inset: 0 0 auto 0;
+  height: 52%;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.5), rgba(255, 255, 255, 0));
+  content: "";
+  opacity: 0.45;
+  pointer-events: none;
+  transition: opacity 260ms ease, transform 260ms var(--ease-spring);
+}
+
+.metric:hover {
+  transform: translateY(-2px);
+  box-shadow:
+    0 2px 3px rgba(15, 23, 42, 0.04),
+    0 22px 44px -14px rgba(15, 23, 42, 0.16),
+    var(--glass-specular),
+    var(--glass-underlight);
+}
+
+.metric:hover::before {
+  opacity: 0.7;
+  transform: translateY(3px);
 }
 
 .metric::after {
@@ -547,7 +700,9 @@ h3 {
   background: currentColor;
   color: inherit;
   font-size: 15px;
-  box-shadow: inset 0 0 0 999px rgba(255, 255, 255, 0.87);
+  box-shadow:
+    inset 0 0 0 999px rgba(255, 255, 255, 0.87),
+    inset 0 1px 0 rgba(255, 255, 255, 0.9);
 }
 
 .metric strong {
@@ -592,14 +747,19 @@ h3 {
   grid-template-columns: minmax(330px, 0.84fr) minmax(420px, 1.16fr);
 }
 
+/* 面板：液态玻璃 + 渐变描边 */
 .panel {
+  position: relative;
   min-width: 0;
-  border: 1px solid var(--line);
+  border: 1px solid transparent;
   border-radius: var(--radius-lg);
-  background: var(--surface);
+  background:
+    var(--glass-fill) padding-box,
+    var(--glass-edge) border-box;
   padding: 21px;
-  box-shadow: var(--shadow-sm);
-  backdrop-filter: blur(18px);
+  box-shadow: var(--glass-shadow), var(--glass-specular), var(--glass-underlight);
+  backdrop-filter: blur(20px) saturate(170%);
+  -webkit-backdrop-filter: blur(20px) saturate(170%);
 }
 
 .panel-head {
@@ -642,7 +802,8 @@ textarea {
   color: var(--ink);
   padding: 10px 12px;
   outline: none;
-  transition: border-color 150ms ease, background 150ms ease, box-shadow 150ms ease;
+  box-shadow: inset 0 1px 2px rgba(15, 23, 42, 0.04);
+  transition: border-color 150ms ease, background 150ms ease, box-shadow 200ms ease;
 }
 
 textarea {
@@ -661,12 +822,16 @@ textarea:hover {
   background: rgba(118, 118, 128, 0.11);
 }
 
+/* focus：柔和的品牌蓝辉光 */
 input:focus,
 select:focus,
 textarea:focus {
   border-color: rgba(0, 122, 255, 0.5);
   background: var(--surface-solid);
-  box-shadow: 0 0 0 4px rgba(0, 122, 255, 0.11);
+  box-shadow:
+    0 0 0 4px rgba(0, 122, 255, 0.12),
+    0 0 22px rgba(0, 122, 255, 0.14),
+    inset 0 1px 0 rgba(255, 255, 255, 0.6);
 }
 
 input[type="checkbox"] {
@@ -700,10 +865,11 @@ input[type="checkbox"] {
 .node-user-group {
   display: grid;
   gap: 12px;
-  border: 1px solid var(--line-strong);
+  border: 1px solid rgba(255, 255, 255, 0.5);
   border-radius: 18px;
-  background: rgba(255, 255, 255, 0.42);
+  background: rgba(255, 255, 255, 0.4);
   padding: 15px;
+  box-shadow: var(--glass-specular);
 }
 
 .node-user-list {
@@ -714,23 +880,29 @@ input[type="checkbox"] {
 }
 
 .node-user-list .item {
-  background: rgba(255, 255, 255, 0.72);
+  background: rgba(255, 255, 255, 0.66);
 }
 
+/* 列表项：轻量玻璃 + hover 抬升 */
 .item {
   display: grid;
   gap: 11px;
-  border: 1px solid var(--line);
+  border: 1px solid rgba(255, 255, 255, 0.5);
   border-radius: 17px;
-  background: rgba(255, 255, 255, 0.58);
+  background: rgba(255, 255, 255, 0.55);
   padding: 15px;
-  transition: border-color 150ms ease, box-shadow 150ms ease, transform 150ms ease;
+  box-shadow: var(--glass-specular), 0 1px 2px rgba(15, 23, 42, 0.03);
+  transition: border-color 180ms ease, box-shadow 220ms ease,
+    transform 220ms var(--ease-spring), background 180ms ease;
 }
 
 .item:hover {
-  border-color: var(--line-strong);
-  box-shadow: 0 9px 24px rgba(0, 0, 0, 0.05);
-  transform: translateY(-1px);
+  border-color: rgba(255, 255, 255, 0.85);
+  background: rgba(255, 255, 255, 0.72);
+  box-shadow:
+    var(--glass-specular),
+    0 12px 28px -10px rgba(15, 23, 42, 0.14);
+  transform: translateY(-2px);
 }
 
 .item-head {
@@ -775,10 +947,11 @@ input[type="checkbox"] {
 .settings-status > div {
   display: grid;
   gap: 5px;
-  border: 1px solid var(--line);
+  border: 1px solid rgba(255, 255, 255, 0.45);
   border-radius: 14px;
   background: var(--surface-soft);
   padding: 12px 13px;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.45);
 }
 
 .settings-status span {
@@ -823,10 +996,12 @@ input[type="checkbox"] {
   font-size: 12px;
 }
 
+/* 徽章：带描边与内高光的玻璃药丸 */
 .badge {
   display: inline-flex;
   min-height: 25px;
   align-items: center;
+  border: 1px solid rgba(255, 255, 255, 0.4);
   border-radius: 999px;
   background: var(--surface-soft);
   color: var(--muted-strong);
@@ -834,6 +1009,7 @@ input[type="checkbox"] {
   font-size: 11px;
   font-weight: 700;
   white-space: nowrap;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.5);
 }
 
 .badge::before {
@@ -847,16 +1023,19 @@ input[type="checkbox"] {
 }
 
 .badge.ok {
+  border-color: rgba(52, 199, 89, 0.2);
   background: rgba(52, 199, 89, 0.11);
   color: #1d9f43;
 }
 
 .badge.warn {
+  border-color: rgba(255, 149, 0, 0.22);
   background: rgba(255, 149, 0, 0.12);
   color: #c66f00;
 }
 
 .badge.bad {
+  border-color: rgba(255, 59, 48, 0.18);
   background: rgba(255, 59, 48, 0.1);
   color: var(--red);
 }
@@ -868,12 +1047,14 @@ input[type="checkbox"] {
   font-size: 11px;
 }
 
+/* 进度条：玻璃轨道 + 带高光的渐变填充 */
 .progress {
   width: 100%;
   height: 7px;
   overflow: hidden;
   border-radius: 999px;
   background: rgba(118, 118, 128, 0.12);
+  box-shadow: inset 0 1px 2px rgba(15, 23, 42, 0.08);
 }
 
 .progress span {
@@ -881,7 +1062,9 @@ input[type="checkbox"] {
   height: 100%;
   border-radius: inherit;
   background: linear-gradient(90deg, var(--blue), var(--cyan));
-  box-shadow: 0 0 8px rgba(0, 122, 255, 0.24);
+  box-shadow:
+    0 0 8px rgba(0, 122, 255, 0.28),
+    inset 0 1px 0 rgba(255, 255, 255, 0.45);
 }
 
 .empty {
@@ -930,12 +1113,22 @@ input[type="checkbox"] {
   grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
   gap: 9px;
-  border: 1px solid var(--line);
+  border: 1px solid rgba(255, 255, 255, 0.55);
   border-radius: 13px;
-  background: var(--surface-solid);
+  background: rgba(255, 255, 255, 0.78);
   padding: 10px;
-  box-shadow: 0 3px 10px rgba(0, 0, 0, 0.035);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.7),
+    0 3px 10px rgba(0, 0, 0, 0.035);
   cursor: grab;
+  transition: box-shadow 180ms ease, border-color 180ms ease;
+}
+
+.chain-node:hover {
+  border-color: rgba(255, 255, 255, 0.85);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.8),
+    0 8px 20px -6px rgba(15, 23, 42, 0.14);
 }
 
 .chain-node.is-selected {
@@ -995,6 +1188,7 @@ input[type="checkbox"] {
   color: var(--blue);
   font-size: 11px;
   font-weight: 760;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.5);
 }
 
 .chain-node-actions {
@@ -1072,6 +1266,7 @@ input[type="checkbox"] {
   border-radius: 14px;
   background: rgba(0, 122, 255, 0.055);
   padding: 11px 12px;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.5);
 }
 
 .chain-preview span {
@@ -1100,7 +1295,9 @@ input[type="checkbox"] {
   font-size: 12px;
   line-height: 1.6;
   white-space: pre-wrap;
-  box-shadow: inset 0 1px 12px rgba(0, 0, 0, 0.32);
+  box-shadow:
+    inset 0 1px 12px rgba(0, 0, 0, 0.32),
+    inset 0 1px 0 rgba(255, 255, 255, 0.06);
 }
 
 .toast {
@@ -1109,15 +1306,18 @@ input[type="checkbox"] {
   bottom: 22px;
   z-index: 100;
   max-width: min(420px, calc(100vw - 44px));
-  border: 1px solid rgba(255, 255, 255, 0.12);
+  border: 1px solid rgba(255, 255, 255, 0.14);
   border-radius: 14px;
-  background: rgba(30, 30, 32, 0.9);
+  background: rgba(30, 30, 32, 0.86);
   color: white;
   padding: 12px 15px;
-  box-shadow: 0 18px 44px rgba(0, 0, 0, 0.24);
+  box-shadow:
+    0 18px 44px rgba(0, 0, 0, 0.26),
+    inset 0 1px 0 rgba(255, 255, 255, 0.14);
   font-size: 13px;
   font-weight: 590;
-  backdrop-filter: blur(18px);
+  backdrop-filter: blur(18px) saturate(160%);
+  -webkit-backdrop-filter: blur(18px) saturate(160%);
   animation: toast-in 180ms ease-out;
 }
 
@@ -1144,6 +1344,7 @@ input[type="checkbox"] {
 .dialog::backdrop {
   background: rgba(10, 10, 12, 0.34);
   backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
 }
 
 .dialog[open] .dialog-panel {
@@ -1157,13 +1358,18 @@ input[type="checkbox"] {
   }
 }
 
+/* 对话框：最强一级的液态玻璃 */
 .dialog-panel {
-  border: 1px solid rgba(255, 255, 255, 0.64);
+  border: 1px solid rgba(255, 255, 255, 0.68);
   border-radius: var(--radius-lg);
-  background: rgba(250, 250, 252, 0.92);
+  background: linear-gradient(165deg, rgba(252, 252, 254, 0.92), rgba(246, 246, 250, 0.82));
   padding: 22px;
-  box-shadow: 0 30px 90px rgba(0, 0, 0, 0.22);
+  box-shadow:
+    0 30px 90px rgba(0, 0, 0, 0.22),
+    inset 0 1px 0 rgba(255, 255, 255, 0.85),
+    inset 0 -20px 34px -26px rgba(255, 255, 255, 0.7);
   backdrop-filter: var(--blur);
+  -webkit-backdrop-filter: var(--blur);
 }
 
 .dialog-actions {
@@ -1179,6 +1385,7 @@ input[type="checkbox"] {
   padding: 14px;
   background: #ffffff;
   border-radius: var(--radius-lg);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.8), 0 2px 8px rgba(15, 23, 42, 0.05);
 }
 
 .qr-wrap img {
@@ -1234,11 +1441,19 @@ input[type="checkbox"] {
   grid-template-columns: 20px minmax(0, 1fr);
   align-items: start;
   gap: 10px;
-  border: 1px solid var(--line);
+  border: 1px solid rgba(255, 255, 255, 0.5);
   border-radius: 14px;
-  background: rgba(255, 255, 255, 0.62);
+  background: rgba(255, 255, 255, 0.58);
   color: var(--ink);
   padding: 11px;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.6);
+  transition: border-color 180ms ease, box-shadow 180ms ease, background 180ms ease;
+}
+
+.node-option:hover {
+  border-color: rgba(255, 255, 255, 0.85);
+  background: rgba(255, 255, 255, 0.75);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.7), 0 6px 16px -8px rgba(15, 23, 42, 0.12);
 }
 
 .node-option.disabled {
@@ -1352,6 +1567,7 @@ input[type="checkbox"] {
   width: 48vw;
   height: 48vw;
   background: radial-gradient(circle at 35% 40%, #5ac8fa, #007aff 48%, rgba(88, 86, 214, 0.2) 72%);
+  animation: orb-float 26s ease-in-out infinite alternate;
 }
 
 .login-orb-two {
@@ -1360,16 +1576,31 @@ input[type="checkbox"] {
   width: 52vw;
   height: 52vw;
   background: radial-gradient(circle at 60% 35%, rgba(255, 45, 85, 0.72), rgba(175, 82, 222, 0.66) 44%, rgba(88, 86, 214, 0.12) 72%);
+  animation: orb-float 34s ease-in-out infinite alternate-reverse;
 }
 
+@keyframes orb-float {
+  from {
+    transform: translate3d(0, 0, 0) scale(1);
+  }
+  to {
+    transform: translate3d(2.5%, 3%, 0) scale(1.05);
+  }
+}
+
+/* 登录面板：最强液态玻璃质感 */
 .login-panel {
   width: min(440px, 100%);
-  border: 1px solid rgba(255, 255, 255, 0.72);
+  border: 1px solid rgba(255, 255, 255, 0.78);
   border-radius: 30px;
-  background: rgba(255, 255, 255, 0.76);
+  background: linear-gradient(165deg, rgba(255, 255, 255, 0.8), rgba(255, 255, 255, 0.6));
   padding: 30px;
-  box-shadow: 0 34px 100px rgba(26, 35, 58, 0.17), inset 0 1px 0 rgba(255, 255, 255, 0.68);
+  box-shadow:
+    0 34px 100px rgba(26, 35, 58, 0.2),
+    inset 0 1px 0 rgba(255, 255, 255, 0.85),
+    inset 0 -24px 40px -30px rgba(255, 255, 255, 0.8);
   backdrop-filter: saturate(180%) blur(34px);
+  -webkit-backdrop-filter: saturate(180%) blur(34px);
 }
 
 .login-brand {
@@ -1413,6 +1644,39 @@ input[type="checkbox"] {
   font-weight: 620;
 }
 
+/* 不支持 backdrop-filter 时的不透明回退 */
+@supports not ((backdrop-filter: blur(2px)) or (-webkit-backdrop-filter: blur(2px))) {
+  .sidebar,
+  .security-warning {
+    background: #f7f7f9;
+  }
+
+  .panel,
+  .metric {
+    border-color: var(--line);
+    background: var(--surface-solid);
+  }
+
+  .sidebar-footer,
+  .secondary {
+    border-color: var(--line);
+    background: var(--surface-solid);
+  }
+
+  .ghost {
+    background: rgba(0, 122, 255, 0.1);
+  }
+
+  .dialog-panel,
+  .login-panel {
+    background: #fbfbfc;
+  }
+
+  .toast {
+    background: rgba(30, 30, 32, 0.97);
+  }
+}
+
 @media (max-width: 1180px) {
   .workspace {
     padding: 32px 28px 46px;
@@ -1443,10 +1707,12 @@ input[type="checkbox"] {
     width: auto;
     height: 72px;
     padding: 7px;
-    border: 1px solid rgba(255, 255, 255, 0.58);
+    border: 1px solid rgba(255, 255, 255, 0.62);
     border-radius: 23px;
-    background: rgba(246, 246, 248, 0.82);
-    box-shadow: 0 16px 44px rgba(0, 0, 0, 0.18);
+    background: linear-gradient(180deg, rgba(250, 250, 252, 0.85), rgba(244, 244, 248, 0.72));
+    box-shadow:
+      0 16px 44px rgba(0, 0, 0, 0.18),
+      inset 0 1px 0 rgba(255, 255, 255, 0.8);
   }
 
   .sidebar > .brand,
@@ -1613,37 +1879,167 @@ input[type="checkbox"] {
     --line-strong: rgba(255, 255, 255, 0.18);
     --shadow-sm: 0 12px 30px rgba(0, 0, 0, 0.2);
     --shadow: 0 24px 60px rgba(0, 0, 0, 0.34);
+    --glass-fill: linear-gradient(165deg, rgba(44, 44, 48, 0.72) 0%, rgba(30, 30, 34, 0.55) 100%);
+    --glass-edge: linear-gradient(
+      140deg,
+      rgba(255, 255, 255, 0.28) 0%,
+      rgba(255, 255, 255, 0.06) 34%,
+      rgba(255, 255, 255, 0.02) 58%,
+      rgba(255, 255, 255, 0.16) 100%
+    );
+    --glass-specular: inset 0 1px 0 rgba(255, 255, 255, 0.14);
+    --glass-underlight: inset 0 -18px 30px -22px rgba(255, 255, 255, 0.06);
+    --glass-shadow: 0 1px 2px rgba(0, 0, 0, 0.3), 0 16px 38px -12px rgba(0, 0, 0, 0.45);
   }
 
   body {
     background:
-      radial-gradient(circle at 92% 2%, rgba(0, 122, 255, 0.16), transparent 28rem),
-      radial-gradient(circle at 22% 96%, rgba(175, 82, 222, 0.1), transparent 34rem),
+      radial-gradient(50rem 36rem at 88% -8%, rgba(0, 122, 255, 0.18), transparent 62%),
+      radial-gradient(42rem 32rem at -10% 18%, rgba(50, 173, 230, 0.1), transparent 60%),
+      radial-gradient(48rem 38rem at 10% 98%, rgba(255, 149, 0, 0.06), transparent 62%),
+      radial-gradient(54rem 42rem at 64% 114%, rgba(175, 82, 222, 0.12), transparent 62%),
       var(--bg);
   }
 
+  body::before {
+    background:
+      radial-gradient(34rem 26rem at 24% 30%, rgba(0, 122, 255, 0.1), transparent 66%),
+      radial-gradient(30rem 24rem at 78% 62%, rgba(50, 173, 230, 0.08), transparent 66%),
+      radial-gradient(28rem 22rem at 52% 88%, rgba(255, 149, 0, 0.05), transparent 66%),
+      radial-gradient(26rem 22rem at 84% 14%, rgba(175, 82, 222, 0.08), transparent 66%);
+  }
+
+  ::-webkit-scrollbar-thumb {
+    background: rgba(255, 255, 255, 0.2);
+    background-clip: padding-box;
+  }
+
+  ::-webkit-scrollbar-thumb:hover {
+    background: rgba(255, 255, 255, 0.32);
+    background-clip: padding-box;
+  }
+
   .sidebar {
-    background: rgba(22, 22, 24, 0.72);
+    border-right-color: rgba(255, 255, 255, 0.08);
+    background: linear-gradient(180deg, rgba(26, 26, 30, 0.72), rgba(20, 20, 24, 0.58));
+    box-shadow: inset -1px 0 0 rgba(0, 0, 0, 0.3);
+  }
+
+  .nav-item:hover {
+    background: rgba(255, 255, 255, 0.08);
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08);
+  }
+
+  .nav-item.is-active {
+    background: linear-gradient(180deg, rgba(58, 58, 64, 0.9), rgba(44, 44, 50, 0.65));
+    box-shadow:
+      inset 0 1px 0 rgba(255, 255, 255, 0.14),
+      inset 0 0 0 1px rgba(255, 255, 255, 0.08),
+      inset 0 -8px 14px -10px rgba(0, 122, 255, 0.3),
+      0 6px 16px -6px rgba(0, 0, 0, 0.5);
   }
 
   .sidebar-footer,
   .item,
   .node-option {
-    background: rgba(44, 44, 46, 0.62);
+    border-color: rgba(255, 255, 255, 0.1);
+    background: rgba(44, 44, 46, 0.6);
+    box-shadow: var(--glass-specular);
+  }
+
+  .item:hover,
+  .node-option:hover {
+    border-color: rgba(255, 255, 255, 0.2);
+    background: rgba(56, 56, 60, 0.72);
+  }
+
+  .node-user-group {
+    border-color: rgba(255, 255, 255, 0.1);
+    background: rgba(44, 44, 46, 0.4);
+  }
+
+  .node-user-list .item {
+    background: rgba(58, 58, 62, 0.66);
+  }
+
+  .metric::before {
+    background: linear-gradient(180deg, rgba(255, 255, 255, 0.09), rgba(255, 255, 255, 0));
+    opacity: 0.6;
   }
 
   .metric-icon {
-    box-shadow: inset 0 0 0 999px rgba(22, 22, 24, 0.78);
+    box-shadow:
+      inset 0 0 0 999px rgba(22, 22, 24, 0.78),
+      inset 0 1px 0 rgba(255, 255, 255, 0.12);
+  }
+
+  .secondary {
+    border-color: rgba(255, 255, 255, 0.12);
+    background: rgba(58, 58, 62, 0.5);
+  }
+
+  .secondary:hover {
+    border-color: rgba(255, 255, 255, 0.22);
+    background: rgba(66, 66, 72, 0.7);
+  }
+
+  .ghost {
+    border-color: rgba(0, 122, 255, 0.2);
+    background: rgba(0, 122, 255, 0.12);
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06);
+  }
+
+  .danger {
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05);
+  }
+
+  .badge {
+    border-color: rgba(255, 255, 255, 0.08);
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08);
+  }
+
+  .settings-status > div {
+    border-color: rgba(255, 255, 255, 0.08);
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06);
+  }
+
+  .chain-node {
+    border-color: rgba(255, 255, 255, 0.1);
+    background: rgba(44, 44, 48, 0.85);
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08), 0 3px 10px rgba(0, 0, 0, 0.3);
+  }
+
+  .chain-preview {
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06);
   }
 
   .security-warning {
     background: rgba(82, 49, 0, 0.72);
     color: #ffbd59;
+    box-shadow: var(--shadow-sm), inset 0 1px 0 rgba(255, 255, 255, 0.1);
+  }
+
+  input:focus,
+  select:focus,
+  textarea:focus {
+    background: #2c2c2e;
+    box-shadow:
+      0 0 0 4px rgba(0, 122, 255, 0.2),
+      0 0 22px rgba(0, 122, 255, 0.18),
+      inset 0 1px 0 rgba(255, 255, 255, 0.08);
   }
 
   .dialog-panel {
-    border-color: var(--line);
-    background: rgba(28, 28, 30, 0.94);
+    border-color: rgba(255, 255, 255, 0.12);
+    background: linear-gradient(165deg, rgba(36, 36, 40, 0.95), rgba(26, 26, 30, 0.9));
+    box-shadow:
+      0 30px 90px rgba(0, 0, 0, 0.5),
+      inset 0 1px 0 rgba(255, 255, 255, 0.12),
+      inset 0 -20px 34px -26px rgba(255, 255, 255, 0.05);
+  }
+
+  .qr-wrap {
+    box-shadow: none;
   }
 
   .login-shell::before {
@@ -1653,8 +2049,22 @@ input[type="checkbox"] {
   }
 
   .login-panel {
-    border-color: rgba(255, 255, 255, 0.12);
-    background: rgba(28, 28, 30, 0.76);
+    border-color: rgba(255, 255, 255, 0.14);
+    background: linear-gradient(165deg, rgba(38, 38, 42, 0.82), rgba(26, 26, 30, 0.68));
+    box-shadow:
+      0 34px 100px rgba(0, 0, 0, 0.5),
+      inset 0 1px 0 rgba(255, 255, 255, 0.14),
+      inset 0 -24px 40px -30px rgba(255, 255, 255, 0.06);
+  }
+
+  @media (max-width: 860px) {
+    .sidebar {
+      border-color: rgba(255, 255, 255, 0.12);
+      background: linear-gradient(180deg, rgba(30, 30, 34, 0.88), rgba(22, 22, 26, 0.78));
+      box-shadow:
+        0 16px 44px rgba(0, 0, 0, 0.5),
+        inset 0 1px 0 rgba(255, 255, 255, 0.12);
+    }
   }
 }
 
@@ -1666,5 +2076,11 @@ input[type="checkbox"] {
     transition-duration: 0.01ms !important;
     animation-duration: 0.01ms !important;
     animation-iteration-count: 1 !important;
+  }
+
+  body::before,
+  .login-orb-one,
+  .login-orb-two {
+    animation: none !important;
   }
 }
