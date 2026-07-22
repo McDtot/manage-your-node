@@ -7,11 +7,14 @@
 > [!IMPORTANT]
 > 本项目适合个人或小规模运维，当前为单管理员模式。应用本身不提供 HTTPS；公网使用前请配置反向代理和 TLS，并遵守所在地法律法规及服务商条款。
 
-## v0.11.0 更新亮点
+## v0.12.0 更新亮点
 
-- WebUI 整体美化并引入液态玻璃（Liquid Glass）视觉：环境光晕背景、玻璃折射高光、渐变描边与细腻的悬浮/按压动效，登录页支持 3D 视差倾斜，同时保留暗色模式与 `prefers-reduced-motion` 适配。
+- WebUI 视觉全面重构为「液态玻璃 v2」：更通透的玻璃质感（低不透明度填充 + 高斯模糊 + 渐变折射描边）、悬浮玻璃侧栏、靛蓝紫新品牌色。
+- 新增「外观与背景」设置：预设渐变 / 上传图片 / 图片 URL 三种自定义背景，背景与卡片遮罩强度可分别调节（设置保存在当前浏览器）。
+- 新增手动主题切换：跟随系统 / 亮色 / 暗色三态，顶栏一键循环切换。
+- 修复严格 CSP 导致的样式失效：内联与 JS 注入样式全部迁入样式表，`img-src` 放行 HTTPS 图片以支持外链背景。
 
-完整变更见 [v0.11.0 发布说明](https://github.com/McDtot/manage-your-node/releases/tag/v0.11.0)。此前 v0.10.1 允许在远端 SSH 不可达时删除本地记录，见 [v0.10.1](https://github.com/McDtot/manage-your-node/releases/tag/v0.10.1)。
+完整变更见 [v0.12.0 发布说明](https://github.com/McDtot/manage-your-node/releases/tag/v0.12.0)。此前 v0.11.0 首次引入液态玻璃视觉，见 [v0.11.0](https://github.com/McDtot/manage-your-node/releases/tag/v0.11.0)。
 
 ## 主要功能
 

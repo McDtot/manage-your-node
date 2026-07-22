@@ -4,97 +4,14 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Manage Your Node</title>
-    <link rel="stylesheet" href="/static/styles.css?v=liquid-20260721" />
-    <style>
-      /* Liquid Glass 装饰背景层（与 styles.css 解耦，纯装饰） */
-      .bg-orb {
-        position: fixed;
-        pointer-events: none;
-        border-radius: 50%;
-        z-index: 0;
-        will-change: transform;
-      }
-      .bg-orb-1 {
-        top: -18vmax;
-        right: -10vmax;
-        width: 52vmax;
-        height: 52vmax;
-        background: radial-gradient(
-          circle at 40% 40%,
-          rgba(122, 162, 255, 0.5),
-          rgba(122, 162, 255, 0) 68%
-        );
-        -webkit-filter: blur(72px);
-        filter: blur(72px);
-        opacity: 0.55;
-        animation: bg-orb-drift-1 38s ease-in-out infinite alternate;
-      }
-      .bg-orb-2 {
-        bottom: -20vmax;
-        left: -12vmax;
-        width: 46vmax;
-        height: 46vmax;
-        background: radial-gradient(
-          circle at 55% 45%,
-          rgba(110, 214, 190, 0.42),
-          rgba(110, 214, 190, 0) 70%
-        );
-        -webkit-filter: blur(84px);
-        filter: blur(84px);
-        opacity: 0.48;
-        animation: bg-orb-drift-2 46s ease-in-out infinite alternate;
-      }
-      .bg-orb-3 {
-        top: 32%;
-        left: 38%;
-        width: 38vmax;
-        height: 38vmax;
-        background: radial-gradient(
-          circle at 50% 50%,
-          rgba(255, 178, 152, 0.34),
-          rgba(255, 178, 152, 0) 70%
-        );
-        -webkit-filter: blur(90px);
-        filter: blur(90px);
-        opacity: 0.42;
-        animation: bg-orb-drift-3 54s ease-in-out infinite alternate;
-      }
-      .bg-noise {
-        position: fixed;
-        inset: 0;
-        pointer-events: none;
-        z-index: 0;
-        opacity: 0.028;
-        background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='160' height='160' filter='url(%23n)'/%3E%3C/svg%3E");
-        background-size: 160px 160px;
-      }
-      .shell {
-        position: relative;
-        z-index: 1;
-      }
-      @keyframes bg-orb-drift-1 {
-        from { transform: translate3d(0, 0, 0) scale(1); }
-        to { transform: translate3d(-4vmax, 3vmax, 0) scale(1.06); }
-      }
-      @keyframes bg-orb-drift-2 {
-        from { transform: translate3d(0, 0, 0) scale(1.04); }
-        to { transform: translate3d(5vmax, -3vmax, 0) scale(1); }
-      }
-      @keyframes bg-orb-drift-3 {
-        from { transform: translate3d(0, 0, 0) scale(1); }
-        to { transform: translate3d(-3vmax, -4vmax, 0) scale(1.08); }
-      }
-      @media (prefers-reduced-motion: reduce) {
-        .bg-orb {
-          animation: none;
-        }
-      }
-    </style>
+    <link rel="stylesheet" href="/static/styles.css?v=glass-v2-themefix-20260722" />
   </head>
   <body>
+    <div class="bg-custom" id="bgCustom" aria-hidden="true"></div>
     <div class="bg-orb bg-orb-1" aria-hidden="true"></div>
     <div class="bg-orb bg-orb-2" aria-hidden="true"></div>
     <div class="bg-orb bg-orb-3" aria-hidden="true"></div>
+    <div class="bg-orb bg-orb-4" aria-hidden="true"></div>
     <div class="bg-noise" aria-hidden="true"></div>
     <div class="shell">
       <aside class="sidebar">
@@ -157,6 +74,7 @@
               <p id="statusLine">加载中</p>
             </div>
             <div class="top-actions">
+              <button class="secondary icon-button" id="themeToggleBtn" type="button" title="主题：跟随系统" aria-label="切换主题">🌓</button>
               <button class="secondary icon-label" id="refreshBtn"><span aria-hidden="true">↻</span>刷新</button>
               <button class="secondary icon-label" id="refreshTrafficBtn"><span aria-hidden="true">⟳</span>刷新用量</button>
               <button class="secondary icon-label" id="healthCheckBtn"><span aria-hidden="true">♥</span>健康检查</button>
@@ -467,6 +385,35 @@
                 保存前请先确认域名解析、HTTPS 证书和反向代理已经可用。首次切换后请通过新域名重新登录；当前会话的旧地址会临时保留到本次服务重启，配置失败也可通过本机或 SSH 端口转发访问 127.0.0.1 撤销。
               </div>
             </section>
+
+            <section class="panel appearance-panel">
+              <div class="panel-head">
+                <div><h2>外观与背景</h2><p>背景只保存在当前浏览器；换上图片或深色渐变后，毛玻璃的折射感会更明显</p></div>
+              </div>
+              <div class="bg-presets" id="bgPresetList"></div>
+              <div class="bg-controls">
+                <div class="bg-row">
+                  <button class="secondary" id="bgUploadBtn" type="button">上传图片</button>
+                  <input id="bgFileInput" type="file" accept="image/*" hidden />
+                  <span class="meta">自动压缩到 1920px 宽，仅存于本机浏览器</span>
+                </div>
+                <div class="bg-url-row">
+                  <input id="bgUrlInput" type="url" inputmode="url" placeholder="或粘贴图片 URL，例如 https://example.com/bg.jpg" />
+                  <button class="secondary" id="bgUrlApply" type="button">使用 URL</button>
+                </div>
+                <label class="bg-veil">
+                  背景遮罩（空白区域，拉高更易读，拉低背景更通透）
+                  <input id="bgVeilRange" type="range" min="0" max="80" step="5" />
+                </label>
+                <label class="bg-veil">
+                  卡片遮罩（面板与卡片的不透明度，拉高更实、拉低更透）
+                  <input id="cardVeilRange" type="range" min="10" max="90" step="2" />
+                </label>
+                <div class="settings-actions">
+                  <button class="ghost" id="bgResetBtn" type="button">恢复默认背景</button>
+                </div>
+              </div>
+            </section>
           </div>
         </section>
         </div>
@@ -544,6 +491,7 @@
     </dialog>
 
     <div class="toast" id="toast" hidden></div>
-    <script src="/static/app.js?v=traffic-qr-20260719"></script>
+    <script src="/static/appearance.js?v=glass-v2-themefix-20260722"></script>
+    <script src="/static/app.js?v=glass-v2-csp-20260722"></script>
   </body>
 </html>

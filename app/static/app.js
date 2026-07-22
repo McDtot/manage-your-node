@@ -1422,7 +1422,8 @@ function bindEvents() {
  * 液态玻璃（Liquid Glass）视觉增强 —— 纯增量模块
  * 不新增/修改任何 id、class 契约与数据属性，不改动 DOM 结构：
  *  - 指针追踪的折射高光：仅向元素写入 --lg-x / --lg-y / --lg-o 三个 CSS
- *    自定义属性，由注入的伴随样式（伪元素、pointer-events: none）消费；
+ *    自定义属性，由 styles.css 中的伴随样式（伪元素、pointer-events: none）
+ *    消费——CSP style-src 'self' 会拦截 JS 注入的 <style>，故样式不注入；
  *  - 指标卡轻微的 3D 悬浮倾斜（仅 transform，尊重 prefers-reduced-motion，
  *    触控设备自动跳过）；
  *  - 按钮 / 导航的细腻按压回弹（纯 CSS :active，无需 JS 参与）。
@@ -1433,41 +1434,8 @@ function initLiquidGlassFx() {
   const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
   const finePointer = window.matchMedia("(pointer: fine)").matches;
 
-  // 注入伴随样式：默认 opacity 为 0，不启用时不产生任何视觉差异。
-  if (!document.getElementById("liquidGlassFxStyle")) {
-    const style = document.createElement("style");
-    style.id = "liquidGlassFxStyle";
-    style.textContent = [
-      ".panel::before, .metric::before, .item::before, .dialog-panel::before {",
-      '  content: "";',
-      "  position: absolute;",
-      "  inset: 0;",
-      "  border-radius: inherit;",
-      "  pointer-events: none;",
-      "  background: radial-gradient(340px circle at var(--lg-x, 50%) var(--lg-y, 0%),",
-      "    rgba(255, 255, 255, 0.42), rgba(255, 255, 255, 0) 62%);",
-      "  opacity: var(--lg-o, 0);",
-      "  transition: opacity 200ms ease;",
-      "  z-index: 1;",
-      "}",
-      ".metric.lg-tilt {",
-      "  transition: transform 180ms ease-out;",
-      "  will-change: transform;",
-      "}",
-      ".primary:active, .secondary:active, .ghost:active, .danger:active,",
-      ".icon-button:active, .nav-item:active {",
-      "  transform: translateY(0) scale(0.97);",
-      "}",
-      "@media (prefers-reduced-motion: reduce) {",
-      "  .panel::before, .metric::before, .item::before, .dialog-panel::before {",
-      "    transition: none;",
-      "  }",
-      "}",
-    ].join("\n");
-    document.head.appendChild(style);
-  }
-
-  // 触控 / 减少动态偏好：保留按压回弹（纯 CSS），跳过指针高光与倾斜。
+  // 伴随样式（伪元素高光、按压回弹）放在 styles.css 中：
+  // CSP style-src 'self' 会拦截注入的 <style> 元素，此处只写 CSS 变量。
   if (!finePointer) return;
 
   let activeEl = null;
