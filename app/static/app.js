@@ -85,6 +85,16 @@ function toast(message) {
   }, 2800);
 }
 
+function moveNavGlider() {
+  const glider = $(".nav-glider");
+  const active = $(".nav-item.is-active");
+  if (!glider || !active) return;
+  glider.style.width = `${active.offsetWidth}px`;
+  glider.style.height = `${active.offsetHeight}px`;
+  glider.style.transform = `translate(${active.offsetLeft}px, ${active.offsetTop}px)`;
+  glider.classList.add("is-ready");
+}
+
 function setSection(id) {
   const meta = {
     overview: ["CONTROL CENTER", "总览"],
@@ -106,6 +116,7 @@ function setSection(id) {
   $("#pageEyebrow").textContent = eyebrow;
   $("#pageTitle").textContent = title;
   $("#topAddServerBtn").hidden = id !== "servers";
+  moveNavGlider();
 }
 
 function statusBadge(status) {
@@ -1418,107 +1429,10 @@ function bindEvents() {
   });
 }
 
-/* ---------------------------------------------------------------------------
- * 液态玻璃（Liquid Glass）视觉增强 —— 纯增量模块
- * 不新增/修改任何 id、class 契约与数据属性，不改动 DOM 结构：
- *  - 指针追踪的折射高光：仅向元素写入 --lg-x / --lg-y / --lg-o 三个 CSS
- *    自定义属性，由 styles.css 中的伴随样式（伪元素、pointer-events: none）
- *    消费——CSP style-src 'self' 会拦截 JS 注入的 <style>，故样式不注入；
- *  - 指标卡轻微的 3D 悬浮倾斜（仅 transform，尊重 prefers-reduced-motion，
- *    触控设备自动跳过）；
- *  - 按钮 / 导航的细腻按压回弹（纯 CSS :active，无需 JS 参与）。
- * 高光只使用渐变 + opacity，不新增 backdrop-filter 层级，避免模糊堆叠。
- * ------------------------------------------------------------------------- */
-function initLiquidGlassFx() {
-  const GLASS_SELECTOR = ".panel, .metric, .item, .dialog-panel";
-  const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-  const finePointer = window.matchMedia("(pointer: fine)").matches;
-
-  // 伴随样式（伪元素高光、按压回弹）放在 styles.css 中：
-  // CSP style-src 'self' 会拦截注入的 <style> 元素，此处只写 CSS 变量。
-  if (!finePointer) return;
-
-  let activeEl = null;
-  let pendingFrame = 0;
-  let pendingX = 0;
-  let pendingY = 0;
-
-  // 伪元素需要定位上下文；仅当元素本身是 static 时才补 relative，
-  // 已有 relative/sticky/absolute 的元素（如 .nav-item、.metric）不受影响。
-  function ensurePositioned(el) {
-    if (window.getComputedStyle(el).position === "static") {
-      el.style.position = "relative";
-    }
-  }
-
-  function resetGlass(el) {
-    if (!el) return;
-    el.style.setProperty("--lg-o", "0");
-    if (el.classList.contains("lg-tilt")) {
-      el.style.transform = "";
-    }
-  }
-
-  function flushFrame() {
-    pendingFrame = 0;
-    if (!activeEl || !activeEl.isConnected) return;
-    const rect = activeEl.getBoundingClientRect();
-    if (rect.width === 0 || rect.height === 0) return;
-    const px = Math.min(Math.max((pendingX - rect.left) / rect.width, 0), 1);
-    const py = Math.min(Math.max((pendingY - rect.top) / rect.height, 0), 1);
-    activeEl.style.setProperty("--lg-x", `${(px * 100).toFixed(1)}%`);
-    activeEl.style.setProperty("--lg-y", `${(py * 100).toFixed(1)}%`);
-    activeEl.style.setProperty("--lg-o", "1");
-    // 指标卡的轻微 3D 倾斜，角度刻意收敛，保持运维工具的稳重感。
-    if (!reducedMotion && activeEl.classList.contains("metric")) {
-      activeEl.classList.add("lg-tilt");
-      const rotateX = (0.5 - py) * 5;
-      const rotateY = (px - 0.5) * 6;
-      activeEl.style.transform =
-        `perspective(760px) rotateX(${rotateX.toFixed(2)}deg) rotateY(${rotateY.toFixed(2)}deg)`;
-    }
-  }
-
-  document.addEventListener(
-    "pointermove",
-    (event) => {
-      const el =
-        event.target instanceof Element ? event.target.closest(GLASS_SELECTOR) : null;
-      if (el !== activeEl) {
-        resetGlass(activeEl);
-        activeEl = el;
-        if (activeEl) ensurePositioned(activeEl);
-      }
-      if (!activeEl) return;
-      pendingX = event.clientX;
-      pendingY = event.clientY;
-      if (!pendingFrame) {
-        pendingFrame = requestAnimationFrame(flushFrame);
-      }
-    },
-    { passive: true },
-  );
-
-  document.addEventListener(
-    "pointerout",
-    (event) => {
-      if (!activeEl) return;
-      if (event.relatedTarget instanceof Element && activeEl.contains(event.relatedTarget)) {
-        return;
-      }
-      resetGlass(activeEl);
-      activeEl = null;
-    },
-    { passive: true },
-  );
-
-  // 页面失焦 / 指针取消时兜底复位，避免高光残留。
-  window.addEventListener("blur", () => resetGlass(activeEl), { passive: true });
-  document.addEventListener("pointercancel", () => resetGlass(activeEl), { passive: true });
-}
-
 bindEvents();
-initLiquidGlassFx();
+moveNavGlider();
+window.addEventListener("resize", moveNavGlider);
+window.addEventListener("load", moveNavGlider);
 api("/api/auth/session")
   .then((session) => {
     const warning = $("#securityWarning");

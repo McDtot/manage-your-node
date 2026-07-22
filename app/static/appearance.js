@@ -112,6 +112,54 @@
         "radial-gradient(circle at 70% 0%, #4a5cff, transparent 60%), #06202b",
     },
     {
+      id: "wp-dawn",
+      name: "晨曦",
+      value: 'url("/static/wallpapers/dawn.png")',
+      swatch: 'url("/static/wallpapers/dawn.png") center / cover',
+    },
+    {
+      id: "wp-aurora",
+      name: "深海极光",
+      value: 'url("/static/wallpapers/aurora.png")',
+      swatch: 'url("/static/wallpapers/aurora.png") center / cover',
+    },
+    {
+      id: "wp-nebula",
+      name: "紫雾",
+      value: 'url("/static/wallpapers/nebula.png")',
+      swatch: 'url("/static/wallpapers/nebula.png") center / cover',
+    },
+    {
+      id: "wp-fjord",
+      name: "峡湾",
+      value: 'url("/static/wallpapers/photo-1015.jpg")',
+      swatch: 'url("/static/wallpapers/photo-1015.jpg") center / cover',
+    },
+    {
+      id: "wp-canyon",
+      name: "峡谷暮色",
+      value: 'url("/static/wallpapers/photo-1016.jpg")',
+      swatch: 'url("/static/wallpapers/photo-1016.jpg") center / cover',
+    },
+    {
+      id: "wp-lake",
+      name: "山湖",
+      value: 'url("/static/wallpapers/photo-1018.jpg")',
+      swatch: 'url("/static/wallpapers/photo-1018.jpg") center / cover',
+    },
+    {
+      id: "wp-snow",
+      name: "雪山营地",
+      value: 'url("/static/wallpapers/photo-1036.jpg")',
+      swatch: 'url("/static/wallpapers/photo-1036.jpg") center / cover',
+    },
+    {
+      id: "wp-falls",
+      name: "森林瀑布",
+      value: 'url("/static/wallpapers/photo-1039.jpg")',
+      swatch: 'url("/static/wallpapers/photo-1039.jpg") center / cover',
+    },
+    {
       id: "graphite",
       name: "石墨",
       value:
@@ -165,10 +213,12 @@
     if (!layer) return;
     const veil = state && typeof state.veil === "number" ? state.veil : 35;
     body.style.setProperty("--bg-veil", (veil / 100).toFixed(2));
-    // 卡片遮罩：未设置时移除内联变量，回退到样式表默认档位
+    // 卡片遮罩：未设置时移除内联变量，回退到样式表默认档位。
+    // 滑块 10-90 映射为约 0.05-0.45 的填充透明度，保证任何档位都能透出背景模糊。
     if (state && typeof state.cardVeil === "number") {
-      body.style.setProperty("--glass-a1", (state.cardVeil / 100).toFixed(2));
-      body.style.setProperty("--glass-a2", ((state.cardVeil / 100) * 0.52).toFixed(2));
+      const alpha1 = (state.cardVeil / 100) * 0.5;
+      body.style.setProperty("--glass-a1", alpha1.toFixed(2));
+      body.style.setProperty("--glass-a2", (alpha1 * 0.45).toFixed(2));
     } else {
       body.style.removeProperty("--glass-a1");
       body.style.removeProperty("--glass-a2");
