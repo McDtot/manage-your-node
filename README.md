@@ -7,14 +7,13 @@
 > [!IMPORTANT]
 > 本项目适合个人或小规模运维，当前为单管理员模式。应用本身不提供 HTTPS；公网使用前请配置反向代理和 TLS，并遵守所在地法律法规及服务商条款。
 
-## v0.13.0 更新亮点
+## v0.14.0 更新亮点
 
-- WebUI 全新「液态玻璃」重绘：面板真正半透明，通过 `backdrop-filter` 实时折射背景，配边缘镜面高光与弹性按压反馈，亮 / 暗双主题重调。
-- 移除指针跟随光晕，改为 iOS 风格导航选中丸：切换选项时玻璃丸弹性滑动，侧栏间距与卡片圆角整体收敛，更贴近 macOS 比例。
-- 「外观与背景」新增 8 张内置壁纸：3 张流体渐变 + 5 张真实风景摄影，全部本地自托管、离线可用；自定义壁纸下自动隐藏氛围色球，折射更纯净。
-- 卡片遮罩滑块映射重调：任何档位都能透出背景模糊，不再出现「实心白卡」。
+- 新增 **AnyTLS** 节点部署协议：因 Xray / 3x-ui 不支持 AnyTLS，选择该协议时会在目标 VPS 上安装固定版本、经 SHA256 校验的 **sing-box**（v1.13.14），并以独立 systemd 服务运行。
+- 证书支持两种方式：默认自签（订阅链接自动带 `insecure=1`，客户端导入无需手动跳过校验）；填写域名则走 sing-box 内置 ACME（Let's Encrypt）。
+- 订阅支持 `anytls://` 分享链接，Base64 与 Mihomo / Clash YAML 均可分发；AnyTLS 节点暂不统计流量，也不可加入代理链。
 
-完整变更见 [v0.13.0 发布说明](https://github.com/McDtot/manage-your-node/releases/tag/v0.13.0)。此前 v0.12.0 引入自定义背景与主题切换，见 [v0.12.0](https://github.com/McDtot/manage-your-node/releases/tag/v0.12.0)。
+完整变更见 [v0.14.0 发布说明](https://github.com/McDtot/manage-your-node/releases/tag/v0.14.0)。此前 v0.13.0 为液态玻璃 WebUI 重绘，见 [v0.13.0](https://github.com/McDtot/manage-your-node/releases/tag/v0.13.0)。
 
 ## 主要功能
 
