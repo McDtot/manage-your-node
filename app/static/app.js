@@ -865,8 +865,11 @@ async function pollJob(jobId) {
 }
 
 function syncRealityTargetFields() {
-  const isReality = $("#deployProtocol").value === "VLESS + REALITY";
+  const protocol = $("#deployProtocol").value;
+  const isReality = protocol === "VLESS + REALITY";
+  const isAnyTls = protocol === "AnyTLS";
   $("#realityFields").hidden = !isReality;
+  $("#anytlsFields").hidden = !isAnyTls;
   const manual = isReality && $("#realityMode").value === "manual";
   $("#realityManualFields").hidden = !manual;
   $("#deployForm").realityDest.required = manual;

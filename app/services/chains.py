@@ -170,6 +170,16 @@ class ChainsService(ClientsService):
             raise ValueError(
                 f"deployment is not a ready native deployment: {', '.join(unavailable)}"
             )
+        anytls_nodes = [
+            deployments[deployment_id]["server_name"]
+            for deployment_id in ordered_ids
+            if deployments[deployment_id].get("engine") == "sing-box"
+        ]
+        if anytls_nodes:
+            raise ValueError(
+                "AnyTLS (sing-box) deployments cannot be used in proxy chains: "
+                + ", ".join(anytls_nodes)
+            )
         name = str(payload.get("name", "")).strip()
         if not name:
             name = " -> ".join(deployments[deployment_id]["server_name"] for deployment_id in ordered_ids)
@@ -998,7 +1008,7 @@ echo "Removed $SERVICE_NAME"
         rows = self.db.query_all(
             f"""
             SELECT d.id, d.server_id, s.name AS server_name, s.host, s.ssh_port,
-                   d.protocol, d.panel_port, d.proxy_port, d.status, d.install_method
+                   d.protocol, d.engine, d.panel_port, d.proxy_port, d.status, d.install_method
             FROM deployments d
             JOIN servers s ON s.id = d.server_id
             WHERE d.id IN ({placeholders})

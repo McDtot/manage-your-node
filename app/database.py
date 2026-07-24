@@ -69,6 +69,7 @@ class Database:
                     reality_sni TEXT NOT NULL DEFAULT '',
                     ss_method TEXT NOT NULL DEFAULT '2022-blake3-aes-256-gcm',
                     encrypted_ss_password TEXT NOT NULL DEFAULT '',
+                    anytls_domain TEXT NOT NULL DEFAULT '',
                     xui_inbound_id INTEGER,
                     subscription_configured INTEGER NOT NULL DEFAULT 0,
                     status TEXT NOT NULL,
@@ -90,6 +91,7 @@ class Database:
                     expires_at TEXT NOT NULL,
                     enabled INTEGER NOT NULL,
                     encrypted_ss_password TEXT NOT NULL DEFAULT '',
+                    encrypted_anytls_password TEXT NOT NULL DEFAULT '',
                     share_link TEXT NOT NULL,
                     subscription_url TEXT NOT NULL,
                     created_at TEXT NOT NULL,
@@ -277,6 +279,11 @@ class Database:
                 "TEXT NOT NULL DEFAULT ''",
             )
             self._ensure_column(
+                "deployments",
+                "anytls_domain",
+                "TEXT NOT NULL DEFAULT ''",
+            )
+            self._ensure_column(
                 "clients",
                 "traffic_reset_days",
                 "INTEGER NOT NULL DEFAULT 0",
@@ -284,6 +291,11 @@ class Database:
             self._ensure_column(
                 "clients",
                 "encrypted_ss_password",
+                "TEXT NOT NULL DEFAULT ''",
+            )
+            self._ensure_column(
+                "clients",
+                "encrypted_anytls_password",
                 "TEXT NOT NULL DEFAULT ''",
             )
             self._ensure_column(

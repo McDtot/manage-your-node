@@ -5,10 +5,12 @@ from urllib.parse import quote, urlparse
 
 from ..provisioning import shell_quote
 from .helpers import (
+    DEPLOYMENT_PROTOCOL_ANYTLS,
     DEPLOYMENT_PROTOCOL_SHADOWSOCKS_2022,
     DEPLOYMENT_SS_METHOD,
     _render_subscription_links,
     _share_link_with_display_name,
+    anytls_share_link,
     host_field,
     now_iso,
     parse_reality_destination,
@@ -29,7 +31,7 @@ class DeploymentsService(ServersService):
                    d.panel_path, d.panel_username, d.encrypted_panel_password,
                    d.encrypted_api_token, d.proxy_port, d.reality_mode,
                    d.reality_dest, d.reality_sni, d.ss_method, d.encrypted_ss_password,
-                   d.xui_inbound_id, d.status,
+                   d.anytls_domain, d.xui_inbound_id, d.status,
                    d.subscription_url, d.last_error, d.created_at, d.updated_at,
                    COUNT(c.id) AS client_count,
                    (
@@ -218,7 +220,7 @@ exit 43
                    d.panel_path, d.panel_username, d.encrypted_panel_password,
                    d.encrypted_api_token, d.proxy_port, d.reality_mode,
                    d.reality_dest, d.reality_sni, d.ss_method, d.encrypted_ss_password,
-                   d.xui_inbound_id, d.status,
+                   d.anytls_domain, d.xui_inbound_id, d.status,
                    d.subscription_url, d.last_error, d.created_at, d.updated_at,
                    (
                        SELECT COUNT(*)
@@ -242,6 +244,7 @@ exit 43
         client_uuid: str,
         name: str,
         ss_password: str = "",
+        anytls_password: str = "",
     ) -> str:
         if deployment.get("protocol") == DEPLOYMENT_PROTOCOL_SHADOWSOCKS_2022:
             return ss_share_link(
@@ -251,6 +254,16 @@ exit 43
                 host=deployment["host"],
                 port=int(deployment["proxy_port"]),
                 name=name,
+            )
+        if deployment.get("protocol") == DEPLOYMENT_PROTOCOL_ANYTLS:
+            domain = str(deployment.get("anytls_domain") or "").strip()
+            return anytls_share_link(
+                password=anytls_password,
+                host=domain or deployment["host"],
+                port=int(deployment["proxy_port"]),
+                name=name,
+                sni=domain,
+                insecure=not domain,
             )
         tag = quote(name)
         return (

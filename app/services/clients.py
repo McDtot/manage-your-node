@@ -5,11 +5,19 @@ from contextlib import suppress
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
+from ..provisioning import (
+    anytls_service_name,
+    singbox_acme_dir,
+    singbox_cert_paths,
+    singbox_config_push_script,
+)
 from .deployments import DeploymentsService
 from .helpers import (
+    DEPLOYMENT_PROTOCOL_ANYTLS,
     DEPLOYMENT_PROTOCOL_SHADOWSOCKS_2022,
     _normalize_client_share_link_host,
     boolean_field,
+    new_anytls_password,
     new_id,
     new_ss2022_password,
     now_iso,
@@ -39,6 +47,95 @@ class ClientsService(DeploymentsService):
         if self.db.query_one(sql, tuple(params)):
             raise ValueError("该节点已存在同名用户")
 
+    def _anytls_users(
+        self,
+        deployment_id: str,
+        exclude_client_id: str | None = None,
+    ) -> list[dict[str, str]]:
+        """Return ``{name, password}`` for every enabled AnyTLS user of a node."""
+        rows = self.db.query_all(
+            """
+            SELECT name, encrypted_anytls_password
+            FROM clients
+            WHERE deployment_id = ? AND enabled = 1
+            ORDER BY created_at ASC
+            """,
+            (deployment_id,),
+        )
+        users: list[dict[str, str]] = []
+        for row in rows:
+            password = self.secret_box.open(row["encrypted_anytls_password"] or "")
+            if password:
+                users.append({"name": row["name"], "password": password})
+        return users
+
+    def _build_anytls_config(
+        self,
+        deployment: dict[str, Any],
+        extra_users: list[dict[str, str]] | None = None,
+    ) -> dict[str, Any]:
+        """Render the full sing-box configuration for an AnyTLS deployment."""
+        service_name = anytls_service_name(deployment["id"])
+        domain = str(deployment.get("anytls_domain") or "").strip()
+        users = self._anytls_users(deployment["id"])
+        if extra_users:
+            users = [*users, *extra_users]
+        if domain:
+            tls: dict[str, Any] = {
+                "enabled": True,
+                "server_name": domain,
+                "acme": {
+                    "domain": [domain],
+                    "data_directory": singbox_acme_dir(service_name),
+                },
+            }
+        else:
+            cert_path, key_path = singbox_cert_paths(service_name)
+            tls = {
+                "enabled": True,
+                "certificate_path": cert_path,
+                "key_path": key_path,
+            }
+        return {
+            "log": {"level": "warn", "timestamp": True},
+            "inbounds": [
+                {
+                    "type": "anytls",
+                    "tag": "anytls-in",
+                    "listen": "::",
+                    "listen_port": int(deployment["proxy_port"]),
+                    "users": users,
+                    "tls": tls,
+                }
+            ],
+            "outbounds": [{"type": "direct", "tag": "direct"}],
+        }
+
+    def _push_anytls_config(
+        self,
+        deployment: dict[str, Any],
+        config: dict[str, Any],
+    ) -> None:
+        server = self._get_server_row(deployment["server_id"])
+        service_name = anytls_service_name(deployment["id"])
+        self.ssh.run_script(
+            server,
+            singbox_config_push_script(service_name, config),
+            lambda _: None,
+            timeout=180,
+        )
+
+    def _apply_anytls_config(self, deployment: dict[str, Any]) -> None:
+        """Re-render the config from committed state and reload the service."""
+        self._push_anytls_config(deployment, self._build_anytls_config(deployment))
+
+    def _anytls_deployment_ready(self, deployment: dict[str, Any]) -> bool:
+        return (
+            deployment.get("protocol") == DEPLOYMENT_PROTOCOL_ANYTLS
+            and deployment.get("install_method") == "native"
+            and deployment.get("status") == "ready"
+        )
+
     def create_client(self, deployment_id: str, payload: dict[str, Any]) -> dict[str, Any]:
         deployment = self.get_deployment(deployment_id)
         if deployment.get("install_method") != "native":
@@ -67,16 +164,26 @@ class ClientsService(DeploymentsService):
             raise ValueError("name must be 128 characters or fewer")
         self._assert_user_name_available(deployment_id, name)
         is_shadowsocks = deployment.get("protocol") == DEPLOYMENT_PROTOCOL_SHADOWSOCKS_2022
+        is_anytls = deployment.get("protocol") == DEPLOYMENT_PROTOCOL_ANYTLS
         ss_password = new_ss2022_password() if is_shadowsocks else ""
+        anytls_password = new_anytls_password() if is_anytls else ""
         share_link = self._default_share_link(
             deployment,
             client_uuid,
             name,
             ss_password=ss_password,
+            anytls_password=anytls_password,
         )
         sub_id = client_id[-12:]
+        if is_anytls and self._anytls_deployment_ready(deployment):
+            config = self._build_anytls_config(
+                deployment,
+                extra_users=[{"name": name, "password": anytls_password}],
+            )
+            self._push_anytls_config(deployment, config)
         if (
-            deployment.get("install_method") == "native"
+            not is_anytls
+            and deployment.get("install_method") == "native"
             and deployment.get("status") == "ready"
             and deployment.get("xui_inbound_id")
         ):
@@ -116,9 +223,9 @@ class ClientsService(DeploymentsService):
                 INSERT INTO clients (
                     id, deployment_id, name, uuid, quota_bytes, used_bytes,
                     traffic_reset_days, expires_at, enabled, encrypted_ss_password,
-                    share_link, subscription_url,
+                    encrypted_anytls_password, share_link, subscription_url,
                     created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     client_id,
@@ -131,6 +238,7 @@ class ClientsService(DeploymentsService):
                     expires_at,
                     1,
                     self.secret_box.seal(ss_password),
+                    self.secret_box.seal(anytls_password),
                     share_link,
                     deployment["subscription_url"],
                     stamp,
@@ -182,6 +290,15 @@ class ClientsService(DeploymentsService):
             return ""
         return self.secret_box.open(row["encrypted_ss_password"])
 
+    def _client_anytls_password(self, client_id: str) -> str:
+        row = self.db.query_one(
+            "SELECT encrypted_anytls_password FROM clients WHERE id = ?",
+            (client_id,),
+        )
+        if not row:
+            return ""
+        return self.secret_box.open(row["encrypted_anytls_password"] or "")
+
     def update_client(self, client_id: str, payload: dict[str, Any]) -> dict[str, Any]:
         client = self.get_client(client_id)
         deployment = self.get_deployment(client["deployment_id"])
@@ -224,9 +341,15 @@ class ClientsService(DeploymentsService):
                 raise ValueError("expiresAt must be an ISO date (YYYY-MM-DD)") from exc
         enabled = 1 if bool(payload.get("enabled", client["enabled"])) else 0
         is_shadowsocks = deployment.get("protocol") == DEPLOYMENT_PROTOCOL_SHADOWSOCKS_2022
+        is_anytls = deployment.get("protocol") == DEPLOYMENT_PROTOCOL_ANYTLS
         ss_password = self._client_ss_password(client_id) if is_shadowsocks else ""
+        anytls_password = self._client_anytls_password(client_id) if is_anytls else ""
         share_link = client["share_link"]
-        if (
+        if is_anytls:
+            share_link = self._default_share_link(
+                deployment, client["uuid"], name, anytls_password=anytls_password
+            )
+        elif (
             deployment.get("install_method") == "native"
             and deployment.get("status") == "ready"
             and deployment.get("xui_inbound_id")
@@ -294,6 +417,8 @@ class ClientsService(DeploymentsService):
                 client_id,
             ),
         )
+        if is_anytls and self._anytls_deployment_ready(deployment):
+            self._apply_anytls_config(deployment)
         return self.get_client(client_id)
 
     def refresh_deployment_traffic(self, deployment: dict[str, Any]) -> int:

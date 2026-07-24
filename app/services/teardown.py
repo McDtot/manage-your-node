@@ -5,8 +5,14 @@ import threading
 from collections.abc import Callable
 from typing import Any
 
-from ..provisioning import native_3xui_script
+from ..provisioning import (
+    anytls_service_name,
+    native_3xui_script,
+    native_singbox_script,
+    singbox_uninstall_script,
+)
 from .helpers import (
+    DEPLOYMENT_PROTOCOL_ANYTLS,
     DEPLOYMENT_PROTOCOL_SHADOWSOCKS_2022,
     DEPLOYMENT_PROTOCOL_VLESS_REALITY,
     DEPLOYMENT_PROTOCOLS,
@@ -38,12 +44,24 @@ class TeardownService(SubscriptionsService):
             raise ValueError("proxyPort and panelPort must be different")
         protocol = str(payload.get("protocol", DEPLOYMENT_PROTOCOL_VLESS_REALITY)).strip()
         if protocol not in DEPLOYMENT_PROTOCOLS:
-            raise ValueError("only VLESS + REALITY and Shadowsocks 2022 are supported")
+            raise ValueError(
+                "only VLESS + REALITY, Shadowsocks 2022 and AnyTLS are supported"
+            )
         install_method = str(payload.get("installMethod", "native")).strip() or "native"
         if install_method != "native":
             raise ValueError("only native deployments are supported")
         is_shadowsocks = protocol == DEPLOYMENT_PROTOCOL_SHADOWSOCKS_2022
-        if is_shadowsocks:
+        is_anytls = protocol == DEPLOYMENT_PROTOCOL_ANYTLS
+        engine = "sing-box" if is_anytls else "3x-ui"
+        anytls_domain = ""
+        if is_anytls:
+            reality_mode = "manual"
+            selected_reality_dest, selected_reality_sni = "", ""
+            ss_password = ""
+            raw_domain = str(payload.get("anytlsDomain", "")).strip()
+            if raw_domain:
+                anytls_domain = host_field({"anytlsDomain": raw_domain}, "anytlsDomain")
+        elif is_shadowsocks:
             reality_mode = "manual"
             selected_reality_dest, selected_reality_sni = "", ""
             ss_password = new_ss2022_password()
@@ -89,14 +107,14 @@ class TeardownService(SubscriptionsService):
                     id, server_id, engine, protocol, install_method, panel_scheme, panel_port, panel_path,
                     panel_username, encrypted_panel_password, encrypted_api_token,
                     proxy_port, reality_mode, reality_dest, reality_sni,
-                    ss_method, encrypted_ss_password,
+                    ss_method, encrypted_ss_password, anytls_domain,
                     subscription_configured, status, subscription_url, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     deployment_id,
                     server_id,
-                    "3x-ui",
+                    engine,
                     protocol,
                     install_method,
                     "http",
@@ -111,6 +129,7 @@ class TeardownService(SubscriptionsService):
                     selected_reality_sni,
                     DEPLOYMENT_SS_METHOD,
                     self.secret_box.seal(ss_password),
+                    anytls_domain,
                     0,
                     "provisioning",
                     "",
@@ -169,10 +188,82 @@ class TeardownService(SubscriptionsService):
         server: dict[str, Any],
     ) -> None:
         try:
-            self._run_native_deployment(job_id, deployment_id, server)
+            deployment = self._get_deployment_row(deployment_id)
+            if deployment.get("engine") == "sing-box":
+                self._run_anytls_deployment(job_id, deployment_id, server)
+            else:
+                self._run_native_deployment(job_id, deployment_id, server)
         finally:
             self._release_operation_locks(job_id)
             self._forget_current_worker()
+
+    def _run_anytls_deployment(
+        self,
+        job_id: str,
+        deployment_id: str,
+        server: dict[str, Any],
+    ) -> None:
+        service_name = anytls_service_name(deployment_id)
+        install_started = False
+        try:
+            deployment = self.get_deployment(deployment_id)
+            domain = str(deployment.get("anytls_domain") or "").strip()
+            config = self._build_anytls_config(deployment)
+            script = native_singbox_script(
+                service_name=service_name,
+                config=config,
+                proxy_port=int(deployment["proxy_port"]),
+                server_host=server["host"],
+                self_signed=not domain,
+            )
+            self._append_job_log(
+                job_id,
+                "Installing pinned sing-box and starting the AnyTLS service over SSH",
+            )
+            install_started = True
+            self.ssh.run_script(
+                server,
+                script,
+                lambda line: self._append_job_log(job_id, line),
+                timeout=1200,
+            )
+            self.db.execute(
+                "UPDATE deployments SET status = ?, updated_at = ? WHERE id = ?",
+                ("ready", now_iso(), deployment_id),
+            )
+            self._append_job_log(
+                job_id,
+                "sing-box AnyTLS service is installed and ready"
+                + (" (Let's Encrypt certificate)" if domain else " (self-signed certificate)"),
+            )
+            self._finish_job(job_id, "success", None)
+        except Exception as exc:  # noqa: BLE001
+            error_text = str(exc)
+            self.db.execute(
+                "UPDATE deployments SET status = ?, last_error = ?, updated_at = ? WHERE id = ?",
+                ("failed", error_text, now_iso(), deployment_id),
+            )
+            self._append_job_log(job_id, f"Deployment failed: {error_text}")
+            if install_started:
+                self._append_job_log(
+                    job_id,
+                    "Rolling back: removing any partial sing-box AnyTLS service",
+                )
+                try:
+                    for line in self.ssh.run_script(
+                        server,
+                        singbox_uninstall_script(service_name),
+                        lambda _: None,
+                        timeout=120,
+                    ):
+                        if line:
+                            self._append_job_log(job_id, line)
+                except Exception as cleanup_exc:  # noqa: BLE001
+                    self._append_job_log(
+                        job_id,
+                        f"Rollback uninstall failed (manual cleanup may be needed): {cleanup_exc}",
+                    )
+            self._finish_job(job_id, "failed", error_text)
 
     def _run_native_deployment(
         self,
@@ -318,7 +409,7 @@ class TeardownService(SubscriptionsService):
         self._assert_not_busy("server", server_id)
         server = self._get_server_row(server_id)
         deployments = self.db.query_all(
-            "SELECT id, install_method FROM deployments WHERE server_id = ?",
+            "SELECT id, install_method, engine FROM deployments WHERE server_id = ?",
             (server_id,),
         )
         chain_logs = self._cleanup_proxy_chains_for_deployments(
@@ -326,9 +417,10 @@ class TeardownService(SubscriptionsService):
         )
         remote_logs: list[str] = []
         remote_cleanup_ok = True
-        if any(row["install_method"] == "native" for row in deployments):
+        native = [row for row in deployments if row["install_method"] == "native"]
+        if native:
             remote_logs, remote_cleanup_ok = self._best_effort_remote_cleanup(
-                lambda: self._uninstall_remote_xui(server)
+                lambda: self._uninstall_server_deployments(server, native)
             )
         with self.db.transaction():
             for deployment in deployments:
@@ -367,6 +459,14 @@ class TeardownService(SubscriptionsService):
         if deployment.get("install_method") != "native":
             return []
         server = self._get_server_row(deployment["server_id"])
+        if deployment.get("engine") == "sing-box":
+            service_name = anytls_service_name(deployment["id"])
+            return self.ssh.run_script(
+                server,
+                singbox_uninstall_script(service_name),
+                lambda _: None,
+                timeout=120,
+            )
         if uninstall_panel:
             return self._uninstall_remote_xui(server)
         if not deployment.get("xui_inbound_id"):
@@ -383,6 +483,30 @@ class TeardownService(SubscriptionsService):
                 logs.append("Requested Xray restart")
             except Exception as exc:  # noqa: BLE001
                 logs.append(f"Xray restart request failed: {exc}")
+        return logs
+
+    def _uninstall_server_deployments(
+        self,
+        server: dict[str, Any],
+        native_deployments: list[dict[str, Any]],
+    ) -> list[str]:
+        """Remove every native engine installed on a server before deletion."""
+        logs: list[str] = []
+        uninstalled_xui = False
+        for deployment in native_deployments:
+            if deployment.get("engine") == "sing-box":
+                service_name = anytls_service_name(deployment["id"])
+                logs.extend(
+                    self.ssh.run_script(
+                        server,
+                        singbox_uninstall_script(service_name),
+                        lambda _: None,
+                        timeout=120,
+                    )
+                )
+            elif not uninstalled_xui:
+                logs.extend(self._uninstall_remote_xui(server))
+                uninstalled_xui = True
         return logs
 
     def _uninstall_remote_xui(self, server: dict[str, Any]) -> list[str]:

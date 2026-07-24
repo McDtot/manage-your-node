@@ -23,9 +23,9 @@
 | Web 控制台 | 中文界面，登录鉴权，集中查看服务器、部署、用户和任务状态 |
 | 服务器管理 | 保存 VPS SSH 信息、测试连通性，并在首次连接时人工核验主机指纹 |
 | 健康监控 | 周期性探测每台服务器的 SSH 可达性与延迟，可一键批量检查 |
-| 节点部署 | 通过 SSH 安装固定版本的 3x-ui，自动创建 VLESS + REALITY 或 Shadowsocks 2022 入站 |
+| 节点部署 | 通过 SSH 安装固定版本的 3x-ui（VLESS + REALITY / Shadowsocks 2022），或安装固定版本的 sing-box 提供 AnyTLS |
 | 用户管理 | 同一节点可创建多个独立用户，支持启停、流量额度、手动/周期重置和到期时间 |
-| 流量统计 | 从 3x-ui 周期性同步真实用量到本地，支持一键手动刷新 |
+| 流量统计 | 从 3x-ui 周期性同步真实用量到本地，支持一键手动刷新（AnyTLS 节点暂不统计流量） |
 | 订阅分发 | 按需创建订阅，自由组合普通用户和代理链，并为每个条目设置显示名称，可生成二维码 |
 | 代理链 | 将多个可用节点按顺序组成入口、中继和出口，节点间支持 REALITY 或 SS2022 |
 | 运维与安全 | 任务日志、审计记录、在线备份、敏感信息加密、登录限流和 CSRF 防护 |
@@ -115,12 +115,22 @@ sudo bash install.sh --admin-password-file /root/manage-node-admin-password
 
 进入“部署”并选择已通过 SSH 测试的服务器：
 
-- 协议模板：可选 VLESS + REALITY 或 Shadowsocks 2022（2022-blake3-aes-256-gcm）；
+- 协议模板：可选 VLESS + REALITY、Shadowsocks 2022（2022-blake3-aes-256-gcm）或 AnyTLS（sing-box）；
 - REALITY 伪装目标：仅 VLESS + REALITY 需要，建议选择“自动检测并固定”；
+- 域名（仅 AnyTLS）：留空则由目标 VPS 生成自签证书（客户端自动跳过证书校验，无需域名）；填写已解析到该服务器的域名则由 sing-box 自动申请并续期 Let's Encrypt 证书；
 - 代理端口：默认 443，必须在目标 VPS 上可从公网访问；Shadowsocks 2022 需同时放行 TCP 和 UDP；
 - 面板端口：可留空自动生成，仅通过 SSH 隧道访问，无需向公网开放。
 
 部署完成并显示“可用”后，3x-ui 面板会被限制在目标 VPS 的 <code>127.0.0.1</code>，Manage Your Node 通过固定主机指纹的 SSH 隧道调用其 API。
+
+#### AnyTLS（sing-box）
+
+Xray 与 3x-ui 均不支持 AnyTLS，因此选择 AnyTLS 时不会安装 3x-ui，而是在目标 VPS 上安装固定版本、经 SHA256 校验的 sing-box，并以独立的 systemd 服务（<code>myn-anytls-&lt;部署ID&gt;</code>）提供 AnyTLS 入站。用户的增删改会重新渲染完整的 sing-box 配置并通过 SSH 下发、重启服务。
+
+- 证书：留空域名使用自签证书，生成的订阅会自动带上 <code>insecure=1</code>，客户端导入后无需手动开启“跳过证书校验”；填写域名则走 ACME（Let's Encrypt），需要该域名已解析到本机并放行 <code>80</code> 端口用于签发验证。
+- 端口：AnyTLS 只需放行代理端口的 TCP；使用域名 ACME 时还需临时放行 <code>80</code> 端口。
+- 限制：sing-box 没有像 3x-ui 那样的简易流量接口，AnyTLS 节点当前不统计每用户流量（用量恒为 0，也不参与自动同步）；AnyTLS 节点也不能作为代理链的节点。
+- 订阅：AnyTLS 节点会生成 <code>anytls://</code> 链接，Base64 与 Mihomo / Clash YAML 两种订阅格式均已支持。
 
 ### 4. 创建用户
 

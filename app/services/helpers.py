@@ -5,7 +5,7 @@ import re
 import secrets
 from datetime import UTC, datetime
 from typing import Any
-from urllib.parse import parse_qs, quote, unquote, urlparse
+from urllib.parse import parse_qs, quote, unquote, urlencode, urlparse
 
 import yaml
 
@@ -24,9 +24,11 @@ CHAIN_PROTOCOLS = {
 CHAIN_SS_METHOD = "2022-blake3-aes-256-gcm"
 DEPLOYMENT_PROTOCOL_VLESS_REALITY = "VLESS + REALITY"
 DEPLOYMENT_PROTOCOL_SHADOWSOCKS_2022 = "Shadowsocks 2022"
+DEPLOYMENT_PROTOCOL_ANYTLS = "AnyTLS"
 DEPLOYMENT_PROTOCOLS = {
     DEPLOYMENT_PROTOCOL_VLESS_REALITY,
     DEPLOYMENT_PROTOCOL_SHADOWSOCKS_2022,
+    DEPLOYMENT_PROTOCOL_ANYTLS,
 }
 DEPLOYMENT_SS_METHOD = CHAIN_SS_METHOD
 MAX_JOB_LOG_ENTRIES = 2000
@@ -104,6 +106,82 @@ def _mihomo_proxy_from_vless(
 def new_ss2022_password() -> str:
     """Return a base64-encoded 32-byte PSK for 2022-blake3-aes-256-gcm."""
     return base64.b64encode(secrets.token_bytes(32)).decode("ascii")
+
+
+def new_anytls_password() -> str:
+    """Return a base64-encoded 32-byte password for an AnyTLS user."""
+    return base64.b64encode(secrets.token_bytes(32)).decode("ascii")
+
+
+def anytls_share_link(
+    password: str,
+    host: str,
+    port: int,
+    name: str,
+    sni: str = "",
+    insecure: bool = True,
+) -> str:
+    """Build an ``anytls://`` share link understood by sing-box/mihomo clients.
+
+    Self-signed deployments advertise ``insecure=1`` so imported clients skip
+    certificate verification without any manual toggling.
+    """
+    params: dict[str, str] = {}
+    if insecure:
+        params["insecure"] = "1"
+    if sni:
+        params["sni"] = sni
+    query = f"?{urlencode(params)}" if params else ""
+    tag = quote(name)
+    return (
+        f"anytls://{quote(password, safe='')}@{url_host(host)}:{port}{query}#{tag}"
+    )
+
+
+def _mihomo_proxy_from_anytls(
+    share_link: str,
+    index: int,
+    used_names: set[str],
+) -> dict[str, Any]:
+    parsed = urlparse(share_link)
+    password = unquote(parsed.password or parsed.username or "").strip()
+    server = parsed.hostname
+    try:
+        port = parsed.port
+    except ValueError as exc:
+        raise ValueError("invalid AnyTLS subscription port") from exc
+    if not password or not server or port is None:
+        raise ValueError("invalid AnyTLS subscription link")
+
+    query = {
+        key: values[-1]
+        for key, values in parse_qs(parsed.query, keep_blank_values=True).items()
+        if values
+    }
+
+    base_name = unquote(parsed.fragment).strip() or f"节点 {index}"
+    name = base_name
+    suffix = 2
+    while name in used_names or name in {"AUTO", "DIRECT", "PROXY", "REJECT"}:
+        name = f"{base_name} {suffix}"
+        suffix += 1
+    used_names.add(name)
+
+    proxy: dict[str, Any] = {
+        "name": name,
+        "type": "anytls",
+        "server": server,
+        "port": port,
+        "password": password,
+        "udp": True,
+    }
+    sni = query.get("sni", "").strip()
+    if sni:
+        proxy["sni"] = sni
+    insecure = query.get("insecure", "").strip() in {"1", "true", "True"}
+    if insecure:
+        proxy["skip-cert-verify"] = True
+    return proxy
 
 
 def ss_share_link(
@@ -187,6 +265,8 @@ def _mihomo_proxy_from_link(
     scheme = urlparse(share_link).scheme.lower()
     if scheme == "ss":
         return _mihomo_proxy_from_ss(share_link, index, used_names)
+    if scheme == "anytls":
+        return _mihomo_proxy_from_anytls(share_link, index, used_names)
     return _mihomo_proxy_from_vless(share_link, index, used_names)
 
 
