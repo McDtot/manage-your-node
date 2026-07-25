@@ -13,7 +13,7 @@ def _client(monkeypatch, tmp_path):
     monkeypatch.setenv("PORT", "8787")
     monkeypatch.setenv("APP_SECRET", "local-test-secret")
     monkeypatch.setenv("ADMIN_PASSWORD", "test-password")
-    monkeypatch.setenv("TRAFFIC_SYNC_SECONDS", "0")
+    monkeypatch.setenv("CONFIG_SYNC_SECONDS", "0")
     settings = load_settings()
     db = Database(settings.db_path)
     services = AppServices(db, SecretBox(settings.app_secret))
@@ -62,7 +62,7 @@ def test_qrcode_validates_data_parameter(monkeypatch, tmp_path):
     assert too_long.json() == {"error": "data is too long"}
 
 
-def test_traffic_refresh_endpoint_empty(monkeypatch, tmp_path):
+def test_removed_traffic_routes_are_gone(monkeypatch, tmp_path):
     client, _db = _client(monkeypatch, tmp_path)
     csrf = _login(client)
     response = client.post(
@@ -70,5 +70,10 @@ def test_traffic_refresh_endpoint_empty(monkeypatch, tmp_path):
         json={},
         headers={"X-CSRF-Token": csrf, "Origin": "http://127.0.0.1:8787"},
     )
-    assert response.status_code == 200
-    assert response.json() == {"deployments": 0, "updatedClients": 0, "errors": []}
+    assert response.status_code in {404, 405}
+    reset = client.post(
+        "/api/clients/cli_missing/reset",
+        json={},
+        headers={"X-CSRF-Token": csrf, "Origin": "http://127.0.0.1:8787"},
+    )
+    assert reset.status_code in {404, 405}

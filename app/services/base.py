@@ -1,22 +1,17 @@
 import json
 import threading
 import time
-from collections.abc import Iterator
-from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from ..database import Database
 from ..security import SecretBox
 from ..ssh_runner import SshRunner
-from ..ssh_tunnel import SshTunnel
-from ..xui_api import XuiApiClient
 from .helpers import (
     MAX_JOB_LOG_ENTRIES,
     MAX_JOB_LOG_LINE,
     _deployment_reality_settings,
     now_iso,
-    url_host,
 )
 
 
@@ -28,8 +23,8 @@ class ServicesBase:
         self.ssh = SshRunner(secret_box, db)
         self._workers: set[threading.Thread] = set()
         self._workers_lock = threading.Lock()
-        self._traffic_stop = threading.Event()
-        self._traffic_thread: threading.Thread | None = None
+        self._config_stop = threading.Event()
+        self._config_thread: threading.Thread | None = None
         self._health_stop = threading.Event()
         self._health_thread: threading.Thread | None = None
 
@@ -69,10 +64,10 @@ class ServicesBase:
 
         encrypted_columns = [
             ("servers", "encrypted_secret"),
-            ("deployments", "encrypted_panel_password"),
-            ("deployments", "encrypted_api_token"),
+            ("deployments", "encrypted_reality_private_key"),
             ("deployments", "encrypted_ss_password"),
             ("clients", "encrypted_ss_password"),
+            ("clients", "encrypted_anytls_password"),
             ("proxy_chain_nodes", "encrypted_private_key"),
             ("proxy_chain_nodes", "encrypted_ss_password"),
         ]
@@ -179,10 +174,6 @@ class ServicesBase:
         )["count"]
         clients = self.db.query_row("SELECT COUNT(*) AS count FROM clients")["count"]
         chains = self.db.query_row("SELECT COUNT(*) AS count FROM proxy_chains")["count"]
-        traffic = self.db.query_row(
-            "SELECT COALESCE(SUM(used_bytes), 0) AS used, "
-            "COALESCE(SUM(quota_bytes), 0) AS quota FROM clients"
-        )
         soon = (datetime.now(UTC) + timedelta(days=7)).date().isoformat()
         expiring = self.db.query_row(
             "SELECT COUNT(*) AS count FROM clients "
@@ -194,8 +185,6 @@ class ServicesBase:
             "readyDeployments": ready,
             "clients": clients,
             "proxyChains": chains,
-            "usedBytes": traffic["used"],
-            "quotaBytes": traffic["quota"],
             "expiringClients": expiring,
         }
 
@@ -288,28 +277,6 @@ class ServicesBase:
     def _deployment_subscription_url(self, deployment_id: str) -> str:
         return f"/sub/deployments/{deployment_id}"
 
-    @contextmanager
-    def _xui_session(self, deployment: dict[str, Any]) -> Iterator[XuiApiClient]:
-        """Yield a 3x-ui API client reachable through an SSH tunnel.
-
-        The panel is only exposed over plaintext HTTP on the remote host, so we
-        forward it through SSH and talk to it via ``127.0.0.1`` locally. This
-        keeps the panel password, API token and inbound secrets off the public
-        network.
-        """
-        server = self._get_server_row(deployment["server_id"])
-        scheme = deployment.get("panel_scheme") or "http"
-        panel_path = deployment.get("panel_path") or ""
-        with SshTunnel(self.ssh, server, "127.0.0.1", int(deployment["panel_port"])) as local_port:
-            base_url = f"{scheme}://127.0.0.1:{local_port}{panel_path}/"
-            yield XuiApiClient(
-                base_url=base_url,
-                username=deployment["panel_username"],
-                password=deployment["panel_password"],
-                api_token=deployment.get("api_token") or "",
-                verify_tls=False,  # endpoint is authenticated by the pinned SSH tunnel
-            )
-
     def _get_server_row(self, server_id: str) -> dict[str, Any]:
         row = self.db.query_one("SELECT * FROM servers WHERE id = ?", (server_id,))
         if not row:
@@ -328,15 +295,12 @@ class ServicesBase:
         )
         if not auto_selection_pending:
             row["reality_dest"], row["reality_sni"] = _deployment_reality_settings(row)
-        row["panel_url"] = f"{row['panel_scheme']}://{url_host(row['host'])}:{row['panel_port']}{row['panel_path']}/"
         if row.get("subscription_url"):
             row["subscription_url"] = self._deployment_subscription_url(row["id"])
-        encrypted_password = row.pop("encrypted_panel_password", "")
-        encrypted_token = row.pop("encrypted_api_token", "")
+        encrypted_reality_key = row.pop("encrypted_reality_private_key", "")
         encrypted_ss_password = row.pop("encrypted_ss_password", "")
         if reveal:
-            row["panel_password"] = self.secret_box.open(encrypted_password)
-            row["api_token"] = self.secret_box.open(encrypted_token)
+            row["reality_private_key"] = self.secret_box.open(encrypted_reality_key)
             row["ss_password"] = self.secret_box.open(encrypted_ss_password)
 
     def _client_rows(self, client_id: str | None = None) -> list[dict[str, Any]]:
@@ -345,8 +309,7 @@ class ServicesBase:
         return self.db.query_all(
             f"""
             SELECT c.id, c.deployment_id, d.server_id, s.name AS server_name,
-                   s.host, c.name, c.uuid, c.quota_bytes, c.used_bytes,
-                   c.traffic_reset_days, c.expires_at, c.enabled,
+                   s.host, c.name, c.uuid, c.expires_at, c.enabled,
                    c.share_link, c.subscription_url,
                    c.created_at, c.updated_at
             FROM clients c

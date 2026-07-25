@@ -3,6 +3,7 @@ from typing import Any
 
 from .chains import ChainsService
 from .helpers import (
+    ACTIVE_CLIENT_CONDITION,
     _render_subscription_links,
     _share_link_with_display_name,
     new_id,
@@ -23,16 +24,7 @@ class SubscriptionsService(ChainsService):
             f"""
             WITH node_stats AS (
                 SELECT se.subscription_id,
-                       COUNT(*) AS node_count,
-                       SUM(se.quota_bytes) AS quota_bytes,
-                       SUM(c.used_bytes) AS used_bytes,
-                       SUM(
-                           CASE
-                               WHEN se.quota_bytes > c.used_bytes
-                               THEN se.quota_bytes - c.used_bytes
-                               ELSE 0
-                           END
-                       ) AS remaining_bytes
+                       COUNT(*) AS node_count
                 FROM subscription_entries se
                 JOIN clients c ON c.id = se.node_client_id
                 {node_where}
@@ -46,10 +38,7 @@ class SubscriptionsService(ChainsService):
             )
             SELECT s.id, s.name, s.token, s.created_at, s.updated_at,
                    COALESCE(ns.node_count, 0) AS node_count,
-                   COALESCE(cs.chain_count, 0) AS chain_count,
-                   COALESCE(ns.quota_bytes, 0) AS quota_bytes,
-                   COALESCE(ns.used_bytes, 0) AS used_bytes,
-                   COALESCE(ns.remaining_bytes, 0) AS remaining_bytes
+                   COALESCE(cs.chain_count, 0) AS chain_count
             FROM subscriptions s
             LEFT JOIN node_stats ns ON ns.subscription_id = s.id
             LEFT JOIN chain_stats cs ON cs.subscription_id = s.id
@@ -92,7 +81,7 @@ class SubscriptionsService(ChainsService):
         subscription = self.get_subscription(subscription_id)
         selected = self.db.query_all(
             """
-            SELECT node_client_id, quota_bytes, display_name
+            SELECT node_client_id, display_name
             FROM subscription_entries
             WHERE subscription_id = ?
             ORDER BY created_at ASC
@@ -125,7 +114,6 @@ class SubscriptionsService(ChainsService):
             "selectedNodes": [
                 {
                     "nodeClientId": row["node_client_id"],
-                    "quotaBytes": row["quota_bytes"],
                     "displayName": row["display_name"],
                 }
                 for row in selected
@@ -186,7 +174,7 @@ class SubscriptionsService(ChainsService):
                 (subscription_id,),
             )
         }
-        selected: list[tuple[str, int, str]] = []
+        selected: list[tuple[str, str]] = []
         seen = set()
         for item in nodes:
             if not isinstance(item, dict):
@@ -197,20 +185,13 @@ class SubscriptionsService(ChainsService):
             client = clients.get(node_id)
             if not client:
                 raise ValueError("selected node not found")
-            quota_gb = item.get("quotaGb", client["quota_bytes"] / 1024 / 1024 / 1024)
-            try:
-                quota_bytes = int(float(quota_gb) * 1024 * 1024 * 1024)
-            except (TypeError, ValueError) as exc:
-                raise ValueError("quotaGb must be a number") from exc
-            if quota_bytes < 0:
-                raise ValueError("quotaGb must be zero or greater")
             if "displayName" in item:
                 display_name = str(item.get("displayName", "")).strip()
             else:
                 display_name = existing_display_names.get(node_id, "")
             if len(display_name) > 128:
                 raise ValueError("displayName must be 128 characters or fewer")
-            selected.append((node_id, quota_bytes, display_name))
+            selected.append((node_id, display_name))
             seen.add(node_id)
 
         if chain_selection_supplied:
@@ -250,20 +231,6 @@ class SubscriptionsService(ChainsService):
                 )
             ]
 
-        for node_id, quota_bytes, _display_name in selected:
-            client = clients[node_id]
-            if int(client["quota_bytes"]) == quota_bytes:
-                continue
-            self.update_client(
-                node_id,
-                {
-                    "name": client["name"],
-                    "quotaGb": quota_bytes / 1024 / 1024 / 1024,
-                    "expiresAt": client["expires_at"],
-                    "enabled": bool(client["enabled"]),
-                },
-            )
-
         stamp = now_iso()
         with self.db.transaction():
             if name:
@@ -283,13 +250,13 @@ class SubscriptionsService(ChainsService):
             self.db.executemany(
                 """
                 INSERT INTO subscription_entries (
-                    subscription_id, node_client_id, quota_bytes, display_name,
+                    subscription_id, node_client_id, display_name,
                     created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?)
                 """,
                 [
-                    (subscription_id, node_id, quota_bytes, display_name, stamp, stamp)
-                    for node_id, quota_bytes, display_name in selected
+                    (subscription_id, node_id, display_name, stamp, stamp)
+                    for node_id, display_name in selected
                 ],
             )
             default_deployment = self.db.query_one(
@@ -310,7 +277,7 @@ class SubscriptionsService(ChainsService):
                     """,
                     [
                         (default_deployment_id, node_id, display_name, stamp)
-                        for node_id, _quota_bytes, display_name in selected
+                        for node_id, display_name in selected
                     ],
                 )
             self.db.execute(
@@ -351,11 +318,11 @@ class SubscriptionsService(ChainsService):
         if not subscription:
             raise ValueError("subscription not found")
         rows = self.db.query_all(
-            """
+            f"""
             SELECT c.share_link, se.display_name
             FROM subscription_entries se
             JOIN clients c ON c.id = se.node_client_id
-            WHERE se.subscription_id = ? AND c.enabled = 1
+            WHERE se.subscription_id = ? AND {ACTIVE_CLIENT_CONDITION}
             ORDER BY se.created_at ASC, c.created_at ASC
             """,
             (subscription["id"],),

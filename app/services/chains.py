@@ -1,13 +1,14 @@
-import base64
 import json
-import re
 import secrets
 import threading
 import uuid
 from typing import Any
-from urllib.parse import quote, urlencode
 
-from ..provisioning import shell_quote
+from ..provisioning import (
+    chain_service_name,
+    singbox_install_script,
+    singbox_uninstall_script,
+)
 from .clients import ClientsService
 from .helpers import (
     CHAIN_PROTOCOL_SHADOWSOCKS_2022,
@@ -17,9 +18,11 @@ from .helpers import (
     _deployment_reality_settings,
     _render_subscription_links,
     new_id,
+    new_ss2022_password,
     now_iso,
-    url_host,
+    vless_reality_share_link,
 )
+from .singbox import build_chain_config, new_reality_keypair, new_short_id
 
 
 class ChainsService(ClientsService):
@@ -170,16 +173,6 @@ class ChainsService(ClientsService):
             raise ValueError(
                 f"deployment is not a ready native deployment: {', '.join(unavailable)}"
             )
-        anytls_nodes = [
-            deployments[deployment_id]["server_name"]
-            for deployment_id in ordered_ids
-            if deployments[deployment_id].get("engine") == "sing-box"
-        ]
-        if anytls_nodes:
-            raise ValueError(
-                "AnyTLS (sing-box) deployments cannot be used in proxy chains: "
-                + ", ".join(anytls_nodes)
-            )
         name = str(payload.get("name", "")).strip()
         if not name:
             name = " -> ".join(deployments[deployment_id]["server_name"] for deployment_id in ordered_ids)
@@ -232,7 +225,6 @@ class ChainsService(ClientsService):
             server_name = deployment["server_name"]
             reserved_local_ports = {
                 "SSH": int(deployment["ssh_port"]),
-                "3x-ui panel": int(deployment["panel_port"]),
                 "proxy": int(deployment["proxy_port"]),
             }
             for purpose, reserved_port in reserved_local_ports.items():
@@ -412,7 +404,10 @@ class ChainsService(ClientsService):
             for index in range(len(nodes) - 1, -1, -1):
                 node = nodes[index]
                 next_node = nodes[index + 1] if index + 1 < len(nodes) else None
-                config = self._chain_xray_config(node, next_node)
+                config = build_chain_config(
+                    self._chain_node_secrets(node),
+                    self._chain_node_secrets(next_node) if next_node else None,
+                )
                 self._install_proxy_chain_service(job_id, chain_id, node, config)
                 self.db.execute(
                     """
@@ -478,21 +473,23 @@ class ChainsService(ClientsService):
                 if not node.get("node_client_uuid"):
                     update["client_uuid"] = str(uuid.uuid4())
                 if not node.get("short_id"):
-                    update["short_id"] = secrets.token_hex(4)
+                    update["short_id"] = new_short_id()
                 if not node.get("public_key") or not node.get("encrypted_private_key"):
                     self._append_job_log(
                         job_id,
-                        f"Generating REALITY keypair on {node['server_name']}",
+                        f"Generating REALITY keypair for {node['server_name']}",
                     )
-                    private_key, public_key = self._remote_x25519_keypair(node)
+                    private_key, public_key = new_reality_keypair()
                     update["encrypted_private_key"] = self.secret_box.seal(private_key)
                     update["public_key"] = public_key
             elif not node.get("encrypted_ss_password"):
                 update["encrypted_ss_password"] = self.secret_box.seal(
-                    self._new_ss2022_password()
+                    new_ss2022_password()
                 )
             if not node.get("remote_service_name"):
-                update["remote_service_name"] = f"myn-chain-{chain_id}-{node['position']}"
+                update["remote_service_name"] = chain_service_name(
+                    chain_id, node["position"]
+                )
 
             if update:
                 assignments = ", ".join(f"{column} = ?" for column in update)
@@ -509,61 +506,13 @@ class ChainsService(ClientsService):
             prepared.append(self._proxy_chain_full_nodes(chain_id)[node["position"]])
         return prepared
 
-    def _new_ss2022_password(self) -> str:
-        return base64.b64encode(secrets.token_bytes(32)).decode("ascii")
-
-    def _remote_x25519_keypair(self, node: dict[str, Any]) -> tuple[str, str]:
-        lines = self.ssh.run_script(
-            node,
-            self._xray_keypair_script(),
-            lambda _: None,
-            timeout=60,
-        )
-        private_key = ""
-        public_key = ""
-        for line in lines:
-            text = line.strip()
-            label, separator, value = text.partition(":")
-            if not separator:
-                continue
-            normalized_label = re.sub(r"[^a-z0-9]", "", label.lower())
-            if normalized_label == "privatekey":
-                private_key = value.strip()
-            elif "publickey" in normalized_label:
-                # Xray 26.5.9 labels this value as ``Password (PublicKey)``;
-                # older releases used ``Public key``.
-                public_key = value.strip()
-        if not private_key or not public_key:
-            raise ValueError(f"could not generate X25519 keypair on {node['server_name']}")
-        return private_key, public_key
-
-    def _xray_keypair_script(self) -> str:
-        return r"""
-set -Eeuo pipefail
-find_xray() {
-  for candidate in \
-    /usr/local/x-ui/bin/xray \
-    /usr/local/x-ui/bin/xray-linux-* \
-    /usr/bin/xray \
-    /usr/local/bin/xray
-  do
-    for path in $candidate; do
-      if [ -x "$path" ]; then
-        printf '%s\n' "$path"
-        return 0
-      fi
-    done
-  done
-  if command -v xray >/dev/null 2>&1; then
-    command -v xray
-    return 0
-  fi
-  return 1
-}
-XRAY="$(find_xray)" || { echo "xray binary not found" >&2; exit 42; }
-echo "Using Xray: $XRAY"
-"$XRAY" x25519
-"""
+    def _chain_node_secrets(self, node: dict[str, Any]) -> dict[str, Any]:
+        """Return the node row with its secrets decrypted for config rendering."""
+        return {
+            **node,
+            "private_key": self.secret_box.open(node.get("encrypted_private_key") or ""),
+            "ss_password": self.secret_box.open(node.get("encrypted_ss_password") or ""),
+        }
 
     def _install_proxy_chain_service(
         self,
@@ -579,319 +528,28 @@ echo "Using Xray: $XRAY"
         )
         self.ssh.run_script(
             node,
-            self._chain_install_script(
-                service_name,
-                int(node["inbound_port"]),
-                config,
+            singbox_install_script(
+                service_name=service_name,
+                config=config,
+                proxy_port=int(node["inbound_port"]),
+                server_host=node["host"],
                 allow_udp=node["inbound_protocol"] == CHAIN_PROTOCOL_SHADOWSOCKS_2022,
             ),
             lambda line: self._append_job_log(job_id, f"{node['server_name']}: {line}"),
-            timeout=240,
-        )
-
-    def _chain_install_script(
-        self,
-        service_name: str,
-        inbound_port: int,
-        config: dict[str, Any],
-        allow_udp: bool = False,
-    ) -> str:
-        encoded_config = base64.b64encode(
-            json.dumps(config, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-        ).decode("ascii")
-        ufw_udp_rule = (
-            f"  $SUDO ufw allow {shell_quote(inbound_port)}/udp >/dev/null 2>&1 || true\n"
-            if allow_udp
-            else ""
-        )
-        firewalld_udp_rule = (
-            f"  $SUDO firewall-cmd --permanent --add-port={shell_quote(inbound_port)}/udp "
-            ">/dev/null 2>&1 || true\n"
-            if allow_udp
-            else ""
-        )
-        return f"""#!/usr/bin/env bash
-set -Eeuo pipefail
-
-if [ "$(id -u)" -eq 0 ]; then
-  SUDO=""
-else
-  if ! command -v sudo >/dev/null 2>&1; then
-    echo "sudo is required when SSH user is not root" >&2
-    exit 20
-  fi
-  SUDO="sudo"
-fi
-
-find_xray() {{
-  for candidate in \\
-    /usr/local/x-ui/bin/xray \\
-    /usr/local/x-ui/bin/xray-linux-* \\
-    /usr/bin/xray \\
-    /usr/local/bin/xray
-  do
-    for path in $candidate; do
-      if [ -x "$path" ]; then
-        printf '%s\\n' "$path"
-        return 0
-      fi
-    done
-  done
-  if command -v xray >/dev/null 2>&1; then
-    command -v xray
-    return 0
-  fi
-  return 1
-}}
-
-XRAY="$(find_xray)" || {{ echo "xray binary not found" >&2; exit 42; }}
-SERVICE_NAME={shell_quote(service_name)}
-INBOUND_PORT={shell_quote(inbound_port)}
-ALLOW_UDP={"1" if allow_udp else "0"}
-INSTALL_DIR="/opt/manage-node/chains/$SERVICE_NAME"
-CONFIG_FILE="$INSTALL_DIR/config.json"
-TMP_CONFIG="$INSTALL_DIR/config.tmp.json"
-UNIT_FILE="/etc/systemd/system/$SERVICE_NAME.service"
-CONFIG_B64={shell_quote(encoded_config)}
-
-port_is_in_use() {{
-  local protocol="$1"
-  local suffix=":$INBOUND_PORT"
-  if command -v ss >/dev/null 2>&1; then
-    if [ "$protocol" = "udp" ]; then
-      $SUDO ss -H -lun
-    else
-      $SUDO ss -H -ltn
-    fi | awk -v suffix="$suffix" '
-      {{ address=$4; if (length(address) >= length(suffix) && substr(address, length(address) - length(suffix) + 1) == suffix) found=1 }}
-      END {{ exit found ? 0 : 1 }}'
-    return $?
-  fi
-  if command -v netstat >/dev/null 2>&1; then
-    if [ "$protocol" = "udp" ]; then
-      $SUDO netstat -lun
-    else
-      $SUDO netstat -ltn
-    fi | awk -v suffix="$suffix" '
-      NR > 2 {{ address=$4; if (length(address) >= length(suffix) && substr(address, length(address) - length(suffix) + 1) == suffix) found=1 }}
-      END {{ exit found ? 0 : 1 }}'
-    return $?
-  fi
-  echo "Neither ss nor netstat is available; cannot verify chain port availability" >&2
-  exit 44
-}}
-
-if ! $SUDO systemctl is-active --quiet "$SERVICE_NAME"; then
-  if port_is_in_use tcp; then
-    echo "TCP port $INBOUND_PORT is already in use; choose another chain port" >&2
-    exit 45
-  fi
-  if [ "$ALLOW_UDP" = "1" ] && port_is_in_use udp; then
-    echo "UDP port $INBOUND_PORT is already in use; choose another chain port" >&2
-    exit 46
-  fi
-fi
-
-echo "Using Xray: $XRAY"
-$SUDO install -d -m 0755 "$INSTALL_DIR"
-printf '%s' "$CONFIG_B64" | base64 -d | $SUDO tee "$TMP_CONFIG" >/dev/null
-$SUDO chmod 0644 "$TMP_CONFIG"
-
-if $SUDO "$XRAY" run -test -config "$TMP_CONFIG" >/tmp/"$SERVICE_NAME".test.log 2>&1; then
-  true
-elif $SUDO "$XRAY" -test -config "$TMP_CONFIG" >/tmp/"$SERVICE_NAME".test.log 2>&1; then
-  true
-else
-  cat /tmp/"$SERVICE_NAME".test.log >&2 || true
-  exit 43
-fi
-
-$SUDO mv "$TMP_CONFIG" "$CONFIG_FILE"
-$SUDO tee "$UNIT_FILE" >/dev/null <<EOF
-[Unit]
-Description=Manage Your Node proxy chain $SERVICE_NAME
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=simple
-ExecStart=$XRAY run -config $CONFIG_FILE
-Restart=on-failure
-RestartSec=3
-LimitNOFILE=1048576
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-$SUDO systemctl daemon-reload
-$SUDO systemctl enable "$SERVICE_NAME" >/dev/null
-$SUDO systemctl restart "$SERVICE_NAME"
-$SUDO systemctl is-active --quiet "$SERVICE_NAME"
-
-if command -v ufw >/dev/null 2>&1; then
-  $SUDO ufw allow {shell_quote(inbound_port)}/tcp >/dev/null 2>&1 || true
-{ufw_udp_rule.rstrip()}
-fi
-if command -v firewall-cmd >/dev/null 2>&1; then
-  $SUDO firewall-cmd --permanent --add-port={shell_quote(inbound_port)}/tcp >/dev/null 2>&1 || true
-{firewalld_udp_rule.rstrip()}
-  $SUDO firewall-cmd --reload >/dev/null 2>&1 || true
-fi
-
-echo "Service $SERVICE_NAME is active"
-"""
-
-    def _chain_xray_config(
-        self,
-        node: dict[str, Any],
-        next_node: dict[str, Any] | None,
-    ) -> dict[str, Any]:
-        return {
-            "log": {"loglevel": "warning"},
-            "inbounds": [self._chain_inbound(node)],
-            "outbounds": [self._chain_outbound(next_node)],
-        }
-
-    def _chain_inbound(self, node: dict[str, Any]) -> dict[str, Any]:
-        protocol = node.get("inbound_protocol") or CHAIN_PROTOCOL_VLESS_REALITY
-        sniffing = {
-            "enabled": True,
-            "destOverride": ["http", "tls", "quic"],
-            "metadataOnly": False,
-            "routeOnly": False,
-        }
-        if protocol == CHAIN_PROTOCOL_SHADOWSOCKS_2022:
-            encrypted_password = node.get("encrypted_ss_password")
-            if not encrypted_password:
-                raise ValueError(f"Shadowsocks password is missing for {node['server_name']}")
-            return {
-                "tag": "myn-chain-in",
-                "port": int(node["inbound_port"]),
-                "protocol": "shadowsocks",
-                "settings": {
-                    "network": "tcp,udp",
-                    "method": node.get("ss_method") or CHAIN_SS_METHOD,
-                    "password": self.secret_box.open(encrypted_password),
-                },
-                "sniffing": sniffing,
-            }
-
-        if protocol != CHAIN_PROTOCOL_VLESS_REALITY:
-            raise ValueError(f"unsupported chain protocol on {node['server_name']}: {protocol}")
-        dest, server_name = _deployment_reality_settings(node)
-        encrypted_private_key = node.get("encrypted_private_key")
-        if not encrypted_private_key:
-            raise ValueError(f"REALITY private key is missing for {node['server_name']}")
-        return {
-            "tag": "myn-chain-in",
-            "port": int(node["inbound_port"]),
-            "protocol": "vless",
-            "settings": {
-                "clients": [
-                    {
-                        "id": node["node_client_uuid"],
-                        "email": f"myn-chain-{node['position']}",
-                        "flow": "xtls-rprx-vision",
-                    }
-                ],
-                "decryption": "none",
-            },
-            "streamSettings": {
-                "network": "raw",
-                "security": "reality",
-                "realitySettings": {
-                    "show": False,
-                    "target": dest,
-                    "xver": 0,
-                    "serverNames": [server_name],
-                    "privateKey": self.secret_box.open(encrypted_private_key),
-                    "shortIds": [node["short_id"]],
-                },
-            },
-            "sniffing": sniffing,
-        }
-
-    def _chain_outbound(self, next_node: dict[str, Any] | None) -> dict[str, Any]:
-        if not next_node:
-            return {"tag": "direct", "protocol": "freedom"}
-
-        protocol = next_node.get("inbound_protocol") or CHAIN_PROTOCOL_VLESS_REALITY
-        if protocol == CHAIN_PROTOCOL_SHADOWSOCKS_2022:
-            encrypted_password = next_node.get("encrypted_ss_password")
-            if not encrypted_password:
-                raise ValueError(
-                    f"Shadowsocks password is missing for {next_node['server_name']}"
-                )
-            return {
-                "tag": "myn-chain-next",
-                "protocol": "shadowsocks",
-                "settings": {
-                    "servers": [
-                        {
-                            "address": next_node["host"],
-                            "port": int(next_node["inbound_port"]),
-                            "method": next_node.get("ss_method") or CHAIN_SS_METHOD,
-                            "password": self.secret_box.open(encrypted_password),
-                        }
-                    ],
-                },
-            }
-
-        if protocol == CHAIN_PROTOCOL_VLESS_REALITY:
-            _, server_name = _deployment_reality_settings(next_node)
-            return {
-                "tag": "myn-chain-next",
-                "protocol": "vless",
-                "settings": {
-                    "vnext": [
-                        {
-                            "address": next_node["host"],
-                            "port": int(next_node["inbound_port"]),
-                            "users": [
-                                {
-                                    "id": next_node["node_client_uuid"],
-                                    "encryption": "none",
-                                    "flow": "xtls-rprx-vision",
-                                }
-                            ],
-                        }
-                    ]
-                },
-                "streamSettings": {
-                    "network": "raw",
-                    "security": "reality",
-                    "realitySettings": {
-                        "serverName": server_name,
-                        "fingerprint": "chrome",
-                        "password": next_node["public_key"],
-                        "shortId": next_node["short_id"],
-                        "spiderX": "/",
-                    },
-                },
-            }
-
-        raise ValueError(
-            f"unsupported chain protocol on {next_node['server_name']}: {protocol}"
+            timeout=600,
         )
 
     def _chain_share_link(self, entry: dict[str, Any], name: str) -> str:
         if entry.get("inbound_protocol") != CHAIN_PROTOCOL_VLESS_REALITY:
             raise ValueError("proxy-chain entry must use VLESS + REALITY")
-        params = {
-            "security": "reality",
-            "type": "tcp",
-            "flow": "xtls-rprx-vision",
-            "pbk": entry["public_key"],
-            "fp": "chrome",
-            "sni": _deployment_reality_settings(entry)[1],
-            "sid": entry["short_id"],
-            "spx": "/",
-        }
-        tag = quote(name)
-        return (
-            f"vless://{entry['node_client_uuid']}@{url_host(entry['host'])}:{entry['inbound_port']}"
-            f"?{urlencode(params)}#{tag}"
+        return vless_reality_share_link(
+            client_uuid=entry["node_client_uuid"],
+            host=entry["host"],
+            port=int(entry["inbound_port"]),
+            name=name,
+            public_key=entry["public_key"],
+            short_id=entry["short_id"],
+            sni=_deployment_reality_settings(entry)[1],
         )
 
     def _cleanup_proxy_chain_services(self, chain_id: str) -> list[str]:
@@ -904,7 +562,7 @@ echo "Service $SERVICE_NAME is active"
             try:
                 lines = self.ssh.run_script(
                     node,
-                    self._chain_cleanup_script(service_name),
+                    singbox_uninstall_script(service_name),
                     lambda _: None,
                     timeout=120,
                 )
@@ -929,27 +587,6 @@ echo "Service $SERVICE_NAME is active"
         for row in rows:
             logs.extend(self._cleanup_proxy_chain_services(row["chain_id"]))
         return logs
-
-    def _chain_cleanup_script(self, service_name: str) -> str:
-        return f"""#!/usr/bin/env bash
-set -u
-if [ "$(id -u)" -eq 0 ]; then
-  SUDO=""
-else
-  SUDO="sudo"
-fi
-SERVICE_NAME={shell_quote(service_name)}
-INSTALL_DIR="/opt/manage-node/chains/$SERVICE_NAME"
-UNIT_FILE="/etc/systemd/system/$SERVICE_NAME.service"
-echo "Stopping $SERVICE_NAME"
-$SUDO systemctl stop "$SERVICE_NAME" 2>/dev/null || true
-$SUDO systemctl disable "$SERVICE_NAME" 2>/dev/null || true
-$SUDO rm -f "$UNIT_FILE"
-$SUDO rm -rf "$INSTALL_DIR"
-$SUDO systemctl daemon-reload 2>/dev/null || true
-$SUDO systemctl reset-failed "$SERVICE_NAME" 2>/dev/null || true
-echo "Removed $SERVICE_NAME"
-"""
 
     def _proxy_chain_full_nodes(self, chain_id: str) -> list[dict[str, Any]]:
         return self.db.query_all(
@@ -1008,7 +645,7 @@ echo "Removed $SERVICE_NAME"
         rows = self.db.query_all(
             f"""
             SELECT d.id, d.server_id, s.name AS server_name, s.host, s.ssh_port,
-                   d.protocol, d.engine, d.panel_port, d.proxy_port, d.status, d.install_method
+                   d.protocol, d.engine, d.proxy_port, d.status, d.install_method
             FROM deployments d
             JOIN servers s ON s.id = d.server_id
             WHERE d.id IN ({placeholders})

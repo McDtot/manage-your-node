@@ -67,13 +67,11 @@ def test_deployments_default_to_native_and_retire_legacy_simulations(tmp_path):
     db.execute(
         """
         INSERT INTO deployments (
-            id, server_id, engine, protocol, install_method, panel_port,
-            panel_path, panel_username, encrypted_panel_password,
-            encrypted_api_token, proxy_port, status, subscription_url,
-            created_at, updated_at
-        ) VALUES ('deployment', 'server', '3x-ui', 'VLESS + REALITY',
-                  'simulated', 32000, '/panel', 'admin', '', '', 443,
-                  'ready', '/sub/deployments/deployment', 'now', 'now')
+            id, server_id, engine, protocol, install_method, proxy_port,
+            status, subscription_url, created_at, updated_at
+        ) VALUES ('deployment', 'server', 'sing-box', 'VLESS + REALITY',
+                  'simulated', 443, 'ready', '/sub/deployments/deployment',
+                  'now', 'now')
         """
     )
 
@@ -87,7 +85,70 @@ def test_deployments_default_to_native_and_retire_legacy_simulations(tmp_path):
     assert row["install_method"] == "legacy"
     assert row["status"] == "failed"
     assert "no longer supported" in row["last_error"]
-    assert upgraded.query_all("SELECT id FROM subscriptions") == []
+
+
+def test_legacy_3xui_deployments_block_startup(tmp_path, monkeypatch):
+    path = tmp_path / "legacy-3xui.sqlite"
+    connection = sqlite3.connect(path)
+    connection.executescript(
+        """
+        CREATE TABLE servers (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            host TEXT NOT NULL,
+            ssh_port INTEGER NOT NULL,
+            ssh_user TEXT NOT NULL,
+            auth_type TEXT NOT NULL,
+            encrypted_secret TEXT,
+            secret_label TEXT NOT NULL DEFAULT 'not_saved',
+            os TEXT,
+            arch TEXT,
+            status TEXT NOT NULL,
+            last_check_at TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+        CREATE TABLE deployments (
+            id TEXT PRIMARY KEY,
+            server_id TEXT NOT NULL,
+            engine TEXT NOT NULL,
+            protocol TEXT NOT NULL,
+            install_method TEXT NOT NULL DEFAULT 'native',
+            panel_port INTEGER NOT NULL,
+            panel_path TEXT NOT NULL,
+            panel_username TEXT NOT NULL,
+            encrypted_panel_password TEXT NOT NULL,
+            encrypted_api_token TEXT NOT NULL,
+            proxy_port INTEGER NOT NULL,
+            status TEXT NOT NULL,
+            subscription_url TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+        INSERT INTO servers (
+            id, name, host, ssh_port, ssh_user, auth_type, status, created_at, updated_at
+        ) VALUES ('server', 'edge', '203.0.113.10', 22, 'root', 'agent',
+                  'reachable', 'now', 'now');
+        INSERT INTO deployments (
+            id, server_id, engine, protocol, install_method, panel_port,
+            panel_path, panel_username, encrypted_panel_password,
+            encrypted_api_token, proxy_port, status, subscription_url,
+            created_at, updated_at
+        ) VALUES ('deployment', 'server', '3x-ui', 'VLESS + REALITY',
+                  'native', 32000, '/panel', 'admin', '', '', 443,
+                  'ready', '/sub/x', 'now', 'now');
+        """
+    )
+    connection.commit()
+    connection.close()
+
+    monkeypatch.delenv("MYN_FORCE_SINGBOX_MIGRATION", raising=False)
+    with pytest.raises(RuntimeError, match="3x-ui deployment"):
+        Database(path)
+
+    monkeypatch.setenv("MYN_FORCE_SINGBOX_MIGRATION", "1")
+    upgraded = Database(path)
+    assert upgraded.query_all("SELECT id FROM deployments") == []
 
 
 def test_proxy_chain_protocol_columns_migrate_existing_rows(tmp_path):
@@ -134,21 +195,19 @@ def test_proxy_chain_protocol_columns_migrate_existing_rows(tmp_path):
     }
 
 
-def test_client_traffic_reset_period_migrates_existing_table(tmp_path):
-    path = tmp_path / "legacy-clients.sqlite"
+def test_reality_and_config_hash_columns_migrate(tmp_path):
+    path = tmp_path / "legacy-reality.sqlite"
     connection = sqlite3.connect(path)
     connection.executescript(
         """
-        CREATE TABLE clients (
+        CREATE TABLE deployments (
             id TEXT PRIMARY KEY,
-            deployment_id TEXT NOT NULL,
-            name TEXT NOT NULL,
-            uuid TEXT NOT NULL,
-            quota_bytes INTEGER NOT NULL,
-            used_bytes INTEGER NOT NULL,
-            expires_at TEXT NOT NULL,
-            enabled INTEGER NOT NULL,
-            share_link TEXT NOT NULL,
+            server_id TEXT NOT NULL,
+            engine TEXT NOT NULL,
+            protocol TEXT NOT NULL,
+            install_method TEXT NOT NULL DEFAULT 'native',
+            proxy_port INTEGER NOT NULL,
+            status TEXT NOT NULL,
             subscription_url TEXT NOT NULL,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL
@@ -159,10 +218,14 @@ def test_client_traffic_reset_period_migrates_existing_table(tmp_path):
     connection.close()
 
     db = Database(path)
-    columns = {row["name"]: row for row in db.query_all("PRAGMA table_info(clients)")}
-
-    assert columns["traffic_reset_days"]["notnull"] == 1
-    assert columns["traffic_reset_days"]["dflt_value"] == "0"
+    columns = {row["name"]: row for row in db.query_all("PRAGMA table_info(deployments)")}
+    for name in (
+        "encrypted_reality_private_key",
+        "reality_public_key",
+        "reality_short_id",
+        "last_config_hash",
+    ):
+        assert columns[name]["notnull"] == 1
 
 
 def test_subscription_display_names_migrate_existing_tables(tmp_path):
@@ -179,7 +242,6 @@ def test_subscription_display_names_migrate_existing_tables(tmp_path):
         CREATE TABLE subscription_entries (
             subscription_id TEXT NOT NULL,
             node_client_id TEXT NOT NULL,
-            quota_bytes INTEGER NOT NULL,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL,
             PRIMARY KEY(subscription_id, node_client_id)
@@ -206,7 +268,7 @@ def test_subscription_display_names_migrate_existing_tables(tmp_path):
         row["name"]: row
         for row in db.query_all("PRAGMA table_info(subscription_chain_entries)")
     }
-
     assert node_columns["display_name"]["dflt_value"] == "''"
     assert entry_columns["display_name"]["dflt_value"] == "''"
+    assert "quota_bytes" not in entry_columns
     assert chain_columns["display_name"]["dflt_value"] == "''"

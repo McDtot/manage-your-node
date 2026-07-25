@@ -1,19 +1,21 @@
 # Manage Your Node
 
-一个自托管的 VPS 节点管理面板。通过浏览器即可录入服务器、部署 3x-ui、创建独立用户和订阅，并把多台 VPS 编排成代理链。
+一个自托管的 VPS 节点管理面板。通过浏览器即可录入服务器、用 **sing-box** 部署节点、创建独立用户和订阅，并把多台 VPS 编排成代理链。
 
 [最新版本](https://github.com/McDtot/manage-your-node/releases/latest) · [更新记录](https://github.com/McDtot/manage-your-node/releases) · [问题反馈](https://github.com/McDtot/manage-your-node/issues)
 
 > [!IMPORTANT]
 > 本项目适合个人或小规模运维，当前为单管理员模式。应用本身不提供 HTTPS；公网使用前请配置反向代理和 TLS，并遵守所在地法律法规及服务商条款。
 
-## v0.14.0 更新亮点
+## v1.0.0 更新亮点
 
-- 新增 **AnyTLS** 节点部署协议：因 Xray / 3x-ui 不支持 AnyTLS，选择该协议时会在目标 VPS 上安装固定版本、经 SHA256 校验的 **sing-box**（v1.13.14），并以独立 systemd 服务运行。
-- 证书支持两种方式：默认自签（订阅链接自动带 `insecure=1`，客户端导入无需手动跳过校验）；填写域名则走 sing-box 内置 ACME（Let's Encrypt）。
-- 订阅支持 `anytls://` 分享链接，Base64 与 Mihomo / Clash YAML 均可分发；AnyTLS 节点暂不统计流量，也不可加入代理链。
+- **全面切换到 sing-box**：删除 3x-ui / Xray / 面板 API / SSH 隧道；所有协议统一为「本地渲染完整配置 → SSH 下发 → systemd 重启」。
+- 支持协议：VLESS + REALITY、Shadowsocks 2022、AnyTLS；REALITY 密钥在面板本机用 `cryptography` 生成，无需远端 `xray x25519`。
+- **放弃流量统计与流量配额**；保留到期时间与启用/停用。到期后由后台配置同步任务自动从节点配置中剔除。
+- 代理链改为 sing-box sidecar，**任意 sing-box 节点均可入链**（含 AnyTLS 部署机）。
+- 破坏性升级：必须先在旧版删除全部 3x-ui 节点，再升级；否则启动会拒绝迁移（可用 `MYN_FORCE_SINGBOX_MIGRATION=1` 强制清空残留记录）。
 
-完整变更见 [v0.14.0 发布说明](https://github.com/McDtot/manage-your-node/releases/tag/v0.14.0)。此前 v0.13.0 为液态玻璃 WebUI 重绘，见 [v0.13.0](https://github.com/McDtot/manage-your-node/releases/tag/v0.13.0)。
+完整变更见 [v1.0.0 发布说明](https://github.com/McDtot/manage-your-node/releases/tag/v1.0.0)。
 
 ## 主要功能
 
@@ -22,9 +24,8 @@
 | Web 控制台 | 中文界面，登录鉴权，集中查看服务器、部署、用户和任务状态 |
 | 服务器管理 | 保存 VPS SSH 信息、测试连通性，并在首次连接时人工核验主机指纹 |
 | 健康监控 | 周期性探测每台服务器的 SSH 可达性与延迟，可一键批量检查 |
-| 节点部署 | 通过 SSH 安装固定版本的 3x-ui（VLESS + REALITY / Shadowsocks 2022），或安装固定版本的 sing-box 提供 AnyTLS |
-| 用户管理 | 同一节点可创建多个独立用户，支持启停、流量额度、手动/周期重置和到期时间 |
-| 流量统计 | 从 3x-ui 周期性同步真实用量到本地，支持一键手动刷新（AnyTLS 节点暂不统计流量） |
+| 节点部署 | 通过 SSH 安装固定版本、经 SHA256 校验的 sing-box（当前钉 `1.13.14`） |
+| 用户管理 | 同一节点可创建多个独立用户，支持启停与到期时间 |
 | 订阅分发 | 按需创建订阅，自由组合普通用户和代理链，并为每个条目设置显示名称，可生成二维码 |
 | 代理链 | 将多个可用节点按顺序组成入口、中继和出口，节点间支持 REALITY 或 SS2022 |
 | 运维与安全 | 任务日志、审计记录、在线备份、敏感信息加密、登录限流和 CSRF 防护 |
@@ -98,8 +99,8 @@ sudo bash install.sh --admin-password-file /root/manage-node-admin-password
 
 - 管理服务器能够通过 SSH 访问；
 - 使用 root，或使用具备免密码 sudo 权限的普通用户；
-- 能够访问 GitHub 以下载经过版本与哈希固定的 3x-ui；
-- 用于代理链时需使用 systemd；
+- 能够访问 GitHub 以下载经过版本与哈希固定的 sing-box；
+- 使用 systemd；
 - 代理端口已在云安全组、NAT 映射和系统防火墙中正确配置。
 
 暂不支持直接粘贴带 passphrase 的私钥；可以改用 ssh-agent。
@@ -114,33 +115,29 @@ sudo bash install.sh --admin-password-file /root/manage-node-admin-password
 
 进入“部署”并选择已通过 SSH 测试的服务器：
 
-- 协议模板：可选 VLESS + REALITY、Shadowsocks 2022（2022-blake3-aes-256-gcm）或 AnyTLS（sing-box）；
+- 协议模板：VLESS + REALITY、Shadowsocks 2022（2022-blake3-aes-256-gcm）或 AnyTLS；
 - REALITY 伪装目标：仅 VLESS + REALITY 需要，建议选择“自动检测并固定”；
-- 域名（仅 AnyTLS）：留空则由目标 VPS 生成自签证书（客户端自动跳过证书校验，无需域名）；填写已解析到该服务器的域名则由 sing-box 自动申请并续期 Let's Encrypt 证书；
-- 代理端口：默认 443，必须在目标 VPS 上可从公网访问；Shadowsocks 2022 需同时放行 TCP 和 UDP；
-- 面板端口：可留空自动生成，仅通过 SSH 隧道访问，无需向公网开放。
+- 域名（仅 AnyTLS）：留空则由目标 VPS 生成自签证书（客户端自动跳过证书校验）；填写已解析到该服务器的域名则由 sing-box 自动申请并续期 Let's Encrypt 证书；
+- 代理端口：默认 443，必须在目标 VPS 上可从公网访问；Shadowsocks 2022 需同时放行 TCP 和 UDP。
 
-部署完成并显示“可用”后，3x-ui 面板会被限制在目标 VPS 的 <code>127.0.0.1</code>，Manage Your Node 通过固定主机指纹的 SSH 隧道调用其 API。
+部署会在目标机安装共享二进制 <code>/opt/manage-node/singbox/bin/sing-box</code>，并以 systemd 服务 <code>myn-node-&lt;部署ID&gt;</code> 运行；配置位于 <code>/opt/manage-node/singbox/myn-node-&lt;部署ID&gt;/config.json</code>。用户增删改会重新渲染完整配置并通过 SSH 下发、重启服务。
 
-#### AnyTLS（sing-box）
+#### AnyTLS 证书
 
-Xray 与 3x-ui 均不支持 AnyTLS，因此选择 AnyTLS 时不会安装 3x-ui，而是在目标 VPS 上安装固定版本、经 SHA256 校验的 sing-box，并以独立的 systemd 服务（<code>myn-anytls-&lt;部署ID&gt;</code>）提供 AnyTLS 入站。用户的增删改会重新渲染完整的 sing-box 配置并通过 SSH 下发、重启服务。
+- 自签：订阅链接自动带 <code>insecure=1</code>，客户端导入后无需手动开启“跳过证书校验”。
+- ACME：需要域名已解析到本机并放行 <code>80</code> 端口用于 HTTP-01 验证。
 
-- 证书：留空域名使用自签证书，生成的订阅会自动带上 <code>insecure=1</code>，客户端导入后无需手动开启“跳过证书校验”；填写域名则走 ACME（Let's Encrypt），需要该域名已解析到本机并放行 <code>80</code> 端口用于签发验证。
-- 端口：AnyTLS 只需放行代理端口的 TCP；使用域名 ACME 时还需临时放行 <code>80</code> 端口。
-- 限制：sing-box 没有像 3x-ui 那样的简易流量接口，AnyTLS 节点当前不统计每用户流量（用量恒为 0，也不参与自动同步）；AnyTLS 节点也不能作为代理链的节点。
-- 订阅：AnyTLS 节点会生成 <code>anytls://</code> 链接，Base64 与 Mihomo / Clash YAML 两种订阅格式均已支持。
+> [!NOTE]
+> 当前钉住 sing-box <code>1.13.14</code>。自 1.14.0 起内联 <code>acme</code> 已废弃，1.16.0 将移除；后续升级需改为独立的 <code>certificate_provider</code> 配置。
 
 ### 4. 创建用户
 
 进入“用户”，选择一个可用部署并设置：
 
 - 用户名；
-- 流量额度；
-- 到期日，或勾选“不限时”；
-- 流量自动重置周期，填 0 表示不自动重置。
+- 到期日，或勾选“不限时”。
 
-每名用户拥有独立 UUID，可随时启停、修改额度与到期时间，或手动重置流量。
+每名用户拥有独立凭证，可随时启停与修改到期时间。禁用或到期的用户不会出现在节点配置与订阅中；面板会周期性重渲染配置，使到期在无需手工操作时生效。
 
 ### 5. 创建订阅
 
@@ -149,7 +146,7 @@ Xray 与 3x-ui 均不支持 AnyTLS，因此选择 AnyTLS 时不会安装 3x-ui�
 1. 新建一条订阅；
 2. 点击“分发和调整”；
 3. 选择要加入的普通用户和已下发代理链；
-4. 按需设置订阅内的显示名称与额度；
+4. 按需设置订阅内的显示名称；
 5. 保存并复制订阅链接。
 
 订阅链接支持两种格式：
@@ -186,14 +183,49 @@ Xray 与 3x-ui 均不支持 AnyTLS，因此选择 AnyTLS 时不会安装 3x-ui�
 - 入口端口供用户设备连接，其余节点端口供上一跳连接；
 - 当前只支持公网端口与本机监听端口相同的 NAT 映射，不支持端口转换。
 
-保存时会检查与 SSH、3x-ui 面板、普通代理及其他代理链的端口冲突；下发前还会检查远端实际监听占用。链路服务独立运行，不会改写 3x-ui 主配置：
+保存时会检查与 SSH、普通代理及其他代理链的端口冲突。链路服务与节点服务共用同一 sing-box 二进制：
 
 ~~~text
-/opt/manage-node/chains/myn-chain-*
+/opt/manage-node/singbox/bin/sing-box
+/opt/manage-node/singbox/myn-chain-*/
 /etc/systemd/system/myn-chain-*.service
 ~~~
 
 删除代理链、部署或服务器时，系统会尽力移除相关远端服务。自动添加的防火墙规则不会自动删除，以免误删已有规则；不再使用的端口请确认后手动关闭。
+
+## 从旧版（3x-ui）升级到 v1.0.0
+
+> [!WARNING]
+> 这是破坏性升级。请先在 **旧版本 WebUI** 中删除所有部署（会触发远端 `x-ui uninstall`），再升级。新版本无法再通过 API 卸载 3x-ui。
+
+推荐顺序：
+
+1. 备份数据库、`.env` 与 `secrets/`；
+2. 在旧版面板删除全部部署与代理链；
+3. 升级代码并重新安装：
+
+~~~bash
+cd /path/to/manage-your-node
+git pull --ff-only
+sudo bash install.sh
+~~~
+
+4. 在新版中重新部署节点。
+
+若已升级导致数据库仍残留 `engine = '3x-ui'` 的记录，启动会报错并中止。此时可：
+
+- 回退旧版，用 UI 删除节点；或
+- 设置 <code>MYN_FORCE_SINGBOX_MIGRATION=1</code> 强制清空这些记录，并在各 VPS 上手动清理 3x-ui：
+
+~~~bash
+systemctl stop x-ui && systemctl disable x-ui
+printf 'y\n' | x-ui uninstall
+rm -f /etc/systemd/system/x-ui.service /usr/bin/x-ui /usr/local/bin/x-ui
+rm -rf /usr/local/x-ui /etc/x-ui /var/log/x-ui
+systemctl daemon-reload
+~~~
+
+升级前建议先备份。不要删除或重新生成原来的 <code>secrets/app_secret.txt</code>，否则数据库中的 SSH 密钥与节点密钥将无法解密。
 
 ## 配置 HTTPS
 
@@ -221,23 +253,6 @@ sudo bash install.sh --domain panel.example.com
 
 > [!WARNING]
 > WebUI 中的“外部访问设置”会更新订阅地址、Host 白名单、CSRF 来源和 Secure Cookie，但不能修改 Docker 的宿主机端口绑定。是否公开监听仍由 <code>.env</code> 中的 <code>BIND_ADDRESS</code> 决定。
-
-## 升级
-
-请始终在原项目目录升级，不要重新克隆到嵌套目录：
-
-~~~bash
-cd /path/to/manage-your-node
-git pull --ff-only
-sudo bash install.sh
-~~~
-
-> [!NOTE]
-> 从 v0.9.1 升级到 v0.10.0 时，应用会自动添加健康监控和 Shadowsocks 2022 所需的数据库列；重建镜像时会自动安装二维码依赖 `segno`。升级前仍建议先备份数据库、`.env` 与 `secrets/`。
-
-安装器会保留现有配置、主密钥、管理员密码和 Docker 数据卷，并在替换运行中服务前检查数据库与主密钥是否匹配。
-
-升级前建议先备份。不要删除或重新生成原来的 <code>secrets/app_secret.txt</code>，否则数据库中的 SSH 密钥、面板密码和 API token 将无法解密。
 
 ## 备份
 
@@ -296,6 +311,10 @@ docker compose up -d
 4. <code>.env</code> 中的 <code>BIND_ADDRESS</code> 是否为 <code>0.0.0.0</code>；
 5. 如果绑定为 <code>127.0.0.1</code>，是否已通过本机反向代理访问。
 
+### 升级后提示仍有 3x-ui 部署
+
+见上文「从旧版（3x-ui）升级到 v1.0.0」。必须先删除旧节点，或使用强制迁移逃生舱并手工清理远端。
+
 ### 部署提示必须先信任主机指纹
 
 这是正常的安全流程。第一次测试 SSH 只记录指纹，请从云厂商控制台核对后再批准，随后重新测试。
@@ -326,9 +345,8 @@ ssh -L 8787:127.0.0.1:8787 user@管理服务器IP
 
 ## 安全设计
 
-- SSH 密钥、面板密码和 API token 使用 Fernet + scrypt 加密后存入 SQLite；
+- SSH 密钥与节点 REALITY / Shadowsocks / AnyTLS 密钥使用 Fernet + scrypt 加密后存入 SQLite；
 - 首次 SSH 主机指纹必须带外核验，指纹变化时拒绝连接；
-- 3x-ui 面板仅监听目标 VPS 的 loopback，API 通过 SSH 隧道访问；
 - 管理端写操作使用与会话绑定的 CSRF 令牌，并校验 Origin；
 - 登录失败次数持久化限流，默认 5 分钟内失败 5 次后锁定 15 分钟；
 - Session Cookie 使用 <code>HttpOnly</code> 和 <code>SameSite=Strict</code>，HTTPS 下启用 <code>Secure</code>；
@@ -350,8 +368,9 @@ ssh -L 8787:127.0.0.1:8787 user@管理服务器IP
 | <code>ALLOWED_HOSTS</code> | 自动推导 | 额外允许的 Host，多个值用逗号分隔 |
 | <code>SESSION_HOURS</code> | <code>12</code> | 登录会话有效小时数 |
 | <code>SUBSCRIPTION_RATE_LIMIT</code> | <code>120</code> | 单来源每分钟订阅请求上限 |
-| <code>TRAFFIC_SYNC_SECONDS</code> | <code>300</code> | 从 3x-ui 同步真实流量用量的周期；设为 <code>0</code> 可关闭 |
+| <code>CONFIG_SYNC_SECONDS</code> | <code>300</code> | 重渲染节点配置、使到期生效的周期；设为 <code>0</code> 可关闭 |
 | <code>HEALTH_CHECK_SECONDS</code> | <code>120</code> | 批量检查节点健康状态的周期；设为 <code>0</code> 可关闭 |
+| <code>MYN_FORCE_SINGBOX_MIGRATION</code> | 未设置 | 设为 <code>1</code> 时强制删除残留的 3x-ui 部署记录 |
 | <code>TRUST_X_FORWARDED_FOR</code> | <code>0</code> | 是否采信反向代理传入的客户端 IP |
 | <code>TRUSTED_PROXY_IPS</code> | <code>127.0.0.1,::1</code> | 允许传递代理头的来源 IP/CIDR |
 | <code>REALITY_CANDIDATES</code> | Yahoo、Apple、Amazon | 自动检测的 <code>host:port</code> 候选列表 |
@@ -409,14 +428,12 @@ app/
   config.py         环境变量与安全模式
   database.py       SQLite schema、迁移与备份
   maintenance.py    数据库备份和主密钥检查
-  provisioning.py   3x-ui 安装脚本生成
+  provisioning.py   sing-box 安装 / 配置下发 / 卸载脚本
   security.py       敏感信息加密
   server.py         Starlette 路由与中间件
-  services/         部署、用户、订阅和代理链逻辑(按领域拆分)
+  services/         部署、用户、订阅、代理链与 sing-box 配置渲染
   ssh_runner.py     SSH 连接与主机指纹
-  ssh_tunnel.py     3x-ui API 的 SSH 隧道
   web_config.py     WebUI 外部地址与运行时安全策略
-  xui_api.py        3x-ui API 客户端
   static/           前端页面、样式与脚本
 examples/           Caddy / Nginx 配置示例
 tests/              pytest 测试
@@ -428,7 +445,7 @@ docker-compose.yml  容器编排配置
 
 - 单管理员，不支持多用户或 RBAC；
 - 不提供内置 HTTPS 和 MFA；
-- 代理链的 Xray 服务不会显示在 3x-ui 面板中；
+- 不统计流量用量，也不提供流量配额；
 - NAT 代理链不支持公网端口与本机端口转换；
 - 暂不支持直接粘贴带 passphrase 的 SSH 私钥；
 - 远端失败清理为 best-effort：删除服务器或部署时若 SSH 不可达，仍会删除本地记录，远端残留服务和端口需手工检查；

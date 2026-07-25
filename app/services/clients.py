@@ -1,29 +1,25 @@
-import math
+import hashlib
+import json
 import threading
 import uuid
 from contextlib import suppress
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
-from ..provisioning import (
-    anytls_service_name,
-    singbox_acme_dir,
-    singbox_cert_paths,
-    singbox_config_push_script,
-)
+from ..provisioning import node_service_name, singbox_config_push_script
 from .deployments import DeploymentsService
 from .helpers import (
+    ACTIVE_CLIENT_CONDITION,
     DEPLOYMENT_PROTOCOL_ANYTLS,
     DEPLOYMENT_PROTOCOL_SHADOWSOCKS_2022,
-    _normalize_client_share_link_host,
     boolean_field,
     new_anytls_password,
     new_id,
     new_ss2022_password,
     now_iso,
     require_text,
-    traffic_reset_days_field,
 )
+from .singbox import build_node_config
 
 
 class ClientsService(DeploymentsService):
@@ -47,92 +43,96 @@ class ClientsService(DeploymentsService):
         if self.db.query_one(sql, tuple(params)):
             raise ValueError("该节点已存在同名用户")
 
-    def _anytls_users(
+    def _active_client_users(
         self,
-        deployment_id: str,
-        exclude_client_id: str | None = None,
+        deployment: dict[str, Any],
+        extra_users: list[dict[str, str]] | None = None,
     ) -> list[dict[str, str]]:
-        """Return ``{name, password}`` for every enabled AnyTLS user of a node."""
+        """Return the users a node should currently accept.
+
+        Disabled and expired users are dropped here. Rendering is the only
+        place either is enforced now that nodes run a bare sing-box with no
+        panel of their own.
+        """
         rows = self.db.query_all(
-            """
-            SELECT name, encrypted_anytls_password
-            FROM clients
-            WHERE deployment_id = ? AND enabled = 1
-            ORDER BY created_at ASC
+            f"""
+            SELECT c.name, c.uuid, c.encrypted_ss_password, c.encrypted_anytls_password
+            FROM clients c
+            WHERE c.deployment_id = ? AND {ACTIVE_CLIENT_CONDITION}
+            ORDER BY c.created_at ASC
             """,
-            (deployment_id,),
+            (deployment["id"],),
         )
+        protocol = deployment.get("protocol")
         users: list[dict[str, str]] = []
         for row in rows:
-            password = self.secret_box.open(row["encrypted_anytls_password"] or "")
-            if password:
-                users.append({"name": row["name"], "password": password})
-        return users
+            password = ""
+            if protocol == DEPLOYMENT_PROTOCOL_SHADOWSOCKS_2022:
+                password = self.secret_box.open(row["encrypted_ss_password"] or "")
+            elif protocol == DEPLOYMENT_PROTOCOL_ANYTLS:
+                password = self.secret_box.open(row["encrypted_anytls_password"] or "")
+                if not password:
+                    continue
+            users.append(
+                {"name": row["name"], "uuid": row["uuid"], "password": password}
+            )
+        return [*users, *(extra_users or [])]
 
-    def _build_anytls_config(
+    def _render_node_config(
         self,
         deployment: dict[str, Any],
         extra_users: list[dict[str, str]] | None = None,
     ) -> dict[str, Any]:
-        """Render the full sing-box configuration for an AnyTLS deployment."""
-        service_name = anytls_service_name(deployment["id"])
-        domain = str(deployment.get("anytls_domain") or "").strip()
-        users = self._anytls_users(deployment["id"])
-        if extra_users:
-            users = [*users, *extra_users]
-        if domain:
-            tls: dict[str, Any] = {
-                "enabled": True,
-                "server_name": domain,
-                "acme": {
-                    "domain": [domain],
-                    "data_directory": singbox_acme_dir(service_name),
-                },
-            }
-        else:
-            cert_path, key_path = singbox_cert_paths(service_name)
-            tls = {
-                "enabled": True,
-                "certificate_path": cert_path,
-                "key_path": key_path,
-            }
-        return {
-            "log": {"level": "warn", "timestamp": True},
-            "inbounds": [
-                {
-                    "type": "anytls",
-                    "tag": "anytls-in",
-                    "listen": "::",
-                    "listen_port": int(deployment["proxy_port"]),
-                    "users": users,
-                    "tls": tls,
-                }
-            ],
-            "outbounds": [{"type": "direct", "tag": "direct"}],
-        }
+        return build_node_config(
+            deployment,
+            self._active_client_users(deployment, extra_users),
+        )
 
-    def _push_anytls_config(
+    @staticmethod
+    def _config_hash(config: dict[str, Any]) -> str:
+        payload = json.dumps(
+            config, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        )
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+    def _push_node_config(
         self,
         deployment: dict[str, Any],
         config: dict[str, Any],
     ) -> None:
         server = self._get_server_row(deployment["server_id"])
-        service_name = anytls_service_name(deployment["id"])
         self.ssh.run_script(
             server,
-            singbox_config_push_script(service_name, config),
+            singbox_config_push_script(node_service_name(deployment["id"]), config),
             lambda _: None,
             timeout=180,
         )
 
-    def _apply_anytls_config(self, deployment: dict[str, Any]) -> None:
-        """Re-render the config from committed state and reload the service."""
-        self._push_anytls_config(deployment, self._build_anytls_config(deployment))
+    def _record_config_hash(self, deployment_id: str, config_hash: str) -> None:
+        self.db.execute(
+            "UPDATE deployments SET last_config_hash = ?, updated_at = ? WHERE id = ?",
+            (config_hash, now_iso(), deployment_id),
+        )
 
-    def _anytls_deployment_ready(self, deployment: dict[str, Any]) -> bool:
+    def _apply_node_config(self, deployment: dict[str, Any]) -> bool:
+        """Re-render from committed state and reload only on a real change.
+
+        Returns whether the remote service was restarted, so the periodic sweep
+        can report how much it actually touched.
+        """
+        if not self._node_deployment_ready(deployment):
+            return False
+        config = self._render_node_config(deployment)
+        config_hash = self._config_hash(config)
+        if config_hash == str(deployment.get("last_config_hash") or ""):
+            return False
+        self._push_node_config(deployment, config)
+        self._record_config_hash(deployment["id"], config_hash)
+        return True
+
+    def _node_deployment_ready(self, deployment: dict[str, Any]) -> bool:
         return (
-            deployment.get("protocol") == DEPLOYMENT_PROTOCOL_ANYTLS
-            and deployment.get("install_method") == "native"
+            deployment.get("install_method") == "native"
             and deployment.get("status") == "ready"
         )
 
@@ -142,14 +142,6 @@ class ClientsService(DeploymentsService):
             raise ValueError("legacy simulated deployments are no longer supported")
         client_id = new_id("cli")
         client_uuid = str(uuid.uuid4())
-        try:
-            quota_gb = float(payload.get("quotaGb", 100))
-        except (TypeError, ValueError) as exc:
-            raise ValueError("quotaGb must be a number") from exc
-        if not math.isfinite(quota_gb) or not 0 <= quota_gb <= 1_000_000:
-            raise ValueError("quotaGb must be between 0 and 1000000")
-        quota_bytes = int(quota_gb * 1024 * 1024 * 1024)
-        traffic_reset_days = traffic_reset_days_field(payload)
         never_expires = boolean_field(payload, "neverExpires")
         expires_at = "" if never_expires else str(payload.get("expiresAt", "")).strip()
         if not never_expires and not expires_at:
@@ -174,67 +166,36 @@ class ClientsService(DeploymentsService):
             ss_password=ss_password,
             anytls_password=anytls_password,
         )
-        sub_id = client_id[-12:]
-        if is_anytls and self._anytls_deployment_ready(deployment):
-            config = self._build_anytls_config(
+        # Push before the insert so a failing node leaves no orphaned user.
+        config_hash = ""
+        if self._node_deployment_ready(deployment) and self._client_is_active(expires_at):
+            config = self._render_node_config(
                 deployment,
-                extra_users=[{"name": name, "password": anytls_password}],
+                extra_users=[
+                    {
+                        "name": name,
+                        "uuid": client_uuid,
+                        "password": anytls_password or ss_password,
+                    }
+                ],
             )
-            self._push_anytls_config(deployment, config)
-        if (
-            not is_anytls
-            and deployment.get("install_method") == "native"
-            and deployment.get("status") == "ready"
-            and deployment.get("xui_inbound_id")
-        ):
-            with self._xui_session(deployment) as xui:
-                xui.wait_ready(seconds=30)
-                xui.login()
-                if is_shadowsocks:
-                    xui.create_ss_client(
-                        inbound_id=int(deployment["xui_inbound_id"]),
-                        email=name,
-                        password=ss_password,
-                        sub_id=sub_id,
-                        quota_bytes=quota_bytes,
-                        expires_ms=self._expires_ms(expires_at),
-                        reset_days=traffic_reset_days,
-                    )
-                    links = []
-                else:
-                    links = xui.create_client(
-                        inbound_id=int(deployment["xui_inbound_id"]),
-                        email=name,
-                        client_uuid=client_uuid,
-                        sub_id=sub_id,
-                        quota_bytes=quota_bytes,
-                        expires_ms=self._expires_ms(expires_at),
-                        reset_days=traffic_reset_days,
-                    )
-            if links:
-                share_link = _normalize_client_share_link_host(
-                    links[0],
-                    deployment["host"],
-                )
+            self._push_node_config(deployment, config)
+            config_hash = self._config_hash(config)
         stamp = now_iso()
         with self.db.transaction():
             self.db.execute(
                 """
                 INSERT INTO clients (
-                    id, deployment_id, name, uuid, quota_bytes, used_bytes,
-                    traffic_reset_days, expires_at, enabled, encrypted_ss_password,
-                    encrypted_anytls_password, share_link, subscription_url,
-                    created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    id, deployment_id, name, uuid, expires_at, enabled,
+                    encrypted_ss_password, encrypted_anytls_password,
+                    share_link, subscription_url, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     client_id,
                     deployment_id,
                     name,
                     client_uuid,
-                    quota_bytes,
-                    0,
-                    traffic_reset_days,
                     expires_at,
                     1,
                     self.secret_box.seal(ss_password),
@@ -245,6 +206,8 @@ class ClientsService(DeploymentsService):
                     stamp,
                 ),
             )
+            if config_hash:
+                self._record_config_hash(deployment_id, config_hash)
             if deployment.get("subscription_url"):
                 self.db.execute(
                     """
@@ -257,9 +220,9 @@ class ClientsService(DeploymentsService):
             self.db.execute(
                 """
                 INSERT OR IGNORE INTO subscription_entries (
-                    subscription_id, node_client_id, quota_bytes, created_at, updated_at
+                    subscription_id, node_client_id, created_at, updated_at
                 )
-                SELECT ?, ?, ?, ?, ?
+                SELECT ?, ?, ?, ?
                 WHERE EXISTS (
                     SELECT 1 FROM subscriptions WHERE id = ?
                 )
@@ -267,13 +230,20 @@ class ClientsService(DeploymentsService):
                 (
                     f"sub_{deployment_id}",
                     client_id,
-                    quota_bytes,
                     stamp,
                     stamp,
                     f"sub_{deployment_id}",
                 ),
             )
         return self.get_client(client_id)
+
+    @staticmethod
+    def _client_is_active(expires_at: str, enabled: int = 1) -> bool:
+        if not enabled:
+            return False
+        if not expires_at:
+            return True
+        return date.fromisoformat(expires_at) >= datetime.now(UTC).date()
 
     def get_client(self, client_id: str) -> dict[str, Any]:
         rows = self._client_rows(client_id)
@@ -314,19 +284,6 @@ class ClientsService(DeploymentsService):
             name,
             exclude_client_id=client_id,
         )
-        try:
-            quota_gb = float(
-                payload.get("quotaGb", client["quota_bytes"] / 1024 / 1024 / 1024)
-            )
-        except (TypeError, ValueError) as exc:
-            raise ValueError("quotaGb must be a number") from exc
-        if not math.isfinite(quota_gb) or not 0 <= quota_gb <= 1_000_000:
-            raise ValueError("quotaGb must be between 0 and 1000000")
-        quota_bytes = int(quota_gb * 1024 * 1024 * 1024)
-        traffic_reset_days = traffic_reset_days_field(
-            payload,
-            int(client.get("traffic_reset_days") or 0),
-        )
         if "neverExpires" in payload:
             never_expires = boolean_field(payload, "neverExpires")
             expires_at = "" if never_expires else str(payload.get("expiresAt", "")).strip()
@@ -344,194 +301,71 @@ class ClientsService(DeploymentsService):
         is_anytls = deployment.get("protocol") == DEPLOYMENT_PROTOCOL_ANYTLS
         ss_password = self._client_ss_password(client_id) if is_shadowsocks else ""
         anytls_password = self._client_anytls_password(client_id) if is_anytls else ""
-        share_link = client["share_link"]
-        if is_anytls:
-            share_link = self._default_share_link(
-                deployment, client["uuid"], name, anytls_password=anytls_password
-            )
-        elif (
-            deployment.get("install_method") == "native"
-            and deployment.get("status") == "ready"
-            and deployment.get("xui_inbound_id")
-        ):
-            with self._xui_session(deployment) as xui:
-                xui.wait_ready(seconds=30)
-                xui.login()
-                remote = xui.get_client(client["name"])
-                remote_client = remote.get("client") if isinstance(remote.get("client"), dict) else remote
-                if not isinstance(remote_client, dict):
-                    raise ValueError("3x-ui client payload is invalid")
-                updated_remote = dict(remote_client)
-                if not is_shadowsocks:
-                    remote_uuid = str(updated_remote.get("uuid") or client["uuid"])
-                    updated_remote["id"] = remote_uuid
-                    updated_remote.pop("uuid", None)
-                if isinstance(updated_remote.get("allowedIPs"), str):
-                    updated_remote["allowedIPs"] = [
-                        item.strip()
-                        for item in updated_remote["allowedIPs"].split(",")
-                        if item.strip()
-                    ]
-                updated_remote["email"] = name
-                updated_remote["totalGB"] = quota_bytes
-                updated_remote["expiryTime"] = self._expires_ms(expires_at)
-                updated_remote["reset"] = traffic_reset_days
-                updated_remote["enable"] = bool(enabled)
-                xui.update_client(client["name"], updated_remote)
-                if is_shadowsocks:
-                    share_link = self._default_share_link(
-                        deployment, client["uuid"], name, ss_password=ss_password
-                    )
-                else:
-                    try:
-                        links = xui.client_links(name)
-                        if links:
-                            share_link = _normalize_client_share_link_host(
-                                links[0],
-                                deployment["host"],
-                            )
-                    except Exception:  # noqa: BLE001
-                        pass
-                with suppress(Exception):
-                    xui.restart_xray()
-        else:
-            share_link = self._default_share_link(
-                deployment, client["uuid"], name, ss_password=ss_password
-            )
+        share_link = self._default_share_link(
+            deployment,
+            client["uuid"],
+            name,
+            ss_password=ss_password,
+            anytls_password=anytls_password,
+        )
         stamp = now_iso()
         self.db.execute(
             """
             UPDATE clients
-            SET name = ?, quota_bytes = ?, traffic_reset_days = ?, expires_at = ?,
-                enabled = ?, share_link = ?, updated_at = ?
+            SET name = ?, expires_at = ?, enabled = ?, share_link = ?, updated_at = ?
             WHERE id = ?
             """,
-            (
-                name,
-                quota_bytes,
-                traffic_reset_days,
-                expires_at,
-                enabled,
-                share_link,
-                stamp,
-                client_id,
-            ),
+            (name, expires_at, enabled, share_link, stamp, client_id),
         )
-        if is_anytls and self._anytls_deployment_ready(deployment):
-            self._apply_anytls_config(deployment)
+        self._apply_node_config(self.get_deployment(client["deployment_id"]))
         return self.get_client(client_id)
 
-    def refresh_deployment_traffic(self, deployment: dict[str, Any]) -> int:
-        """Pull real per-client usage from 3x-ui into the local database.
+    def refresh_node_configs(self) -> dict[str, Any]:
+        """Re-render every ready node so expirations take effect on time.
 
-        Returns the number of clients whose ``used_bytes`` were updated.
+        Individual failures (an unreachable host, say) are collected instead of
+        aborting the sweep.
         """
-        if (
-            deployment.get("install_method") != "native"
-            or deployment.get("status") != "ready"
-            or not deployment.get("xui_inbound_id")
-        ):
-            return 0
-        with self._xui_session(deployment) as xui:
-            xui.wait_ready(seconds=20)
-            xui.login()
-            totals = xui.client_traffic_totals(int(deployment["xui_inbound_id"]))
-        if not totals:
-            return 0
-        stamp = now_iso()
-        updated = 0
-        with self.db.transaction():
-            rows = self.db.query_all(
-                "SELECT id, name, used_bytes FROM clients WHERE deployment_id = ?",
-                (deployment["id"],),
-            )
-            for row in rows:
-                if row["name"] not in totals:
-                    continue
-                used = totals[row["name"]]
-                if used == row["used_bytes"]:
-                    continue
-                self.db.execute(
-                    "UPDATE clients SET used_bytes = ?, updated_at = ? WHERE id = ?",
-                    (used, stamp, row["id"]),
-                )
-                updated += 1
-        return updated
-
-    def refresh_all_traffic(self) -> dict[str, Any]:
-        """Refresh usage for every ready native deployment.
-
-        Failures on individual deployments (e.g. a temporarily unreachable
-        host) are collected instead of aborting the whole sweep.
-        """
-        summaries = self.list_deployments()
         target_ids = [
             item["id"]
-            for item in summaries
-            if item.get("status") == "ready"
-            and item.get("install_method") == "native"
-            and item.get("xui_inbound_id")
+            for item in self.list_deployments()
+            if item.get("status") == "ready" and item.get("install_method") == "native"
         ]
-        updated = 0
-        synced = 0
+        reloaded = 0
         errors: list[dict[str, str]] = []
         for deployment_id in target_ids:
             try:
-                deployment = self.get_deployment(deployment_id)
-                updated += self.refresh_deployment_traffic(deployment)
-                synced += 1
+                if self._apply_node_config(self.get_deployment(deployment_id)):
+                    reloaded += 1
             except Exception as exc:  # noqa: BLE001
                 errors.append({"deploymentId": deployment_id, "error": str(exc)})
         return {
-            "deployments": synced,
-            "updatedClients": updated,
+            "deployments": len(target_ids),
+            "reloadedDeployments": reloaded,
             "errors": errors,
         }
 
-    def start_traffic_sync(self, interval_seconds: int) -> None:
-        """Start a background loop that periodically syncs traffic usage."""
-        if interval_seconds <= 0 or self._traffic_thread is not None:
+    def start_config_sync(self, interval_seconds: int) -> None:
+        """Start the loop that drops expired users from live node configs."""
+        if interval_seconds <= 0 or self._config_thread is not None:
             return
-        self._traffic_stop.clear()
+        self._config_stop.clear()
 
         def loop() -> None:
-            while not self._traffic_stop.wait(interval_seconds):
+            while not self._config_stop.wait(interval_seconds):
                 with suppress(Exception):
-                    self.refresh_all_traffic()
+                    self.refresh_node_configs()
 
-        thread = threading.Thread(target=loop, name="traffic-sync", daemon=True)
-        self._traffic_thread = thread
+        thread = threading.Thread(target=loop, name="config-sync", daemon=True)
+        self._config_thread = thread
         thread.start()
 
-    def stop_traffic_sync(self) -> None:
-        self._traffic_stop.set()
-        thread = self._traffic_thread
+    def stop_config_sync(self) -> None:
+        self._config_stop.set()
+        thread = self._config_thread
         if thread is not None:
             thread.join(timeout=5)
-            self._traffic_thread = None
-
-    def reset_client(self, client_id: str) -> dict[str, Any]:
-        client = self.get_client(client_id)
-        deployment = self.get_deployment(client["deployment_id"])
-        if deployment.get("install_method") != "native":
-            raise ValueError("legacy simulated deployments are no longer supported")
-        if (
-            deployment.get("install_method") == "native"
-            and deployment.get("status") == "ready"
-            and deployment.get("xui_inbound_id")
-        ):
-            with self._xui_session(deployment) as xui:
-                xui.wait_ready(seconds=30)
-                xui.login()
-                xui.reset_client_traffic(
-                    int(deployment["xui_inbound_id"]),
-                    client["name"],
-                )
-        self.db.execute(
-            "UPDATE clients SET used_bytes = 0, updated_at = ? WHERE id = ?",
-            (now_iso(), client_id),
-        )
-        return self.get_client(client_id)
+            self._config_thread = None
 
     def get_subscription_config(self, deployment_id: str) -> dict[str, Any]:
         deployment = self.get_deployment(deployment_id)

@@ -18,8 +18,6 @@ from .helpers import (
     _mihomo_proxy_from_anytls,
     _mihomo_proxy_from_ss,
     _mihomo_proxy_from_vless,
-    _normalize_client_share_link_host,
-    _redact_native_install_log,
     _render_subscription_links,
     _share_link_with_display_name,
     anytls_share_link,
@@ -37,8 +35,8 @@ from .helpers import (
     reality_server_name,
     require_text,
     ss_share_link,
-    traffic_reset_days_field,
     url_host,
+    vless_reality_share_link,
 )
 from .teardown import TeardownService
 
@@ -68,8 +66,6 @@ __all__ = [
     "_mihomo_proxy_from_anytls",
     "_mihomo_proxy_from_ss",
     "_mihomo_proxy_from_vless",
-    "_normalize_client_share_link_host",
-    "_redact_native_install_log",
     "_render_subscription_links",
     "_share_link_with_display_name",
     "anytls_share_link",
@@ -87,6 +83,6 @@ __all__ = [
     "reality_server_name",
     "require_text",
     "ss_share_link",
-    "traffic_reset_days_field",
     "url_host",
+    "vless_reality_share_link",
 ]

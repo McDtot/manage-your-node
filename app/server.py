@@ -577,8 +577,6 @@ async def mutate(request: Request) -> Response:
         ("POST", "reset_host_key"): (lambda: services.reset_server_host_key(item_id), 200),
         ("POST", "deploy_server"): (lambda: services.start_deployment(item_id, body), 201),
         ("POST", "create_client"): (lambda: services.create_client(item_id, body), 201),
-        ("POST", "reset_client"): (lambda: services.reset_client(item_id), 200),
-        ("POST", "refresh_traffic"): (lambda: services.refresh_all_traffic(), 200),
         ("POST", "check_health"): (lambda: services.check_all_servers_health(), 200),
         ("POST", "rotate_subscription_token"): (
             lambda: services.rotate_subscription_token(item_id),
@@ -660,9 +658,9 @@ def create_app(
     )
 
     try:
-        traffic_sync_seconds = int(os.getenv("TRAFFIC_SYNC_SECONDS", "300"))
+        config_sync_seconds = int(os.getenv("CONFIG_SYNC_SECONDS", "300"))
     except ValueError:
-        traffic_sync_seconds = 300
+        config_sync_seconds = 300
     try:
         health_check_seconds = int(os.getenv("HEALTH_CHECK_SECONDS", "120"))
     except ValueError:
@@ -670,10 +668,10 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(_application: Starlette):
-        services.start_traffic_sync(traffic_sync_seconds)
+        services.start_config_sync(config_sync_seconds)
         services.start_health_monitor(health_check_seconds)
         yield
-        services.stop_traffic_sync()
+        services.stop_config_sync()
         services.stop_health_monitor()
         finished = await run_in_threadpool(services.wait_for_workers, 25.0)
         if not finished:
@@ -722,8 +720,6 @@ def create_app(
         ),
         Route("/api/servers/{item_id}/deploy", mutation_endpoint("deploy_server"), methods=["POST"]),
         Route("/api/deployments/{item_id}/clients", mutation_endpoint("create_client"), methods=["POST"]),
-        Route("/api/clients/{item_id}/reset", mutation_endpoint("reset_client"), methods=["POST"]),
-        Route("/api/traffic/refresh", mutation_endpoint("refresh_traffic"), methods=["POST"]),
         Route("/api/servers/health-check", mutation_endpoint("check_health"), methods=["POST"]),
         Route(
             "/api/subscriptions/{item_id}/rotate-token",

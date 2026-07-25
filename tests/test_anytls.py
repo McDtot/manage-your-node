@@ -55,19 +55,14 @@ def _create_ready_anytls_deployment(
     services.db.execute(
         """
         INSERT INTO deployments (
-            id, server_id, engine, protocol, install_method, panel_port,
-            panel_path, panel_username, encrypted_panel_password,
-            encrypted_api_token, proxy_port, anytls_domain,
-            status, subscription_url, created_at, updated_at
-        ) VALUES (?, ?, 'sing-box', ?, 'native', 32000,
-                  '/panel', 'admin', ?, ?, 443, ?, 'ready', ?, 'now', 'now')
+            id, server_id, engine, protocol, install_method, proxy_port,
+            anytls_domain, status, subscription_url, created_at, updated_at
+        ) VALUES (?, ?, 'sing-box', ?, 'native', 443, ?, 'ready', ?, 'now', 'now')
         """,
         (
             deployment_id,
             server["id"],
             DEPLOYMENT_PROTOCOL_ANYTLS,
-            services.secret_box.seal("panel-password"),
-            services.secret_box.seal(""),
             domain,
             f"/sub/deployments/{deployment_id}",
         ),
@@ -166,21 +161,20 @@ def test_anytls_deployment_persists_engine_protocol_and_domain(services, monkeyp
     assert row["anytls_domain"] == "vpn.example.com"
 
 
-def test_build_anytls_config_self_signed_structure(services):
+def test_render_anytls_config_self_signed_structure(services):
     deployment_id = _create_ready_anytls_deployment(services, "cfg", "203.0.113.71")
     services.db.execute(
         """
         INSERT INTO clients (
-            id, deployment_id, name, uuid, quota_bytes, used_bytes,
-            traffic_reset_days, expires_at, enabled, encrypted_ss_password,
-            encrypted_anytls_password, share_link, subscription_url,
-            created_at, updated_at
-        ) VALUES ('cli-1', ?, 'alice', 'uuid-1', 0, 0, 0, '', 1, '', ?, '', '', 'now', 'now')
+            id, deployment_id, name, uuid, expires_at, enabled,
+            encrypted_ss_password, encrypted_anytls_password,
+            share_link, subscription_url, created_at, updated_at
+        ) VALUES ('cli-1', ?, 'alice', 'uuid-1', '', 1, '', ?, '', '', 'now', 'now')
         """,
         (deployment_id, services.secret_box.seal("user-pass")),
     )
     deployment = services.get_deployment(deployment_id)
-    config = services._build_anytls_config(deployment)
+    config = services._render_node_config(deployment)
     inbound = config["inbounds"][0]
     assert inbound["type"] == "anytls"
     assert inbound["listen_port"] == 443
@@ -190,12 +184,12 @@ def test_build_anytls_config_self_signed_structure(services):
     assert "acme" not in inbound["tls"]
 
 
-def test_build_anytls_config_uses_acme_when_domain_set(services):
+def test_render_anytls_config_uses_acme_when_domain_set(services):
     deployment_id = _create_ready_anytls_deployment(
         services, "acme", "203.0.113.72", domain="vpn.example.com"
     )
     deployment = services.get_deployment(deployment_id)
-    config = services._build_anytls_config(deployment)
+    config = services._render_node_config(deployment)
     tls = config["inbounds"][0]["tls"]
     assert tls["server_name"] == "vpn.example.com"
     assert tls["acme"]["domain"] == ["vpn.example.com"]
@@ -209,7 +203,7 @@ def test_create_anytls_client_pushes_config_and_builds_link(services, monkeypatc
     def fake_push(deployment, config):
         captured["config"] = config
 
-    monkeypatch.setattr(services, "_push_anytls_config", fake_push)
+    monkeypatch.setattr(services, "_push_node_config", fake_push)
 
     client = services.create_client(deployment_id, {"name": "alice"})
 
@@ -234,7 +228,7 @@ def test_create_anytls_client_pushes_config_and_builds_link(services, monkeypatc
 
 def test_anytls_subscription_renders_base64_and_mihomo(services, monkeypatch):
     deployment_id = _create_ready_anytls_deployment(services, "sub", "203.0.113.74")
-    monkeypatch.setattr(services, "_push_anytls_config", lambda deployment, config: None)
+    monkeypatch.setattr(services, "_push_node_config", lambda deployment, config: None)
 
     client = services.create_client(deployment_id, {"name": "bob"})
     services.update_subscription_config(deployment_id, {"nodeIds": [client["id"]]})

@@ -1,7 +1,6 @@
 import base64
 import ipaddress
 import os
-import re
 import secrets
 from datetime import UTC, datetime
 from typing import Any
@@ -35,6 +34,12 @@ MAX_JOB_LOG_ENTRIES = 2000
 MAX_JOB_LOG_LINE = 4096
 MIHOMO_SUBSCRIPTION_FORMATS = {"clash", "mihomo", "yaml"}
 BASE64_SUBSCRIPTION_FORMATS = {"base64", "v2ray"}
+ACME_HTTP_PORT = 80
+# Users are enforced by rendering: a disabled or expired user is simply left
+# out of the node configuration and of every subscription.
+ACTIVE_CLIENT_CONDITION = (
+    "c.enabled = 1 AND (c.expires_at = '' OR c.expires_at >= date('now'))"
+)
 
 
 def _mihomo_proxy_from_vless(
@@ -101,6 +106,35 @@ def _mihomo_proxy_from_vless(
     proxy["encryption"] = ""
     proxy["network"] = "tcp" if query.get("type", "tcp") in {"raw", "tcp"} else query["type"]
     return proxy
+
+
+def vless_reality_share_link(
+    client_uuid: str,
+    host: str,
+    port: int,
+    name: str,
+    public_key: str,
+    short_id: str,
+    sni: str,
+    fingerprint: str = "chrome",
+) -> str:
+    """Build a ``vless://`` REALITY link for a node client or a chain entry.
+
+    ``pbk`` and ``sid`` are mandatory for Mihomo subscriptions, so callers pass
+    the REALITY public key and short id persisted alongside the inbound.
+    """
+    params = {
+        "security": "reality",
+        "type": "tcp",
+        "flow": "xtls-rprx-vision",
+        "pbk": public_key,
+        "fp": fingerprint,
+        "sni": sni,
+        "sid": short_id,
+        "spx": "/",
+    }
+    tag = quote(name)
+    return f"vless://{client_uuid}@{url_host(host)}:{port}?{urlencode(params)}#{tag}"
 
 
 def new_ss2022_password() -> str:
@@ -196,7 +230,7 @@ def ss_share_link(
 
     Multi-user SS2022 uses ``serverPSK:userPSK`` as the client password, and the
     userinfo section carries ``method:serverPSK:userPSK`` base64-encoded, which
-    is the layout 3x-ui and mainstream clients expect.
+    is the layout mainstream clients expect.
     """
     userinfo = f"{method}:{server_password}:{user_password}"
     encoded = base64.b64encode(userinfo.encode("utf-8")).decode("ascii")
@@ -322,39 +356,6 @@ def _share_link_with_display_name(share_link: str, display_name: str) -> str:
     return parsed._replace(fragment=quote(name, safe="")).geturl()
 
 
-def _redact_native_install_log(line: str, panel_password: str) -> str:
-    """Remove credentials emitted by both plain and colorized 3x-ui output."""
-    clean = str(line)
-    if panel_password:
-        clean = clean.replace(panel_password, "[redacted]")
-    clean = re.sub(
-        r"(?i)(XUI_(?:PASSWORD|API_TOKEN)=)[^\s\x1b]+",
-        r"\1[redacted]",
-        clean,
-    )
-    clean = re.sub(
-        r"(?i)((?:API\s+Token|Password)\s*:\s*)[^\s\x1b]+",
-        r"\1[redacted]",
-        clean,
-    )
-    return clean
-
-
-def _normalize_client_share_link_host(link: str, host: str) -> str:
-    """Replace 3x-ui's loopback link host with the managed server address."""
-    parsed = urlparse(link)
-    if parsed.scheme.lower() != "vless" or not parsed.hostname:
-        return link
-    userinfo, separator, _ = parsed.netloc.rpartition("@")
-    prefix = f"{userinfo}@" if separator else ""
-    try:
-        port = parsed.port
-    except ValueError:
-        return link
-    suffix = f":{port}" if port else ""
-    return parsed._replace(netloc=f"{prefix}{url_host(host)}{suffix}").geturl()
-
-
 def reality_dest() -> str:
     """REALITY handshake target (``host:port``). Configurable via REALITY_DEST."""
     return (os.getenv("REALITY_DEST") or DEFAULT_REALITY_DEST).strip()
@@ -459,21 +460,6 @@ def int_field(payload: dict[str, Any], key: str, default: int) -> int:
         return int(value)
     except (TypeError, ValueError) as exc:
         raise ValueError(f"{key} must be a number") from exc
-
-
-def traffic_reset_days_field(payload: dict[str, Any], default: int = 0) -> int:
-    raw = payload.get("trafficResetDays", default)
-    if raw is None or (isinstance(raw, str) and not raw.strip()):
-        raw = default
-    if isinstance(raw, bool) or (isinstance(raw, float) and not raw.is_integer()):
-        raise ValueError("trafficResetDays must be a whole number")
-    try:
-        days = int(raw)
-    except (TypeError, ValueError) as exc:
-        raise ValueError("trafficResetDays must be a whole number") from exc
-    if not 0 <= days <= 3650:
-        raise ValueError("trafficResetDays must be between 0 and 3650")
-    return days
 
 
 def boolean_field(payload: dict[str, Any], key: str, default: bool = False) -> bool:

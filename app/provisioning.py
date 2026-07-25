@@ -3,20 +3,6 @@ import json
 import shlex
 from typing import Any
 
-XUI_RELEASE_VERSION = "v3.2.0"
-XUI_INSTALL_REF = "4e928a1ce0945a6e956aa63365034ec24d2b1387"
-XUI_INSTALL_SHA256 = "f2f8caa11778d811a037fe84b20ebf5e2547fd665afe6fe16d69f1cd9f3fe88f"
-XUI_RELEASE_SHA256 = {
-    "386": "e35d63ad14ddc421331d2831f5c32701fe4eb0039d93547c36543788ae60807a",
-    "amd64": "bc0c7c5d8deb77fea194e0b40a69e17951fe7f4109d465855c2a76259d83eb69",
-    "arm64": "8506c294b8b538e6dcae56d17e1af3bba5e349a9db5767ee49ec6a8bc32bf441",
-    "armv5": "a37cc541559c27352f8ff1df52cced9fb74725520e41e1b01730067bd6c6109a",
-    "armv6": "156b31ee0f862517e63af2a5b40f470b9186e840463abb11f3628ed264335ca5",
-    "armv7": "abf5417150226b437252e6991864f58614db0f53ab82ef7126690155a53a9f77",
-    "s390x": "847f9cbfa88989732bd04843407e80a64e04275de3c2d71a112cbe5661afb59b",
-}
-
-
 SINGBOX_VERSION = "1.13.14"
 SINGBOX_SHA256 = {
     "386": "4d1c66260dfcb2120fde6c1c5ad125ce0f94769843c34aab4eef53c8d3bf3ae9",
@@ -35,9 +21,14 @@ def shell_quote(value: str | int) -> str:
     return shlex.quote(str(value))
 
 
-def anytls_service_name(deployment_id: str) -> str:
+def node_service_name(deployment_id: str) -> str:
     """Deterministic systemd unit name for a deployment's sing-box service."""
-    return f"myn-anytls-{deployment_id}"
+    return f"myn-node-{deployment_id}"
+
+
+def chain_service_name(chain_id: str, position: int) -> str:
+    """Deterministic systemd unit name for one hop of a proxy chain."""
+    return f"myn-chain-{chain_id}-{position}"
 
 
 def singbox_install_dir(service_name: str) -> str:
@@ -45,109 +36,13 @@ def singbox_install_dir(service_name: str) -> str:
 
 
 def singbox_cert_paths(service_name: str) -> tuple[str, str]:
-    """Return ``(certificate_path, key_path)`` for a self-signed AnyTLS service."""
+    """Return ``(certificate_path, key_path)`` for a self-signed TLS service."""
     install_dir = singbox_install_dir(service_name)
     return f"{install_dir}/cert.pem", f"{install_dir}/key.pem"
 
 
 def singbox_acme_dir(service_name: str) -> str:
     return f"{singbox_install_dir(service_name)}/acme"
-
-
-def native_3xui_script(
-    panel_port: int,
-    panel_path: str,
-    panel_username: str,
-    panel_password: str,
-    server_host: str,
-) -> str:
-    web_base_path = panel_path.strip("/")
-    return f"""#!/usr/bin/env bash
-set -Eeuo pipefail
-
-log() {{
-  printf '[myn] %s\\n' "$1"
-}}
-
-if [ "$(id -u)" -eq 0 ]; then
-  SUDO=""
-else
-  if ! command -v sudo >/dev/null 2>&1; then
-    echo "sudo is required when SSH user is not root" >&2
-    exit 20
-  fi
-  SUDO="sudo"
-fi
-
-log "checking host"
-uname -a
-if [ -f /etc/os-release ]; then
-  . /etc/os-release
-  echo "os=$ID version=$VERSION_ID"
-fi
-
-log "checking curl"
-if ! command -v curl >/dev/null 2>&1; then
-  if command -v apt-get >/dev/null 2>&1; then
-    $SUDO env DEBIAN_FRONTEND=noninteractive apt-get update
-    $SUDO env DEBIAN_FRONTEND=noninteractive apt-get install -y curl ca-certificates
-  elif command -v dnf >/dev/null 2>&1; then
-    $SUDO dnf install -y curl ca-certificates
-  elif command -v yum >/dev/null 2>&1; then
-    $SUDO yum install -y curl ca-certificates
-  else
-    echo "cannot install curl automatically on this OS" >&2
-    exit 21
-  fi
-fi
-
-log "downloading verified 3x-ui installer {XUI_INSTALL_REF}"
-$SUDO install -d -m 0755 /opt/manage-node/downloads
-INSTALLER=/opt/manage-node/downloads/3x-ui-install-{XUI_INSTALL_REF}.sh
-$SUDO curl --fail --location --silent --show-error --proto '=https' --tlsv1.2 \\
-  https://raw.githubusercontent.com/MHSanaei/3x-ui/{XUI_INSTALL_REF}/install.sh \\
-  -o "$INSTALLER"
-printf '%s  %s\\n' {shell_quote(XUI_INSTALL_SHA256)} "$INSTALLER" | $SUDO sha256sum --check --status
-$SUDO chmod 0700 "$INSTALLER"
-$SUDO sed -i 's#/MHSanaei/3x-ui/main/#/MHSanaei/3x-ui/{XUI_INSTALL_REF}/#g' "$INSTALLER"
-$SUDO sed -i "/    local xui_script_temp=/i\\    case \\$(arch) in 386) MYN_RELEASE_SHA={XUI_RELEASE_SHA256['386']} ;; amd64) MYN_RELEASE_SHA={XUI_RELEASE_SHA256['amd64']} ;; arm64) MYN_RELEASE_SHA={XUI_RELEASE_SHA256['arm64']} ;; armv5) MYN_RELEASE_SHA={XUI_RELEASE_SHA256['armv5']} ;; armv6) MYN_RELEASE_SHA={XUI_RELEASE_SHA256['armv6']} ;; armv7) MYN_RELEASE_SHA={XUI_RELEASE_SHA256['armv7']} ;; s390x) MYN_RELEASE_SHA={XUI_RELEASE_SHA256['s390x']} ;; *) echo unsupported-architecture >&2; exit 1 ;; esac; echo \\$MYN_RELEASE_SHA'  '\\${{xui_folder}}-linux-\\$(arch).tar.gz | sha256sum --check --status || exit 1" "$INSTALLER"
-
-log "installing pinned 3x-ui release {XUI_RELEASE_VERSION}"
-$SUDO env \\
-  XUI_NONINTERACTIVE=1 \\
-  XUI_PANEL_PORT={shell_quote(panel_port)} \\
-  XUI_WEB_BASE_PATH={shell_quote(web_base_path)} \\
-  XUI_USERNAME={shell_quote(panel_username)} \\
-  XUI_PASSWORD={shell_quote(panel_password)} \\
-  XUI_SSL_MODE=none \\
-  XUI_SERVER_IP={shell_quote(server_host)} \\
-  bash "$INSTALLER" {shell_quote(XUI_RELEASE_VERSION)}
-
-log "binding 3x-ui panel to SSH-only loopback"
-if ! $SUDO test -x /usr/local/x-ui/x-ui; then
-  echo "3x-ui binary not found; refusing to leave the HTTP panel exposed" >&2
-  exit 22
-fi
-$SUDO /usr/local/x-ui/x-ui setting -listenIP 127.0.0.1 >/dev/null
-
-log "checking x-ui service"
-if command -v systemctl >/dev/null 2>&1; then
-  $SUDO systemctl enable --now x-ui >/dev/null 2>&1
-  $SUDO systemctl restart x-ui
-  $SUDO systemctl --no-pager --full status x-ui || true
-fi
-
-log "reading install result"
-echo "__MYN_RESULT_BEGIN__"
-if $SUDO test -f /etc/x-ui/install-result.env; then
-  $SUDO grep -E '^(XUI_PANEL_PORT|XUI_WEB_BASE_PATH|XUI_USERNAME|XUI_PASSWORD|XUI_API_TOKEN)=' /etc/x-ui/install-result.env || true
-else
-  echo "XUI_PANEL_PORT={shell_quote(panel_port)}"
-  echo "XUI_WEB_BASE_PATH={shell_quote(web_base_path)}"
-  echo "XUI_USERNAME={shell_quote(panel_username)}"
-fi
-echo "__MYN_RESULT_END__"
-"""
 
 
 def _sudo_preamble() -> str:
@@ -162,12 +57,19 @@ else
 fi"""
 
 
+def _sudo_preamble_lenient() -> str:
+    return """if [ "$(id -u)" -eq 0 ]; then
+  SUDO=""
+else
+  SUDO="sudo"
+fi"""
+
+
 def _singbox_arch_case() -> str:
-    arms = " ".join(
+    return " ".join(
         f"{arch}) SB_SHA={SINGBOX_SHA256[arch]} ;;"
         for arch in ("386", "amd64", "arm64", "armv5", "armv6", "armv7", "s390x")
     )
-    return arms
 
 
 def _encode_config(config: dict[str, Any]) -> str:
@@ -176,20 +78,21 @@ def _encode_config(config: dict[str, Any]) -> str:
     ).decode("ascii")
 
 
-def native_singbox_script(
+def singbox_install_script(
     service_name: str,
     config: dict[str, Any],
     proxy_port: int,
     server_host: str,
-    self_signed: bool,
-    acme_http_port: int = 80,
+    allow_udp: bool = False,
+    self_signed_cert: bool = False,
+    acme_http_port: int = 0,
 ) -> str:
-    """Install a pinned sing-box binary and start a per-deployment AnyTLS service.
+    """Install a pinned sing-box binary and start one service for it.
 
-    The full sing-box configuration is rendered by the service layer and pushed
-    here base64-encoded. Self-signed deployments generate a local certificate at
-    the paths referenced by the config; ACME deployments let sing-box obtain a
-    real certificate on first start.
+    The binary is shared by every service on the host; each service owns a
+    directory holding its rendered configuration and, for self-signed TLS, its
+    certificate. ``acme_http_port`` opens the HTTP-01 challenge port and should
+    be left at ``0`` unless the configuration requests ACME.
     """
     install_dir = singbox_install_dir(service_name)
     cert_path, key_path = singbox_cert_paths(service_name)
@@ -198,7 +101,7 @@ def native_singbox_script(
         f"""if [ ! -s {shell_quote(cert_path)} ] || [ ! -s {shell_quote(key_path)} ]; then
   log "generating self-signed certificate"
   if ! command -v openssl >/dev/null 2>&1; then
-    echo "openssl is required to generate a self-signed AnyTLS certificate" >&2
+    echo "openssl is required to generate a self-signed certificate" >&2
     exit 51
   fi
   $SUDO openssl req -x509 -newkey rsa:2048 -sha256 -days 3650 -nodes \\
@@ -207,11 +110,11 @@ def native_singbox_script(
   $SUDO chmod 0600 {shell_quote(key_path)}
 fi
 """
-        if self_signed
+        if self_signed_cert
         else ""
     )
     acme_port_rules = (
-        _firewall_rules(acme_http_port, allow_udp=False) if not self_signed else ""
+        _firewall_rules(acme_http_port, allow_udp=False) if acme_http_port else ""
     )
     return f"""#!/usr/bin/env bash
 set -Eeuo pipefail
@@ -283,7 +186,7 @@ fi
 UNIT_FILE="/etc/systemd/system/{service_name}.service"
 $SUDO tee "$UNIT_FILE" >/dev/null <<EOF
 [Unit]
-Description=Manage Your Node AnyTLS service {service_name}
+Description=Manage Your Node sing-box service {service_name}
 After=network-online.target
 Wants=network-online.target
 
@@ -305,12 +208,9 @@ $SUDO systemctl restart {service_name}
 sleep 1
 $SUDO systemctl is-active --quiet {service_name}
 
-{_firewall_rules(proxy_port, allow_udp=False)}
+{_firewall_rules(proxy_port, allow_udp=allow_udp)}
 {acme_port_rules}
-log "sing-box AnyTLS service {service_name} is active"
-echo "__MYN_RESULT_BEGIN__"
-echo "MYN_ANYTLS_SERVICE={service_name}"
-echo "__MYN_RESULT_END__"
+log "sing-box service {service_name} is active"
 """
 
 
@@ -318,7 +218,7 @@ def singbox_config_push_script(
     service_name: str,
     config: dict[str, Any],
 ) -> str:
-    """Rewrite an existing AnyTLS service's config and restart it."""
+    """Rewrite an existing service's configuration and restart it."""
     install_dir = singbox_install_dir(service_name)
     config_b64 = _encode_config(config)
     return f"""#!/usr/bin/env bash
@@ -348,7 +248,7 @@ $SUDO mv "$TMP_CONFIG" "$CONFIG_FILE"
 $SUDO systemctl restart {service_name}
 sleep 1
 $SUDO systemctl is-active --quiet {service_name}
-log "AnyTLS service {service_name} reloaded"
+log "sing-box service {service_name} reloaded"
 """
 
 
@@ -368,14 +268,6 @@ $SUDO systemctl daemon-reload 2>/dev/null || true
 $SUDO systemctl reset-failed "$SERVICE_NAME" 2>/dev/null || true
 echo "Removed $SERVICE_NAME"
 """
-
-
-def _sudo_preamble_lenient() -> str:
-    return """if [ "$(id -u)" -eq 0 ]; then
-  SUDO=""
-else
-  SUDO="sudo"
-fi"""
 
 
 def _firewall_rules(port: int, allow_udp: bool = False) -> str:

@@ -1,14 +1,11 @@
 import json
-import random
-import secrets
 import threading
 from collections.abc import Callable
 from typing import Any
 
 from ..provisioning import (
-    anytls_service_name,
-    native_3xui_script,
-    native_singbox_script,
+    node_service_name,
+    singbox_install_script,
     singbox_uninstall_script,
 )
 from .helpers import (
@@ -17,7 +14,6 @@ from .helpers import (
     DEPLOYMENT_PROTOCOL_VLESS_REALITY,
     DEPLOYMENT_PROTOCOLS,
     DEPLOYMENT_SS_METHOD,
-    _redact_native_install_log,
     host_field,
     new_id,
     new_ss2022_password,
@@ -26,6 +22,7 @@ from .helpers import (
     port_field,
     require_text,
 )
+from .singbox import new_reality_keypair, new_short_id
 from .subscriptions import SubscriptionsService
 
 
@@ -39,9 +36,6 @@ class TeardownService(SubscriptionsService):
         job_id = new_id("job")
         stamp = now_iso()
         proxy_port = port_field(payload, "proxyPort", 443)
-        panel_port = port_field(payload, "panelPort", random.randint(32000, 39000))
-        if proxy_port == panel_port:
-            raise ValueError("proxyPort and panelPort must be different")
         protocol = str(payload.get("protocol", DEPLOYMENT_PROTOCOL_VLESS_REALITY)).strip()
         if protocol not in DEPLOYMENT_PROTOCOLS:
             raise ValueError(
@@ -52,12 +46,12 @@ class TeardownService(SubscriptionsService):
             raise ValueError("only native deployments are supported")
         is_shadowsocks = protocol == DEPLOYMENT_PROTOCOL_SHADOWSOCKS_2022
         is_anytls = protocol == DEPLOYMENT_PROTOCOL_ANYTLS
-        engine = "sing-box" if is_anytls else "3x-ui"
         anytls_domain = ""
+        ss_password = ""
+        reality_private_key, reality_public_key, reality_short_id = "", "", ""
         if is_anytls:
             reality_mode = "manual"
             selected_reality_dest, selected_reality_sni = "", ""
-            ss_password = ""
             raw_domain = str(payload.get("anytlsDomain", "")).strip()
             if raw_domain:
                 anytls_domain = host_field({"anytlsDomain": raw_domain}, "anytlsDomain")
@@ -66,7 +60,6 @@ class TeardownService(SubscriptionsService):
             selected_reality_dest, selected_reality_sni = "", ""
             ss_password = new_ss2022_password()
         else:
-            ss_password = ""
             reality_mode = str(payload.get("realityMode", "auto")).strip().lower()
             if reality_mode not in {"auto", "manual"}:
                 raise ValueError("realityMode must be auto or manual")
@@ -81,6 +74,8 @@ class TeardownService(SubscriptionsService):
                 )
             else:
                 selected_reality_dest, selected_reality_sni = "", ""
+            reality_private_key, reality_public_key = new_reality_keypair()
+            reality_short_id = new_short_id()
         if server["status"] != "reachable":
             raise ValueError("test SSH successfully before starting a native deployment")
         host_key = self.db.query_one(
@@ -94,39 +89,33 @@ class TeardownService(SubscriptionsService):
             (server_id,),
         )
         if existing:
-            raise ValueError("this server already has a native 3x-ui deployment")
-        panel_path = "/" + secrets.token_urlsafe(8)
-        panel_username = "myn_" + secrets.token_urlsafe(5).replace("-", "A").replace("_", "B")
-        panel_password = secrets.token_urlsafe(18).replace("-", "A").replace("_", "B")
-        api_token = ""
+            raise ValueError("this server already has a native deployment")
         with self.db.transaction():
             self._acquire_operation_locks(job_id, [("server", server_id)])
             self.db.execute(
                 """
                 INSERT INTO deployments (
-                    id, server_id, engine, protocol, install_method, panel_scheme, panel_port, panel_path,
-                    panel_username, encrypted_panel_password, encrypted_api_token,
-                    proxy_port, reality_mode, reality_dest, reality_sni,
+                    id, server_id, engine, protocol, install_method, proxy_port,
+                    reality_mode, reality_dest, reality_sni,
+                    encrypted_reality_private_key, reality_public_key, reality_short_id,
                     ss_method, encrypted_ss_password, anytls_domain,
-                    subscription_configured, status, subscription_url, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    subscription_configured, status, subscription_url,
+                    created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     deployment_id,
                     server_id,
-                    engine,
+                    "sing-box",
                     protocol,
                     install_method,
-                    "http",
-                    panel_port,
-                    panel_path,
-                    panel_username,
-                    self.secret_box.seal(panel_password),
-                    self.secret_box.seal(api_token),
                     proxy_port,
                     reality_mode,
                     selected_reality_dest,
                     selected_reality_sni,
+                    self.secret_box.seal(reality_private_key),
+                    reality_public_key,
+                    reality_short_id,
                     DEPLOYMENT_SS_METHOD,
                     self.secret_box.seal(ss_password),
                     anytls_domain,
@@ -146,7 +135,7 @@ class TeardownService(SubscriptionsService):
                 """,
                 (
                     job_id,
-                    "deploy_3xui",
+                    "deploy_node",
                     server_id,
                     deployment_id,
                     "running",
@@ -187,55 +176,40 @@ class TeardownService(SubscriptionsService):
         deployment_id: str,
         server: dict[str, Any],
     ) -> None:
-        try:
-            deployment = self._get_deployment_row(deployment_id)
-            if deployment.get("engine") == "sing-box":
-                self._run_anytls_deployment(job_id, deployment_id, server)
-            else:
-                self._run_native_deployment(job_id, deployment_id, server)
-        finally:
-            self._release_operation_locks(job_id)
-            self._forget_current_worker()
-
-    def _run_anytls_deployment(
-        self,
-        job_id: str,
-        deployment_id: str,
-        server: dict[str, Any],
-    ) -> None:
-        service_name = anytls_service_name(deployment_id)
+        service_name = node_service_name(deployment_id)
         install_started = False
         try:
             deployment = self.get_deployment(deployment_id)
-            domain = str(deployment.get("anytls_domain") or "").strip()
-            config = self._build_anytls_config(deployment)
-            script = native_singbox_script(
-                service_name=service_name,
-                config=config,
-                proxy_port=int(deployment["proxy_port"]),
-                server_host=server["host"],
-                self_signed=not domain,
-            )
+            if deployment.get("protocol") == DEPLOYMENT_PROTOCOL_VLESS_REALITY:
+                self._resolve_reality_target(job_id, deployment_id, server, deployment)
+                deployment = self.get_deployment(deployment_id)
+            config = self._render_node_config(deployment)
             self._append_job_log(
                 job_id,
-                "Installing pinned sing-box and starting the AnyTLS service over SSH",
+                f"Installing pinned sing-box and starting {service_name} over SSH",
             )
             install_started = True
             self.ssh.run_script(
                 server,
-                script,
+                singbox_install_script(
+                    service_name=service_name,
+                    config=config,
+                    proxy_port=int(deployment["proxy_port"]),
+                    server_host=server["host"],
+                    **self._node_install_options(deployment),
+                ),
                 lambda line: self._append_job_log(job_id, line),
                 timeout=1200,
             )
             self.db.execute(
-                "UPDATE deployments SET status = ?, updated_at = ? WHERE id = ?",
-                ("ready", now_iso(), deployment_id),
+                """
+                UPDATE deployments
+                SET status = ?, last_config_hash = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                ("ready", self._config_hash(config), now_iso(), deployment_id),
             )
-            self._append_job_log(
-                job_id,
-                "sing-box AnyTLS service is installed and ready"
-                + (" (Let's Encrypt certificate)" if domain else " (self-signed certificate)"),
-            )
+            self._append_job_log(job_id, self._ready_message(deployment))
             self._finish_job(job_id, "success", None)
         except Exception as exc:  # noqa: BLE001
             error_text = str(exc)
@@ -247,7 +221,7 @@ class TeardownService(SubscriptionsService):
             if install_started:
                 self._append_job_log(
                     job_id,
-                    "Rolling back: removing any partial sing-box AnyTLS service",
+                    "Rolling back: removing any partial sing-box service",
                 )
                 try:
                     for line in self.ssh.run_script(
@@ -264,139 +238,27 @@ class TeardownService(SubscriptionsService):
                         f"Rollback uninstall failed (manual cleanup may be needed): {cleanup_exc}",
                     )
             self._finish_job(job_id, "failed", error_text)
+        finally:
+            self._release_operation_locks(job_id)
+            self._forget_current_worker()
 
-    def _run_native_deployment(
-        self,
-        job_id: str,
-        deployment_id: str,
-        server: dict[str, Any],
-    ) -> None:
-        install_applied = False
-        try:
-            deployment = self._get_deployment_row(deployment_id)
-            panel_password = self.secret_box.open(deployment["encrypted_panel_password"])
-            script = native_3xui_script(
-                panel_port=deployment["panel_port"],
-                panel_path=deployment["panel_path"],
-                panel_username=deployment["panel_username"],
-                panel_password=panel_password,
-                server_host=server["host"],
-            )
-            def safe_remote_log(line: str) -> None:
-                self._append_job_log(
-                    job_id,
-                    _redact_native_install_log(line, panel_password),
-                )
-
-            self._append_job_log(job_id, "Starting real SSH deployment with official 3x-ui installer")
-            lines = self.ssh.run_script(
-                server,
-                script,
-                safe_remote_log,
-                timeout=1200,
-            )
-            result = self._parse_install_result(lines)
-            if result:
-                self._apply_install_result(deployment_id, result)
-                install_applied = True
-            deployment = self.get_deployment(deployment_id)
-            is_shadowsocks = deployment.get("protocol") == DEPLOYMENT_PROTOCOL_SHADOWSOCKS_2022
-            if not is_shadowsocks:
-                selected_reality_dest, selected_reality_sni = self._resolve_reality_target(
-                    job_id,
-                    deployment_id,
-                    server,
-                    deployment,
-                )
-                deployment = self.get_deployment(deployment_id)
-            self._append_job_log(job_id, "Waiting for 3x-ui API to become ready over SSH tunnel")
-            with self._xui_session(deployment) as xui:
-                xui.wait_ready()
-                xui.login()
-                if is_shadowsocks:
-                    self._append_job_log(
-                        job_id, "Creating default Shadowsocks 2022 inbound through 3x-ui API"
-                    )
-                    inbound = xui.create_shadowsocks_inbound(
-                        port=deployment["proxy_port"],
-                        remark=f"myn-{server['name']}-{deployment['proxy_port']}",
-                        method=deployment.get("ss_method") or DEPLOYMENT_SS_METHOD,
-                        server_password=deployment.get("ss_password") or "",
-                    )
-                else:
-                    self._append_job_log(job_id, "Creating default VLESS + REALITY inbound through 3x-ui API")
-                    inbound = xui.create_vless_reality_inbound(
-                        port=deployment["proxy_port"],
-                        remark=f"myn-{server['name']}-{deployment['proxy_port']}",
-                        target=selected_reality_dest,
-                        server_names=[selected_reality_sni],
-                    )
-                self.db.execute(
-                    "UPDATE deployments SET xui_inbound_id = ?, updated_at = ? WHERE id = ?",
-                    (int(inbound["id"]), now_iso(), deployment_id),
-                )
-                self._append_job_log(job_id, f"Created 3x-ui inbound id={inbound['id']}")
-                self.db.execute(
-                    "UPDATE deployments SET status = ?, updated_at = ? WHERE id = ?",
-                    ("ready", now_iso(), deployment_id),
-                )
-                self._append_job_log(job_id, "3x-ui panel is installed and default inbound is ready")
-
-            try:
-                with self._xui_session(self.get_deployment(deployment_id)) as xui:
-                    xui.login()
-                    xui.restart_xray()
-                self._append_job_log(job_id, "Requested Xray restart")
-            except Exception as exc:  # noqa: BLE001
-                self._append_job_log(job_id, f"Xray restart request failed, panel may restart it soon: {exc}")
-
-            self._finish_job(job_id, "success", None)
-        except Exception as exc:  # noqa: BLE001
-            error_text = _redact_native_install_log(
-                str(exc),
-                panel_password if "panel_password" in locals() else "",
-            )
-            self.db.execute(
-                "UPDATE deployments SET status = ?, last_error = ?, updated_at = ? "
-                "WHERE id = ?",
-                ("failed", error_text, now_iso(), deployment_id),
-            )
-            self._append_job_log(job_id, f"Deployment failed: {error_text}")
-            if install_applied:
-                self._append_job_log(
-                    job_id,
-                    "Rolling back: uninstalling partial 3x-ui install on the target host",
-                )
-                try:
-                    for line in self._uninstall_remote_xui(server):
-                        if line:
-                            self._append_job_log(job_id, line)
-                except Exception as cleanup_exc:  # noqa: BLE001
-                    self._append_job_log(
-                        job_id,
-                        f"Rollback uninstall failed (manual cleanup may be needed): {cleanup_exc}",
-                    )
-            self._finish_job(job_id, "failed", error_text)
+    def _ready_message(self, deployment: dict[str, Any]) -> str:
+        protocol = deployment.get("protocol")
+        if protocol != DEPLOYMENT_PROTOCOL_ANYTLS:
+            return f"sing-box {protocol} inbound is installed and ready"
+        certificate = (
+            "Let's Encrypt certificate"
+            if str(deployment.get("anytls_domain") or "").strip()
+            else "self-signed certificate"
+        )
+        return f"sing-box AnyTLS inbound is installed and ready ({certificate})"
 
     def delete_deployment(self, deployment_id: str) -> dict[str, Any]:
         deployment = self.get_deployment(deployment_id)
         self._assert_not_busy("server", deployment["server_id"])
         chain_logs = self._cleanup_proxy_chains_for_deployments([deployment_id])
-        other_native = self.db.query_row(
-            """
-            SELECT COUNT(*) AS count
-            FROM deployments
-            WHERE server_id = ? AND id <> ? AND install_method = 'native'
-            """,
-            (deployment["server_id"], deployment_id),
-        )["count"]
         remote_logs, remote_cleanup_ok = self._best_effort_remote_cleanup(
-            lambda: self._cleanup_remote_deployment(
-                deployment,
-                uninstall_panel=(
-                    deployment.get("install_method") == "native" and other_native == 0
-                ),
-            )
+            lambda: self._cleanup_remote_deployment(deployment)
         )
         self._delete_deployment_records(deployment_id)
         return {
@@ -409,7 +271,7 @@ class TeardownService(SubscriptionsService):
         self._assert_not_busy("server", server_id)
         server = self._get_server_row(server_id)
         deployments = self.db.query_all(
-            "SELECT id, install_method, engine FROM deployments WHERE server_id = ?",
+            "SELECT id, install_method FROM deployments WHERE server_id = ?",
             (server_id,),
         )
         chain_logs = self._cleanup_proxy_chains_for_deployments(
@@ -451,94 +313,31 @@ class TeardownService(SubscriptionsService):
             self._delete_default_subscription(deployment_id)
             self.db.execute("DELETE FROM deployments WHERE id = ?", (deployment_id,))
 
-    def _cleanup_remote_deployment(
-        self,
-        deployment: dict[str, Any],
-        uninstall_panel: bool,
-    ) -> list[str]:
+    def _cleanup_remote_deployment(self, deployment: dict[str, Any]) -> list[str]:
         if deployment.get("install_method") != "native":
             return []
         server = self._get_server_row(deployment["server_id"])
-        if deployment.get("engine") == "sing-box":
-            service_name = anytls_service_name(deployment["id"])
-            return self.ssh.run_script(
-                server,
-                singbox_uninstall_script(service_name),
-                lambda _: None,
-                timeout=120,
-            )
-        if uninstall_panel:
-            return self._uninstall_remote_xui(server)
-        if not deployment.get("xui_inbound_id"):
-            return []
-
-        logs = [f"Deleting 3x-ui inbound id={deployment['xui_inbound_id']}"]
-        with self._xui_session(deployment) as xui:
-            xui.wait_ready(seconds=20)
-            xui.login()
-            xui.delete_inbound(int(deployment["xui_inbound_id"]))
-            logs.append("Deleted 3x-ui inbound")
-            try:
-                xui.restart_xray()
-                logs.append("Requested Xray restart")
-            except Exception as exc:  # noqa: BLE001
-                logs.append(f"Xray restart request failed: {exc}")
-        return logs
+        return self.ssh.run_script(
+            server,
+            singbox_uninstall_script(node_service_name(deployment["id"])),
+            lambda _: None,
+            timeout=120,
+        )
 
     def _uninstall_server_deployments(
         self,
         server: dict[str, Any],
         native_deployments: list[dict[str, Any]],
     ) -> list[str]:
-        """Remove every native engine installed on a server before deletion."""
+        """Remove every sing-box node service installed on a server."""
         logs: list[str] = []
-        uninstalled_xui = False
         for deployment in native_deployments:
-            if deployment.get("engine") == "sing-box":
-                service_name = anytls_service_name(deployment["id"])
-                logs.extend(
-                    self.ssh.run_script(
-                        server,
-                        singbox_uninstall_script(service_name),
-                        lambda _: None,
-                        timeout=120,
-                    )
+            logs.extend(
+                self.ssh.run_script(
+                    server,
+                    singbox_uninstall_script(node_service_name(deployment["id"])),
+                    lambda _: None,
+                    timeout=120,
                 )
-            elif not uninstalled_xui:
-                logs.extend(self._uninstall_remote_xui(server))
-                uninstalled_xui = True
+            )
         return logs
-
-    def _uninstall_remote_xui(self, server: dict[str, Any]) -> list[str]:
-        return self.ssh.run_script(
-            server,
-            self._xui_uninstall_script(),
-            lambda _: None,
-            timeout=240,
-        )
-
-    def _xui_uninstall_script(self) -> str:
-        return r"""
-set -u
-echo "Stopping 3x-ui service"
-if command -v systemctl >/dev/null 2>&1; then
-  systemctl stop x-ui 2>/dev/null || true
-  systemctl disable x-ui 2>/dev/null || true
-fi
-
-echo "Running 3x-ui uninstall command when available"
-if command -v x-ui >/dev/null 2>&1; then
-  printf 'y\n' | x-ui uninstall 2>/dev/null || true
-fi
-
-echo "Removing remaining 3x-ui files"
-rm -f /etc/systemd/system/x-ui.service
-rm -f /etc/systemd/system/multi-user.target.wants/x-ui.service
-rm -f /usr/bin/x-ui /usr/local/bin/x-ui
-rm -rf /usr/local/x-ui /etc/x-ui /var/log/x-ui
-if command -v systemctl >/dev/null 2>&1; then
-  systemctl daemon-reload 2>/dev/null || true
-  systemctl reset-failed x-ui 2>/dev/null || true
-fi
-echo "3x-ui cleanup completed"
-"""

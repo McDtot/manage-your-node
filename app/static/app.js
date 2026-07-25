@@ -557,15 +557,13 @@ function deploymentItem(deployment, options = {}) {
     <article class="item">
       <div class="item-head">
         <div class="item-title">
-          <strong>${escapeHtml(deployment.server_name)} · ${escapeHtml(deployment.engine)}</strong>
+          <strong>${escapeHtml(deployment.server_name)} · sing-box</strong>
           <small>${escapeHtml(deployment.protocol)}</small>
         </div>
         ${statusBadge(deployment.status)}
       </div>
-      <div class="meta">面板：<span class="mono">127.0.0.1:${deployment.panel_port}${escapeHtml(deployment.panel_path)}</span>（仅 SSH 隧道）</div>
-      <div class="meta">面板账号由控制器加密保管；面板仅允许通过 SSH 隧道访问</div>
-      <div class="meta">入站 ID：<span class="mono">${escapeHtml(deployment.xui_inbound_id || "未同步")}</span></div>
-      <div class="meta">用户：${Number(deployment.client_count || 0)} 名（每名用户使用独立 UUID）</div>
+      <div class="meta">代理端口：<span class="mono">${deployment.proxy_port}</span></div>
+      <div class="meta">用户：${Number(deployment.client_count || 0)} 名</div>
       <div class="meta">伪装目标：<span class="mono">${escapeHtml(deployment.reality_dest || (deployment.reality_mode === "auto" ? "自动检测中" : "-"))}</span> · ${deployment.reality_mode === "auto" ? "自动选择" : "手动指定"}</div>
       <div class="item-actions">
         ${deployment.status === "ready" && deployment.install_method === "native" ? `<button class="primary" data-add-user="${deployment.id}">添加用户</button>` : ""}
@@ -594,7 +592,6 @@ function subscriptionItem(subscription) {
         <button class="secondary" data-copy="${escapeHtml(subscriptionUrl)}">复制链接</button>
         <button class="ghost" data-qr="${escapeHtml(subscriptionUrl)}" data-qr-title="${escapeHtml(subscription.name)}">二维码</button>
       </div>
-      <div class="meta">普通节点流量：剩余 ${bytes(subscription.remaining_bytes)} · 已用 ${bytes(subscription.used_bytes)} / 总量 ${bytes(subscription.quota_bytes)}</div>
       <div class="item-actions">
         <button class="primary" data-edit-subscription="${subscription.id}">分发和调整</button>
         <button class="secondary" data-rotate-subscription-token="${subscription.id}">轮换令牌</button>
@@ -622,7 +619,6 @@ function renderClients() {
           </div>
           <span class="badge ${users.length ? "ok" : ""}">${users.length} 名用户</span>
         </div>
-        <div class="meta">入站 ID：<span class="mono">${escapeHtml(deployment.xui_inbound_id || "未同步")}</span></div>
         <div class="node-user-list">
           ${users.map(clientItem).join("") || empty("该节点暂无用户")}
         </div>
@@ -633,11 +629,6 @@ function renderClients() {
 }
 
 function clientItem(client) {
-  const percent = client.quota_bytes > 0
-    ? Math.min(100, Math.round((client.used_bytes / client.quota_bytes) * 100))
-    : 0;
-  const resetDays = Number(client.traffic_reset_days || 0);
-  const resetLabel = resetDays > 0 ? `每 ${resetDays} 天自动重置` : "不自动重置";
   const expirationLabel = client.expires_at || "不限时";
   return `
     <article class="item">
@@ -648,14 +639,12 @@ function clientItem(client) {
         </div>
         ${statusBadge(client.enabled ? "enabled" : "disabled")}
       </div>
-      <div class="progress"><span style="width: ${percent}%"></span></div>
-      <div class="meta">${bytes(client.used_bytes)} / ${bytes(client.quota_bytes)} · ${resetLabel} · UUID <span class="mono">${escapeHtml(client.uuid)}</span></div>
+      <div class="meta">UUID <span class="mono">${escapeHtml(client.uuid)}</span></div>
       <div class="mono">${escapeHtml(client.share_link)}</div>
       <div class="item-actions">
         <button class="secondary" data-copy="${escapeHtml(client.share_link)}">复制连接</button>
         <button class="ghost" data-qr="${escapeHtml(client.share_link)}" data-qr-title="${escapeHtml(client.name)}">二维码</button>
         <button class="ghost" data-edit-client="${client.id}">编辑</button>
-        <button class="ghost" data-reset-client="${client.id}">重置流量</button>
         <button class="ghost" data-toggle-client="${client.id}" data-enabled="${client.enabled ? 0 : 1}">
           ${client.enabled ? "禁用" : "启用"}
         </button>
@@ -701,8 +690,6 @@ function openClientEdit(clientId) {
   const form = $("#clientEditForm");
   form.elements.id.value = client.id;
   form.elements.name.value = client.name;
-  form.elements.quotaGb.value = gb(client.quota_bytes);
-  form.elements.trafficResetDays.value = Number(client.traffic_reset_days || 0);
   form.elements.expiresAt.value = client.expires_at || "";
   form.elements.neverExpires.checked = !client.expires_at;
   syncNeverExpires(form, true);
@@ -775,24 +762,20 @@ function shareLinkDisplayName(value) {
 }
 
 function subscriptionNodeItem(node, selected) {
-  const selectedQuota = selected?.quotaBytes ?? node.quota_bytes;
   const displayName = selected?.displayName || "";
   const currentName = shareLinkDisplayName(node.share_link) || node.server_name;
+  const expirationLabel = node.expires_at || "不限时";
   return `
     <article class="node-option">
       <input type="checkbox" name="nodeIds" value="${escapeHtml(node.id)}" ${selected ? "checked" : ""} />
       <div>
         <strong>${escapeHtml(node.name)}</strong>
-        <small>${escapeHtml(node.server_name)} · ${bytes(node.quota_bytes)} · ${node.enabled ? "启用" : "禁用"}</small>
+        <small>${escapeHtml(node.server_name)} · 到期 ${escapeHtml(expirationLabel)} · ${node.enabled ? "启用" : "禁用"}</small>
         <span class="mono">${escapeHtml(node.share_link)}</span>
         <div class="node-option-fields">
           <label>
             节点显示名称
             <input name="displayName:${escapeHtml(node.id)}" type="text" maxlength="128" value="${escapeHtml(displayName)}" placeholder="当前：${escapeHtml(currentName)}" />
-          </label>
-          <label>
-            流量 GB
-            <input name="quotaGb:${escapeHtml(node.id)}" type="number" min="0" step="1" value="${escapeHtml(gb(selectedQuota))}" />
           </label>
         </div>
       </div>
@@ -896,24 +879,6 @@ function bindEvents() {
     button.addEventListener("click", () => setSection(button.dataset.sectionJump));
   });
   $("#refreshBtn").addEventListener("click", () => refresh().then(() => toast("已刷新")));
-  $("#refreshTrafficBtn").addEventListener("click", async (event) => {
-    const button = event.currentTarget;
-    button.disabled = true;
-    try {
-      const result = await api("/api/traffic/refresh", { method: "POST", body: "{}" });
-      const failed = (result.errors || []).length;
-      await refresh();
-      toast(
-        failed
-          ? `已同步 ${result.deployments} 个部署，${failed} 个失败`
-          : `已同步 ${result.deployments} 个部署的用量`,
-      );
-    } catch (error) {
-      toast(error instanceof Error ? error.message : "刷新用量失败");
-    } finally {
-      button.disabled = false;
-    }
-  });
   $("#healthCheckBtn").addEventListener("click", async (event) => {
     const button = event.currentTarget;
     button.disabled = true;
@@ -1017,7 +982,7 @@ function bindEvents() {
       (item) => item.server_id === server.id && item.install_method === "native",
     );
     if (existingDeployment) {
-      return toast("该服务器已有原生 3x-ui 部署记录，请先删除旧部署后再创建");
+      return toast("该服务器已有原生部署记录，请先删除旧部署后再创建");
     }
     if (server.status !== "reachable") {
       return toast("请先在服务器页面测试 SSH 连接");
@@ -1114,8 +1079,6 @@ function bindEvents() {
       method: "PATCH",
       body: JSON.stringify({
         name: data.name,
-        quotaGb: data.quotaGb,
-        trafficResetDays: data.trafficResetDays,
         expiresAt: data.expiresAt,
         neverExpires: data.neverExpires,
         enabled: Boolean(client.enabled),
@@ -1133,7 +1096,6 @@ function bindEvents() {
     const nodes = Array.from(form.querySelectorAll('input[name="nodeIds"]:checked'))
       .map((input) => ({
         nodeId: input.value,
-        quotaGb: form.elements[`quotaGb:${input.value}`]?.value || 0,
         displayName: form.elements[`displayName:${input.value}`]?.value || "",
       }));
     const chains = Array.from(form.querySelectorAll('input[name="chainIds"]:checked'))
@@ -1309,7 +1271,7 @@ function bindEvents() {
       const server = state.servers.find((item) => item.id === target.dataset.deleteServer);
       if (
         !confirm(
-          `删除服务器 ${server?.name || ""}？会尝试卸载远端 3x-ui 并删除本地记录。若远端不可达，仍会删除本地记录，远端可能需手工清理。`,
+          `删除服务器 ${server?.name || ""}？会尝试卸载远端 sing-box 服务并删除本地记录。若远端不可达，仍会删除本地记录，远端可能需手工清理。`,
         )
       ) {
         return;
@@ -1401,26 +1363,12 @@ function bindEvents() {
       openClientEdit(target.dataset.editClient);
     }
 
-    if (target.dataset.resetClient) {
-      try {
-        await api(`/api/clients/${target.dataset.resetClient}/reset`, {
-          method: "POST",
-          body: "{}",
-        });
-        toast("本地与 3x-ui 流量已重置");
-        await refresh();
-      } catch (error) {
-        toast(error instanceof Error ? error.message : "重置流量失败");
-      }
-    }
-
     if (target.dataset.toggleClient) {
       const client = state.clients.find((item) => item.id === target.dataset.toggleClient);
       await api(`/api/clients/${target.dataset.toggleClient}`, {
         method: "PATCH",
         body: JSON.stringify({
           name: client.name,
-          quotaGb: gb(client.quota_bytes),
           expiresAt: client.expires_at,
           neverExpires: !client.expires_at,
           enabled: Number(target.dataset.enabled) === 1,

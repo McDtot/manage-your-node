@@ -77,7 +77,6 @@
             <div class="top-actions">
               <button class="secondary icon-button" id="themeToggleBtn" type="button" title="主题：跟随系统" aria-label="切换主题">🌓</button>
               <button class="secondary icon-label" id="refreshBtn"><span aria-hidden="true">↻</span>刷新</button>
-              <button class="secondary icon-label" id="refreshTrafficBtn"><span aria-hidden="true">⟳</span>刷新用量</button>
               <button class="secondary icon-label" id="healthCheckBtn"><span aria-hidden="true">♥</span>健康检查</button>
               <button class="secondary" id="logoutBtn">退出</button>
               <button class="primary" id="topAddServerBtn" data-section-jump="servers" hidden>＋ 添加服务器</button>
@@ -189,7 +188,7 @@
                   <option value="Shadowsocks 2022">Shadowsocks 2022</option>
                   <option value="AnyTLS">AnyTLS（sing-box）</option>
                 </select>
-                <span class="meta">Shadowsocks 2022 使用 2022-blake3-aes-256-gcm，需要 TCP + UDP 端口放行，无需伪装域名。AnyTLS 由 sing-box 提供，不安装 3x-ui 面板，暂不统计流量。</span>
+                <span class="meta">Shadowsocks 2022 使用 2022-blake3-aes-256-gcm，需要 TCP + UDP 端口放行。所有协议均由 sing-box 提供，通过配置下发管理用户。</span>
               </label>
               <div id="anytlsFields" hidden>
                 <label>
@@ -220,16 +219,10 @@
                 </div>
               </div>
               </div>
-              <div class="row">
-                <label>
-                  代理端口
-                  <input name="proxyPort" type="number" value="443" min="1" max="65535" />
-                </label>
-                <label>
-                  面板端口
-                  <input name="panelPort" type="number" placeholder="自动" min="1" max="65535" />
-                </label>
-              </div>
+              <label>
+                代理端口
+                <input name="proxyPort" type="number" value="443" min="1" max="65535" />
+              </label>
               <button class="primary" type="submit">开始部署</button>
             </form>
 
@@ -312,28 +305,18 @@
                 节点
                 <select name="deploymentId" id="clientDeploymentSelect" required></select>
               </label>
-              <div class="meta">一个节点可以创建多个用户，每名用户拥有独立 UUID、流量额度和到期时间。</div>
+              <div class="meta">一个节点可以创建多个用户，每名用户拥有独立凭证与到期时间。</div>
               <label>
                 用户名
                 <input name="name" placeholder="user-a" required />
               </label>
-              <div class="row">
-                <label>
-                  流量 GB
-                  <input name="quotaGb" type="number" value="100" min="1" />
-                </label>
-                <label>
-                  到期日
-                  <input name="expiresAt" type="date" />
-                </label>
-              </div>
+              <label>
+                到期日
+                <input name="expiresAt" type="date" />
+              </label>
               <label class="check">
                 <input name="neverExpires" type="checkbox" />
                 不限时（忽略到期日）
-              </label>
-              <label>
-                流量重置周期（天，0 表示不自动重置）
-                <input name="trafficResetDays" type="number" value="0" min="0" max="3650" step="1" />
               </label>
               <button class="primary" type="submit">创建用户</button>
             </form>
@@ -441,20 +424,12 @@
           <input name="name" required />
         </label>
         <label>
-          流量 GB
-          <input name="quotaGb" type="number" min="0" step="1" required />
-        </label>
-        <label>
           到期日
           <input name="expiresAt" type="date" />
         </label>
         <label class="check">
           <input name="neverExpires" type="checkbox" />
           不限时（忽略到期日）
-        </label>
-        <label>
-          流量重置周期（天，0 表示不自动重置）
-          <input name="trafficResetDays" type="number" min="0" max="3650" step="1" required />
         </label>
         <div class="dialog-actions">
           <button class="ghost" type="button" data-close-client-edit>取消</button>

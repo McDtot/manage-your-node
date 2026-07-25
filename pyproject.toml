@@ -1,7 +1,7 @@
 [project]
 name = "manage-your-node"
-version = "0.14.0"
-description = "Self-hosted VPS node management panel built on Starlette and 3x-ui"
+version = "1.0.0"
+description = "Self-hosted VPS node management panel built on Starlette and sing-box"
 readme = "README.md"
 requires-python = ">=3.12"
 license = { text = "MIT" }

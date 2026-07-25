@@ -1,8 +1,9 @@
 import json
+import os
 import sqlite3
 import threading
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from pathlib import Path
 from typing import Any
 
@@ -57,20 +58,17 @@ class Database:
                     engine TEXT NOT NULL,
                     protocol TEXT NOT NULL,
                     install_method TEXT NOT NULL DEFAULT 'native',
-                    panel_scheme TEXT NOT NULL DEFAULT 'http',
-                    panel_port INTEGER NOT NULL,
-                    panel_path TEXT NOT NULL,
-                    panel_username TEXT NOT NULL,
-                    encrypted_panel_password TEXT NOT NULL,
-                    encrypted_api_token TEXT NOT NULL,
                     proxy_port INTEGER NOT NULL,
                     reality_mode TEXT NOT NULL DEFAULT 'manual',
                     reality_dest TEXT NOT NULL DEFAULT '',
                     reality_sni TEXT NOT NULL DEFAULT '',
+                    encrypted_reality_private_key TEXT NOT NULL DEFAULT '',
+                    reality_public_key TEXT NOT NULL DEFAULT '',
+                    reality_short_id TEXT NOT NULL DEFAULT '',
                     ss_method TEXT NOT NULL DEFAULT '2022-blake3-aes-256-gcm',
                     encrypted_ss_password TEXT NOT NULL DEFAULT '',
                     anytls_domain TEXT NOT NULL DEFAULT '',
-                    xui_inbound_id INTEGER,
+                    last_config_hash TEXT NOT NULL DEFAULT '',
                     subscription_configured INTEGER NOT NULL DEFAULT 0,
                     status TEXT NOT NULL,
                     subscription_url TEXT NOT NULL,
@@ -85,9 +83,6 @@ class Database:
                     deployment_id TEXT NOT NULL,
                     name TEXT NOT NULL,
                     uuid TEXT NOT NULL,
-                    quota_bytes INTEGER NOT NULL,
-                    used_bytes INTEGER NOT NULL,
-                    traffic_reset_days INTEGER NOT NULL DEFAULT 0,
                     expires_at TEXT NOT NULL,
                     enabled INTEGER NOT NULL,
                     encrypted_ss_password TEXT NOT NULL DEFAULT '',
@@ -120,7 +115,6 @@ class Database:
                 CREATE TABLE IF NOT EXISTS subscription_entries (
                     subscription_id TEXT NOT NULL,
                     node_client_id TEXT NOT NULL,
-                    quota_bytes INTEGER NOT NULL,
                     display_name TEXT NOT NULL DEFAULT '',
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
@@ -254,12 +248,11 @@ class Database:
                     ON operation_locks(job_id);
                 """
             )
+            self._assert_no_legacy_engine()
             self._ensure_column("deployments", "install_method", "TEXT NOT NULL DEFAULT 'native'")
             self._ensure_column("servers", "last_latency_ms", "INTEGER")
             self._ensure_column("servers", "last_health_error", "TEXT")
             self._ensure_column("ssh_host_keys", "trusted", "INTEGER NOT NULL DEFAULT 1")
-            self._ensure_column("deployments", "panel_scheme", "TEXT NOT NULL DEFAULT 'http'")
-            self._ensure_column("deployments", "xui_inbound_id", "INTEGER")
             self._ensure_column("deployments", "subscription_configured", "INTEGER NOT NULL DEFAULT 0")
             self._ensure_column(
                 "deployments",
@@ -284,9 +277,24 @@ class Database:
                 "TEXT NOT NULL DEFAULT ''",
             )
             self._ensure_column(
-                "clients",
-                "traffic_reset_days",
-                "INTEGER NOT NULL DEFAULT 0",
+                "deployments",
+                "encrypted_reality_private_key",
+                "TEXT NOT NULL DEFAULT ''",
+            )
+            self._ensure_column(
+                "deployments",
+                "reality_public_key",
+                "TEXT NOT NULL DEFAULT ''",
+            )
+            self._ensure_column(
+                "deployments",
+                "reality_short_id",
+                "TEXT NOT NULL DEFAULT ''",
+            )
+            self._ensure_column(
+                "deployments",
+                "last_config_hash",
+                "TEXT NOT NULL DEFAULT ''",
             )
             self._ensure_column(
                 "clients",
@@ -334,6 +342,8 @@ class Database:
             self._ensure_column("proxy_chain_nodes", "remote_service_name", "TEXT")
             self._ensure_column("proxy_chain_nodes", "status", "TEXT NOT NULL DEFAULT 'planned'")
             self._ensure_column("proxy_chain_nodes", "updated_at", "TEXT")
+            self._ensure_column("deployments", "last_error", "TEXT")
+            self._drop_legacy_columns()
             self._migrate_legacy_job_logs()
             self._conn.execute(
                 """
@@ -382,11 +392,60 @@ class Database:
                 )
             self._conn.execute("UPDATE jobs SET logs = '[]' WHERE id = ?", (row["id"],))
 
+    def _assert_no_legacy_engine(self) -> None:
+        """Refuse to migrate a database that still tracks 3x-ui deployments.
+
+        Those records point at panels this release can no longer uninstall, so
+        the safe order is to delete them from the previous release first.
+        """
+        rows = self._conn.execute("PRAGMA table_info(deployments)").fetchall()
+        if not any(row["name"] == "engine" for row in rows):
+            return
+        legacy = self._conn.execute(
+            "SELECT COUNT(*) AS count FROM deployments WHERE engine <> 'sing-box'"
+        ).fetchone()["count"]
+        if not legacy:
+            return
+        if os.getenv("MYN_FORCE_SINGBOX_MIGRATION") == "1":
+            self._conn.execute("DELETE FROM deployments WHERE engine <> 'sing-box'")
+            return
+        raise RuntimeError(
+            f"{legacy} 3x-ui deployment(s) are still recorded in this database. "
+            "Delete them from the previous release first so it can uninstall "
+            "3x-ui on the target hosts, or set MYN_FORCE_SINGBOX_MIGRATION=1 to "
+            "drop the records and clean those hosts by hand."
+        )
+
+    def _drop_legacy_columns(self) -> None:
+        """Remove 3x-ui panel columns and the retired traffic accounting."""
+        for column in (
+            "panel_scheme",
+            "panel_port",
+            "panel_path",
+            "panel_username",
+            "encrypted_panel_password",
+            "encrypted_api_token",
+            "xui_inbound_id",
+        ):
+            self._drop_column("deployments", column)
+        for column in ("quota_bytes", "used_bytes", "traffic_reset_days"):
+            self._drop_column("clients", column)
+        self._drop_column("subscription_entries", "quota_bytes")
+
     def _ensure_column(self, table: str, column: str, definition: str) -> None:
         rows = self._conn.execute(f"PRAGMA table_info({table})").fetchall()
         if any(row["name"] == column for row in rows):
             return
         self._conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+
+    def _drop_column(self, table: str, column: str) -> None:
+        rows = self._conn.execute(f"PRAGMA table_info({table})").fetchall()
+        if not any(row["name"] == column for row in rows):
+            return
+        # SQLite older than 3.35 cannot drop columns. Leaving the column
+        # behind is harmless because nothing reads or writes it any more.
+        with suppress(sqlite3.OperationalError):
+            self._conn.execute(f"ALTER TABLE {table} DROP COLUMN {column}")
 
     def query_all(self, sql: str, params: tuple[Any, ...] = ()) -> list[dict[str, Any]]:
         with self._lock:

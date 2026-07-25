@@ -1,10 +1,9 @@
-from datetime import UTC, date, datetime
-from datetime import time as datetime_time
 from typing import Any
-from urllib.parse import quote, urlparse
 
 from ..provisioning import shell_quote
 from .helpers import (
+    ACME_HTTP_PORT,
+    ACTIVE_CLIENT_CONDITION,
     DEPLOYMENT_PROTOCOL_ANYTLS,
     DEPLOYMENT_PROTOCOL_SHADOWSOCKS_2022,
     DEPLOYMENT_SS_METHOD,
@@ -17,22 +16,26 @@ from .helpers import (
     reality_candidates,
     reality_dest,
     ss_share_link,
-    url_host,
+    vless_reality_share_link,
 )
 from .servers import ServersService
+
+DEPLOYMENT_COLUMNS = """
+            d.id, d.server_id, s.name AS server_name, s.host,
+            d.engine, d.protocol, d.install_method, d.proxy_port,
+            d.reality_mode, d.reality_dest, d.reality_sni,
+            d.encrypted_reality_private_key, d.reality_public_key,
+            d.reality_short_id, d.ss_method, d.encrypted_ss_password,
+            d.anytls_domain, d.last_config_hash, d.status,
+            d.subscription_url, d.last_error, d.created_at, d.updated_at
+"""
 
 
 class DeploymentsService(ServersService):
     def list_deployments(self) -> list[dict[str, Any]]:
         rows = self.db.query_all(
-            """
-            SELECT d.id, d.server_id, s.name AS server_name, s.host,
-                   d.engine, d.protocol, d.install_method, d.panel_scheme, d.panel_port,
-                   d.panel_path, d.panel_username, d.encrypted_panel_password,
-                   d.encrypted_api_token, d.proxy_port, d.reality_mode,
-                   d.reality_dest, d.reality_sni, d.ss_method, d.encrypted_ss_password,
-                   d.anytls_domain, d.xui_inbound_id, d.status,
-                   d.subscription_url, d.last_error, d.created_at, d.updated_at,
+            f"""
+            SELECT {DEPLOYMENT_COLUMNS},
                    COUNT(c.id) AS client_count,
                    (
                        SELECT COUNT(*)
@@ -50,65 +53,19 @@ class DeploymentsService(ServersService):
             self._attach_deployment_secrets(row, reveal=False)
         return rows
 
-    def _parse_install_result(self, lines: list[str]) -> dict[str, str]:
-        capture = False
-        result: dict[str, str] = {}
-        for line in lines:
-            if line.strip() == "__MYN_RESULT_BEGIN__":
-                capture = True
-                continue
-            if line.strip() == "__MYN_RESULT_END__":
-                break
-            if not capture or "=" not in line:
-                continue
-            key, value = line.split("=", 1)
-            result[key.strip()] = value.strip().strip("'\"")
-        return result
-
-    def _apply_install_result(self, deployment_id: str, result: dict[str, str]) -> None:
-        panel_port = int(result.get("XUI_PANEL_PORT") or result.get("PANEL_PORT") or 0)
-        panel_path = "/" + (result.get("XUI_WEB_BASE_PATH") or "").strip("/")
-        panel_scheme = ""
-        access_url = result.get("XUI_ACCESS_URL") or ""
-        if access_url:
-            parsed = urlparse(access_url)
-            panel_scheme = parsed.scheme
-            if parsed.port:
-                panel_port = parsed.port
-            if parsed.path and parsed.path != "/":
-                panel_path = "/" + parsed.path.strip("/")
-        username = result.get("XUI_USERNAME") or ""
-        password = result.get("XUI_PASSWORD") or ""
-        api_token = result.get("XUI_API_TOKEN") or ""
-        updates: list[str] = []
-        params: list[Any] = []
-        if panel_port:
-            updates.append("panel_port = ?")
-            params.append(panel_port)
-        if panel_scheme:
-            updates.append("panel_scheme = ?")
-            params.append(panel_scheme)
-        if panel_path != "/":
-            updates.append("panel_path = ?")
-            params.append(panel_path)
-        if username:
-            updates.append("panel_username = ?")
-            params.append(username)
-        if password:
-            updates.append("encrypted_panel_password = ?")
-            params.append(self.secret_box.seal(password))
-        if api_token:
-            updates.append("encrypted_api_token = ?")
-            params.append(self.secret_box.seal(api_token))
-        if not updates:
-            return
-        updates.append("updated_at = ?")
-        params.append(now_iso())
-        params.append(deployment_id)
-        self.db.execute(
-            f"UPDATE deployments SET {', '.join(updates)} WHERE id = ?",
-            tuple(params),
-        )
+    def _node_install_options(self, deployment: dict[str, Any]) -> dict[str, Any]:
+        """Firewall and certificate switches the installer needs per protocol."""
+        protocol = deployment.get("protocol")
+        if protocol == DEPLOYMENT_PROTOCOL_SHADOWSOCKS_2022:
+            return {"allow_udp": True, "self_signed_cert": False, "acme_http_port": 0}
+        if protocol == DEPLOYMENT_PROTOCOL_ANYTLS:
+            domain = str(deployment.get("anytls_domain") or "").strip()
+            return {
+                "allow_udp": False,
+                "self_signed_cert": not domain,
+                "acme_http_port": ACME_HTTP_PORT if domain else 0,
+            }
+        return {"allow_udp": False, "self_signed_cert": False, "acme_http_port": 0}
 
     def _resolve_reality_target(
         self,
@@ -214,14 +171,8 @@ exit 43
         reveal_secrets: bool = True,
     ) -> dict[str, Any]:
         row = self.db.query_one(
-            """
-            SELECT d.id, d.server_id, s.name AS server_name, s.host,
-                   d.engine, d.protocol, d.install_method, d.panel_scheme, d.panel_port,
-                   d.panel_path, d.panel_username, d.encrypted_panel_password,
-                   d.encrypted_api_token, d.proxy_port, d.reality_mode,
-                   d.reality_dest, d.reality_sni, d.ss_method, d.encrypted_ss_password,
-                   d.anytls_domain, d.xui_inbound_id, d.status,
-                   d.subscription_url, d.last_error, d.created_at, d.updated_at,
+            f"""
+            SELECT {DEPLOYMENT_COLUMNS},
                    (
                        SELECT COUNT(*)
                        FROM subscription_nodes sn
@@ -265,18 +216,15 @@ exit 43
                 sni=domain,
                 insecure=not domain,
             )
-        tag = quote(name)
-        return (
-            f"vless://{client_uuid}@{url_host(deployment['host'])}:{deployment['proxy_port']}"
-            f"?security=reality&type=tcp&flow=xtls-rprx-vision#{tag}"
+        return vless_reality_share_link(
+            client_uuid=client_uuid,
+            host=deployment["host"],
+            port=int(deployment["proxy_port"]),
+            name=name,
+            public_key=str(deployment.get("reality_public_key") or ""),
+            short_id=str(deployment.get("reality_short_id") or ""),
+            sni=str(deployment.get("reality_sni") or ""),
         )
-
-    def _expires_ms(self, expires_at: str) -> int:
-        if not expires_at:
-            return 0
-        parsed = date.fromisoformat(expires_at)
-        dt = datetime.combine(parsed, datetime_time.min, tzinfo=UTC)
-        return int(dt.timestamp() * 1000)
 
     def render_deployment_subscription(
         self,
@@ -287,11 +235,11 @@ exit 43
         if not deployment.get("subscription_url"):
             raise ValueError("subscription not found")
         rows = self.db.query_all(
-            """
+            f"""
             SELECT c.share_link, sn.display_name
             FROM subscription_nodes sn
             JOIN clients c ON c.id = sn.node_client_id
-            WHERE sn.subscription_id = ? AND c.enabled = 1
+            WHERE sn.subscription_id = ? AND {ACTIVE_CLIENT_CONDITION}
             ORDER BY sn.created_at ASC, c.created_at ASC
             """,
             (deployment_id,),

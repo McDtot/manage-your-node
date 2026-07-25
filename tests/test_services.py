@@ -1,11 +1,11 @@
 import base64
-from contextlib import nullcontext
 from urllib.parse import unquote, urlparse
 
 import pytest
 import yaml
 
 from app.database import Database
+from app.provisioning import singbox_install_script
 from app.security import SecretBox
 from app.services import (
     CHAIN_PROTOCOL_SHADOWSOCKS_2022,
@@ -13,19 +13,22 @@ from app.services import (
     CHAIN_SS_METHOD,
     DEFAULT_REALITY_CANDIDATES,
     AppServices,
-    _normalize_client_share_link_host,
-    _redact_native_install_log,
     parse_reality_destination,
     reality_candidates,
     reality_dest,
     reality_server_name,
+    vless_reality_share_link,
 )
+from app.services.singbox import build_chain_config
 
 
 @pytest.fixture
-def services(tmp_path):
+def services(tmp_path, monkeypatch):
     db = Database(tmp_path / "test.db")
-    return AppServices(db, SecretBox("a-long-test-secret-value"))
+    svc = AppServices(db, SecretBox("a-long-test-secret-value"))
+    # Ready deployments would otherwise attempt a real SSH config push.
+    monkeypatch.setattr(svc, "_push_node_config", lambda *_args, **_kwargs: None)
+    return svc
 
 
 def _create_ready_deployment(services, suffix: str, host: str) -> str:
@@ -42,18 +45,19 @@ def _create_ready_deployment(services, suffix: str, host: str) -> str:
     services.db.execute(
         """
         INSERT INTO deployments (
-            id, server_id, engine, protocol, install_method, panel_port,
-            panel_path, panel_username, encrypted_panel_password,
-            encrypted_api_token, proxy_port, status, subscription_url,
-            created_at, updated_at
-        ) VALUES (?, ?, '3x-ui', 'VLESS + REALITY', 'native', 32000,
-                  '/panel', 'admin', ?, ?, 443, 'ready', ?, 'now', 'now')
+            id, server_id, engine, protocol, install_method, proxy_port,
+            reality_mode, reality_dest, reality_sni,
+            encrypted_reality_private_key, reality_public_key, reality_short_id,
+            status, subscription_url, created_at, updated_at
+        ) VALUES (?, ?, 'sing-box', 'VLESS + REALITY', 'native', 443,
+                  'manual', 'www.apple.com:443', 'www.apple.com',
+                  ?, 'jNXHt1yRo0vDuchQlIP6Z0ZvjT3KtzVI-T4E7RoLJS0', 'a1b2c3d4',
+                  'ready', ?, 'now', 'now')
         """,
         (
             deployment_id,
             server["id"],
-            services.secret_box.seal("panel-password"),
-            services.secret_box.seal("api-token"),
+            services.secret_box.seal("UuMBgl7MXTPx9inmQp2UC7Jcnwc6XYbwDNebonM-FCc"),
             f"/sub/deployments/{deployment_id}",
         ),
     )
@@ -141,36 +145,13 @@ def test_host_key_requires_explicit_approval(services):
     assert approved["host_key_trusted"] == 1
 
 
-def test_deployment_list_does_not_expose_control_credentials(services):
-    server = services.create_server(
-        {
-            "name": "edge",
-            "host": "203.0.113.10",
-            "sshPort": 22,
-            "sshUser": "deploy",
-            "authType": "agent",
-        }
-    )
-    services.db.execute(
-        """
-        INSERT INTO deployments (
-            id, server_id, engine, protocol, panel_port, panel_path, panel_username,
-            encrypted_panel_password, encrypted_api_token, proxy_port, status,
-            subscription_url, created_at, updated_at
-        ) VALUES ('dep', ?, '3x-ui', 'VLESS + REALITY', 32000, '/panel', 'admin',
-                  ?, ?, 443, 'ready', '/sub/deployments/dep', 'now', 'now')
-        """,
-        (
-            server["id"],
-            services.secret_box.seal("panel-password"),
-            services.secret_box.seal("api-token"),
-        ),
-    )
-    deployment = services.list_deployments()[0]
-    assert "panel_password" not in deployment
-    assert "api_token" not in deployment
-    assert "encrypted_panel_password" not in deployment
-    assert "encrypted_api_token" not in deployment
+def test_deployment_list_does_not_expose_reality_private_key(services):
+    deployment_id = _create_ready_deployment(services, "secrets", "203.0.113.10")
+    deployment = next(item for item in services.list_deployments() if item["id"] == deployment_id)
+    assert "reality_private_key" not in deployment
+    assert "encrypted_reality_private_key" not in deployment
+    assert deployment["reality_public_key"]
+    assert deployment["reality_short_id"]
 
 
 def test_one_node_supports_multiple_users(services):
@@ -244,34 +225,21 @@ def test_user_can_be_created_without_expiration(services):
     )
 
     assert client["expires_at"] == ""
-    assert services._expires_ms(client["expires_at"]) == 0
     assert services.summary()["expiringClients"] == 0
 
 
-def test_user_without_expiration_syncs_zero_to_remote(services, monkeypatch):
+def test_user_without_expiration_is_included_in_rendered_config(services, monkeypatch):
     deployment_id = _create_ready_deployment(
         services,
         "never-expires-remote",
         "203.0.113.32",
     )
-    services.db.execute(
-        "UPDATE deployments SET xui_inbound_id = 45 WHERE id = ?",
-        (deployment_id,),
-    )
-    created_payloads = []
+    captured: dict = {}
 
-    class FakeXui:
-        def wait_ready(self, seconds):
-            pass
+    def fake_push(deployment, config):
+        captured["config"] = config
 
-        def login(self):
-            pass
-
-        def create_client(self, **payload):
-            created_payloads.append(payload)
-            return []
-
-    monkeypatch.setattr(services, "_xui_session", lambda _deployment: nullcontext(FakeXui()))
+    monkeypatch.setattr(services, "_push_node_config", fake_push)
 
     client = services.create_client(
         deployment_id,
@@ -279,7 +247,8 @@ def test_user_without_expiration_syncs_zero_to_remote(services, monkeypatch):
     )
 
     assert client["expires_at"] == ""
-    assert created_payloads[0]["expires_ms"] == 0
+    users = captured["config"]["inbounds"][0]["users"]
+    assert any(user["name"] == "remote-permanent-user" for user in users)
 
 
 def test_user_expiration_can_be_removed_and_restored(services, monkeypatch):
@@ -288,36 +257,11 @@ def test_user_expiration_can_be_removed_and_restored(services, monkeypatch):
         "edit-expiration",
         "203.0.113.33",
     )
+    monkeypatch.setattr(services, "_push_node_config", lambda *_a, **_k: None)
     client = services.create_client(
         deployment_id,
         {"name": "editable-expiration", "expiresAt": "2030-01-01"},
     )
-    services.db.execute(
-        "UPDATE deployments SET xui_inbound_id = 46 WHERE id = ?",
-        (deployment_id,),
-    )
-    updated_payloads = []
-
-    class FakeXui:
-        def wait_ready(self, seconds):
-            pass
-
-        def login(self):
-            pass
-
-        def get_client(self, email):
-            return {"client": {"uuid": client["uuid"], "email": email}}
-
-        def update_client(self, email, payload):
-            updated_payloads.append((email, payload))
-
-        def client_links(self, email):
-            return []
-
-        def restart_xray(self):
-            pass
-
-    monkeypatch.setattr(services, "_xui_session", lambda _deployment: nullcontext(FakeXui()))
 
     permanent = services.update_client(client["id"], {"neverExpires": True})
     restored = services.update_client(
@@ -326,139 +270,52 @@ def test_user_expiration_can_be_removed_and_restored(services, monkeypatch):
     )
 
     assert permanent["expires_at"] == ""
-    assert updated_payloads[0][1]["expiryTime"] == 0
     assert restored["expires_at"] == "2035-06-30"
-    assert updated_payloads[1][1]["expiryTime"] == services._expires_ms("2035-06-30")
 
 
-def test_user_traffic_reset_period_can_be_configured(services):
+def test_expired_users_are_filtered_from_rendered_config(services, monkeypatch):
     deployment_id = _create_ready_deployment(
         services,
-        "traffic-cycle",
-        "203.0.113.29",
+        "expiry-filter",
+        "203.0.113.34",
     )
-    client = services.create_client(
+    monkeypatch.setattr(services, "_push_node_config", lambda *_a, **_k: None)
+    active = services.create_client(
         deployment_id,
-        {"name": "periodic-user", "trafficResetDays": 30},
+        {"name": "active", "neverExpires": True},
     )
-    assert client["traffic_reset_days"] == 30
-
-    updated = services.update_client(client["id"], {"trafficResetDays": 45})
-    assert updated["traffic_reset_days"] == 45
-
-    for invalid in (-1, 3651, "1.5", 1.5, True):
-        with pytest.raises(ValueError, match="trafficResetDays"):
-            services.update_client(client["id"], {"trafficResetDays": invalid})
-
-
-def test_updating_traffic_reset_period_syncs_to_remote(services, monkeypatch):
-    deployment_id = _create_ready_deployment(
-        services,
-        "traffic-cycle-remote",
-        "203.0.113.30",
+    expired = services.create_client(
+        deployment_id,
+        {"name": "expired", "expiresAt": "2000-01-01"},
     )
-    client = services.create_client(deployment_id, {"name": "remote-periodic-user"})
-    services.db.execute(
-        "UPDATE deployments SET install_method = 'native', xui_inbound_id = 44 WHERE id = ?",
-        (deployment_id,),
+    disabled = services.create_client(
+        deployment_id,
+        {"name": "disabled", "neverExpires": True},
     )
-    updated_payloads = []
+    services.update_client(disabled["id"], {"enabled": False})
 
-    class FakeXui:
-        def wait_ready(self, seconds):
-            pass
-
-        def login(self):
-            pass
-
-        def get_client(self, email):
-            return {"client": {"uuid": client["uuid"], "email": email}}
-
-        def update_client(self, email, payload):
-            updated_payloads.append((email, payload))
-
-        def client_links(self, email):
-            return []
-
-        def restart_xray(self):
-            pass
-
-    monkeypatch.setattr(services, "_xui_session", lambda _deployment: nullcontext(FakeXui()))
-
-    updated = services.update_client(client["id"], {"trafficResetDays": 60})
-
-    assert updated["traffic_reset_days"] == 60
-    assert updated_payloads[0][0] == "remote-periodic-user"
-    assert updated_payloads[0][1]["reset"] == 60
+    users = {
+        user["name"]
+        for user in services._active_client_users(services.get_deployment(deployment_id))
+    }
+    assert users == {"active"}
+    assert active["id"]
+    assert expired["expires_at"] == "2000-01-01"
 
 
-def test_reset_client_traffic_resets_remote_before_local(services, monkeypatch):
-    deployment_id = _create_ready_deployment(
-        services,
-        "reset-remote",
-        "203.0.113.27",
-    )
-    client = services.create_client(deployment_id, {"name": "alice+reset"})
-    services.db.execute(
-        "UPDATE deployments SET install_method = 'native', xui_inbound_id = 42 WHERE id = ?",
-        (deployment_id,),
-    )
-    services.db.execute(
-        "UPDATE clients SET used_bytes = ? WHERE id = ?",
-        (123456, client["id"]),
-    )
-    calls = []
+def test_config_sync_skips_unchanged_hash(services, monkeypatch):
+    deployment_id = _create_ready_deployment(services, "hash", "203.0.113.35")
+    pushes: list[str] = []
 
-    class FakeXui:
-        def wait_ready(self, seconds):
-            calls.append(("wait_ready", seconds))
+    def fake_push(deployment, config):
+        pushes.append(deployment["id"])
 
-        def login(self):
-            calls.append(("login",))
+    monkeypatch.setattr(services, "_push_node_config", fake_push)
+    services.create_client(deployment_id, {"name": "alice", "neverExpires": True})
+    assert pushes == [deployment_id]
 
-        def reset_client_traffic(self, inbound_id, email):
-            calls.append(("reset", inbound_id, email))
-
-    monkeypatch.setattr(services, "_xui_session", lambda _deployment: nullcontext(FakeXui()))
-
-    reset = services.reset_client(client["id"])
-
-    assert calls == [("wait_ready", 30), ("login",), ("reset", 42, "alice+reset")]
-    assert reset["used_bytes"] == 0
-
-
-def test_reset_client_traffic_keeps_local_usage_when_remote_fails(services, monkeypatch):
-    deployment_id = _create_ready_deployment(
-        services,
-        "reset-failure",
-        "203.0.113.28",
-    )
-    client = services.create_client(deployment_id, {"name": "failed-reset"})
-    services.db.execute(
-        "UPDATE deployments SET install_method = 'native', xui_inbound_id = 43 WHERE id = ?",
-        (deployment_id,),
-    )
-    services.db.execute(
-        "UPDATE clients SET used_bytes = ? WHERE id = ?",
-        (654321, client["id"]),
-    )
-
-    class FailingXui:
-        def wait_ready(self, seconds):
-            pass
-
-        def login(self):
-            pass
-
-        def reset_client_traffic(self, inbound_id, email):
-            raise RuntimeError("remote reset failed")
-
-    monkeypatch.setattr(services, "_xui_session", lambda _deployment: nullcontext(FailingXui()))
-
-    with pytest.raises(RuntimeError, match="remote reset failed"):
-        services.reset_client(client["id"])
-
-    assert services.get_client(client["id"])["used_bytes"] == 654321
+    result = services.refresh_node_configs()
+    assert result["reloadedDeployments"] == 0
 
 
 def test_subscription_lifecycle(services):
@@ -581,7 +438,7 @@ def test_managed_subscription_can_include_proxy_chains(services):
         "subscription-exit",
         "203.0.113.62",
     )
-    client = services.create_client(entry_id, {"name": "subscriber", "quotaGb": 20})
+    client = services.create_client(entry_id, {"name": "subscriber", "neverExpires": True})
     chain = services.create_proxy_chain(_proxy_chain_payload([entry_id, exit_id]))
     chain_link = "vless://ready-proxy-chain"
     services.db.execute(
@@ -593,38 +450,20 @@ def test_managed_subscription_can_include_proxy_chains(services):
     config = services.update_managed_subscription(
         subscription["id"],
         {
-            "nodes": [{"nodeId": client["id"], "quotaGb": 20}],
+            "nodes": [{"nodeId": client["id"]}],
             "chainIds": [chain["id"]],
         },
     )
 
     assert config["selectedChainIds"] == [chain["id"]]
     assert {item["id"] for item in config["availableChains"]} == {chain["id"]}
-    services.db.execute(
-        "UPDATE clients SET used_bytes = ? WHERE id = ?",
-        (3 * 1024**3, client["id"]),
-    )
     summary = services.get_subscription(subscription["id"])
     assert summary["node_count"] == 1
     assert summary["chain_count"] == 1
-    assert summary["used_bytes"] == 3 * 1024**3
-    assert summary["remaining_bytes"] == 17 * 1024**3
-    listed = next(
-        item
-        for item in services.list_subscriptions()
-        if item["id"] == subscription["id"]
-    )
-    assert listed["remaining_bytes"] == 17 * 1024**3
     rendered = base64.b64decode(
         services.render_managed_subscription(subscription["token"])
     ).decode("utf-8")
     assert rendered.splitlines() == [client["share_link"], chain_link]
-
-    services.db.execute(
-        "UPDATE clients SET used_bytes = ? WHERE id = ?",
-        (25 * 1024**3, client["id"]),
-    )
-    assert services.get_subscription(subscription["id"])["remaining_bytes"] == 0
 
     # Older API clients that only update nodes must not silently drop proxy chains.
     services.update_managed_subscription(subscription["id"], {"nodes": []})
@@ -716,13 +555,14 @@ def test_recover_orphaned_jobs(services):
         " VALUES ('srv1','n','h',22,'u','key','new','t','t')"
     )
     db.execute(
-        "INSERT INTO deployments (id,server_id,engine,protocol,panel_port,panel_path,panel_username,"
-        "encrypted_panel_password,encrypted_api_token,proxy_port,status,subscription_url,created_at,updated_at)"
-        " VALUES ('dep1','srv1','3x-ui','v',1,'/p','u','','',443,'provisioning','/x','t','t')"
+        "INSERT INTO deployments (id,server_id,engine,protocol,install_method,proxy_port,"
+        "status,subscription_url,created_at,updated_at)"
+        " VALUES ('dep1','srv1','sing-box','VLESS + REALITY','native',443,"
+        "'provisioning','/x','t','t')"
     )
     db.execute(
         "INSERT INTO jobs (id,type,status,logs,created_at,updated_at)"
-        " VALUES ('job1','deploy_3xui','running','[]','t','t')"
+        " VALUES ('job1','deploy_node','running','[]','t','t')"
     )
     db.execute(
         "INSERT INTO operation_locks (resource_type,resource_id,job_id,acquired_at)"
@@ -912,7 +752,7 @@ def test_native_reality_target_probe_is_persisted(services, monkeypatch):
     )
     services.db.execute(
         "INSERT INTO jobs (id,type,status,logs,created_at,updated_at) "
-        "VALUES ('probe-job','deploy_3xui','running','[]','now','now')"
+        "VALUES ('probe-job','deploy_node','running','[]','now','now')"
     )
     monkeypatch.setenv("REALITY_CANDIDATES", "first.example:443,second.example:443")
 
@@ -938,60 +778,20 @@ def test_native_reality_target_probe_is_persisted(services, monkeypatch):
     assert stored["reality_sni"] == "second.example"
 
 
-def test_native_installer_logs_redact_colorized_credentials():
-    api_line = "\x1b[0;32mAPI Token: leaked-token\x1b[0m"
-    password_line = "\x1b[0;32mPassword: leaked-password\x1b[0m"
-    result_line = "XUI_API_TOKEN=leaked-result-token"
-
-    assert "leaked-token" not in _redact_native_install_log(api_line, "panel-password")
-    assert "leaked-password" not in _redact_native_install_log(password_line, "panel-password")
-    assert "leaked-result-token" not in _redact_native_install_log(
-        result_line,
-        "panel-password",
+def test_vless_reality_share_link_includes_mihomo_required_fields():
+    link = vless_reality_share_link(
+        client_uuid="11111111-2222-3333-4444-555555555555",
+        host="2001:db8::10",
+        port=443,
+        name="client",
+        public_key="jNXHt1yRo0vDuchQlIP6Z0ZvjT3KtzVI-T4E7RoLJS0",
+        short_id="a1b2c3d4",
+        sni="www.apple.com",
     )
-
-
-def test_native_client_link_uses_managed_server_host():
-    link = (
-        "vless://client-id@127.0.0.1:443"
-        "?security=reality&pbk=example#client"
-    )
-    normalized = _normalize_client_share_link_host(link, "2001:db8::10")
-
-    assert normalized.startswith("vless://client-id@[2001:db8::10]:443?")
-    assert normalized.endswith("#client")
-
-
-@pytest.mark.parametrize(
-    ("lines", "expected"),
-    [
-        (
-            ["Private key: old-private", "Public key: old-public"],
-            ("old-private", "old-public"),
-        ),
-        (
-            [
-                "PrivateKey: new-private",
-                "Password (PublicKey): new-public",
-                "Hash32: ignored",
-            ],
-            ("new-private", "new-public"),
-        ),
-    ],
-)
-def test_x25519_keypair_accepts_old_and_new_xray_output(
-    services,
-    monkeypatch,
-    lines,
-    expected,
-):
-    monkeypatch.setattr(
-        services.ssh,
-        "run_script",
-        lambda server, script, log, timeout: lines,
-    )
-
-    assert services._remote_x25519_keypair({"server_name": "edge"}) == expected
+    assert link.startswith("vless://11111111-2222-3333-4444-555555555555@[2001:db8::10]:443?")
+    assert "pbk=jNXHt1yRo0vDuchQlIP6Z0ZvjT3KtzVI-T4E7RoLJS0" in link
+    assert "sid=a1b2c3d4" in link
+    assert "sni=www.apple.com" in link
 
 
 def test_proxy_chain_failure_triggers_cleanup(services, monkeypatch):
@@ -1060,11 +860,6 @@ def test_mixed_proxy_chain_uses_ss2022_between_overseas_nodes(services, monkeypa
     ]
     assert all("encrypted_ss_password" not in node for node in chain["nodes"])
 
-    monkeypatch.setattr(
-        services,
-        "_remote_x25519_keypair",
-        lambda node: (f"private-{node['position']}", f"public-{node['position']}"),
-    )
     installed = []
     monkeypatch.setattr(
         services,
@@ -1085,38 +880,35 @@ def test_mixed_proxy_chain_uses_ss2022_between_overseas_nodes(services, monkeypa
     assert not nodes[1]["encrypted_private_key"]
     assert nodes[2]["encrypted_private_key"]
 
-    entry_config = services._chain_xray_config(nodes[0], nodes[1])
-    assert entry_config["inbounds"][0]["protocol"] == "vless"
-    assert "listen" not in entry_config["inbounds"][0]
-    assert entry_config["inbounds"][0]["streamSettings"]["network"] == "raw"
-    assert (
-        entry_config["inbounds"][0]["streamSettings"]["realitySettings"]["target"]
-        == "entry.example:443"
+    entry_config = build_chain_config(
+        services._chain_node_secrets(nodes[0]),
+        services._chain_node_secrets(nodes[1]),
     )
-    assert entry_config["outbounds"][0]["protocol"] == "shadowsocks"
-    assert entry_config["outbounds"][0]["settings"]["servers"] == [
-        {
-            "address": "198.51.100.20",
-            "port": nodes[1]["inbound_port"],
-            "method": CHAIN_SS_METHOD,
-            "password": services.secret_box.open(nodes[1]["encrypted_ss_password"]),
-        }
-    ]
+    assert entry_config["inbounds"][0]["type"] == "vless"
+    assert entry_config["inbounds"][0]["tls"]["reality"]["handshake"] == {
+        "server": "entry.example",
+        "server_port": 443,
+    }
+    assert entry_config["outbounds"][0]["type"] == "shadowsocks"
+    assert entry_config["outbounds"][0]["server"] == "198.51.100.20"
+    assert entry_config["outbounds"][0]["server_port"] == nodes[1]["inbound_port"]
+    assert entry_config["outbounds"][0]["password"] == services.secret_box.open(
+        nodes[1]["encrypted_ss_password"]
+    )
 
-    relay_config = services._chain_xray_config(nodes[1], nodes[2])
-    assert relay_config["inbounds"][0]["protocol"] == "shadowsocks"
-    assert "listen" not in relay_config["inbounds"][0]
-    assert relay_config["inbounds"][0]["settings"]["network"] == "tcp,udp"
-    assert relay_config["outbounds"][0]["protocol"] == "vless"
-    assert relay_config["outbounds"][0]["streamSettings"]["network"] == "raw"
-    reality = relay_config["outbounds"][0]["streamSettings"]["realitySettings"]
-    assert reality["password"] == nodes[2]["public_key"]
-    assert reality["serverName"] == "cover.exit.example"
-    assert "publicKey" not in reality
+    relay_config = build_chain_config(
+        services._chain_node_secrets(nodes[1]),
+        services._chain_node_secrets(nodes[2]),
+    )
+    assert relay_config["inbounds"][0]["type"] == "shadowsocks"
+    assert relay_config["outbounds"][0]["type"] == "vless"
+    reality = relay_config["outbounds"][0]["tls"]["reality"]
+    assert reality["public_key"] == nodes[2]["public_key"]
+    assert relay_config["outbounds"][0]["tls"]["server_name"] == "cover.exit.example"
 
-    exit_config = services._chain_xray_config(nodes[2], None)
-    assert exit_config["inbounds"][0]["protocol"] == "vless"
-    assert exit_config["outbounds"][0]["protocol"] == "freedom"
+    exit_config = build_chain_config(services._chain_node_secrets(nodes[2]), None)
+    assert exit_config["inbounds"][0]["type"] == "vless"
+    assert exit_config["outbounds"][0]["type"] == "direct"
     share_link = services.get_proxy_chain(chain["id"])["share_link"]
     assert share_link.startswith("vless://")
     assert "@198.51.100.10:41001?" in share_link
@@ -1166,7 +958,7 @@ def test_proxy_chain_requires_one_valid_equal_mapping_port_per_node(services):
 
 @pytest.mark.parametrize(
     ("reserved_port", "purpose"),
-    [(22, "SSH"), (32000, "3x-ui panel"), (443, "proxy")],
+    [(22, "SSH"), (443, "proxy")],
 )
 def test_proxy_chain_rejects_ports_reserved_on_target_server(
     services,
@@ -1309,18 +1101,14 @@ def test_proxy_chain_subscription_renders_mihomo_yaml(services):
         services.render_proxy_chain_subscription(chain["token"], "sing-box")
 
 
-def test_ss2022_chain_install_script_opens_udp_firewall_rules(services):
-    install_script = services._chain_install_script(
-        "myn-chain-test",
-        45000,
-        {"inbounds": [], "outbounds": []},
+def test_ss2022_chain_install_script_opens_udp_firewall_rules():
+    install_script = singbox_install_script(
+        service_name="myn-chain-test",
+        config={"inbounds": [], "outbounds": [{"type": "direct", "tag": "direct"}]},
+        proxy_port=45000,
+        server_host="198.51.100.10",
         allow_udp=True,
     )
-    # Xray 26.5.9 infers the config format from the final extension.
-    assert 'TMP_CONFIG="$INSTALL_DIR/config.tmp.json"' in install_script
-    assert 'run -test -config "$TMP_CONFIG"' in install_script
-    assert "port_is_in_use" in install_script
-    assert "TCP port $INBOUND_PORT is already in use" in install_script
-    assert "UDP port $INBOUND_PORT is already in use" in install_script
+    assert "sing-box check" in install_script
     assert "ufw allow 45000/udp" in install_script
     assert "--add-port=45000/udp" in install_script
