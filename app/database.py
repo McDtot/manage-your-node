@@ -69,6 +69,7 @@ class Database:
                     encrypted_ss_password TEXT NOT NULL DEFAULT '',
                     encrypted_hy2_obfs_password TEXT NOT NULL DEFAULT '',
                     anytls_domain TEXT NOT NULL DEFAULT '',
+                    tls_cert_sha256 TEXT NOT NULL DEFAULT '',
                     last_config_hash TEXT NOT NULL DEFAULT '',
                     subscription_configured INTEGER NOT NULL DEFAULT 0,
                     status TEXT NOT NULL,
@@ -285,6 +286,11 @@ class Database:
             )
             self._ensure_column(
                 "deployments",
+                "tls_cert_sha256",
+                "TEXT NOT NULL DEFAULT ''",
+            )
+            self._ensure_column(
+                "deployments",
                 "encrypted_reality_private_key",
                 "TEXT NOT NULL DEFAULT ''",
             )
@@ -351,6 +357,7 @@ class Database:
             self._ensure_column("proxy_chain_nodes", "status", "TEXT NOT NULL DEFAULT 'planned'")
             self._ensure_column("proxy_chain_nodes", "updated_at", "TEXT")
             self._ensure_column("deployments", "last_error", "TEXT")
+            self._invalidate_unpinned_tls_deployments()
             self._drop_legacy_columns()
             self._migrate_legacy_job_logs()
             self._conn.execute(
@@ -367,6 +374,31 @@ class Database:
                 """
             )
             self._conn.commit()
+
+    def _invalidate_unpinned_tls_deployments(self) -> None:
+        """Fail closed for self-signed TLS records created before pinning."""
+        affected = """
+            SELECT id
+            FROM deployments
+            WHERE protocol IN ('AnyTLS', 'Hysteria2', 'VMess')
+              AND TRIM(anytls_domain) = ''
+              AND TRIM(tls_cert_sha256) = ''
+        """
+        self._conn.execute(
+            f"""
+            UPDATE clients
+            SET share_link = ''
+            WHERE deployment_id IN ({affected})
+            """
+        )
+        self._conn.execute(
+            f"""
+            UPDATE deployments
+            SET status = 'failed',
+                last_error = 'Self-signed TLS certificate is not pinned; delete and redeploy this node.'
+            WHERE id IN ({affected})
+            """
+        )
 
     def _migrate_legacy_job_logs(self) -> None:
         """Move pre-normalization JSON logs into the append-only log table."""

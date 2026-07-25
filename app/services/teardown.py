@@ -7,6 +7,7 @@ from ..provisioning import (
     node_service_name,
     singbox_install_script,
     singbox_uninstall_script,
+    tls_cert_sha256_from_output,
 )
 from .helpers import (
     DEPLOYMENT_PROTOCOL_HYSTERIA2,
@@ -14,6 +15,7 @@ from .helpers import (
     DEPLOYMENT_PROTOCOL_VLESS_REALITY,
     DEPLOYMENT_PROTOCOLS,
     DEPLOYMENT_SS_METHOD,
+    TLS_CERT_PIN_PROTOCOLS,
     TLS_DOMAIN_PROTOCOLS,
     host_field,
     new_hy2_password,
@@ -195,7 +197,7 @@ class TeardownService(SubscriptionsService):
                 f"Installing pinned sing-box and starting {service_name} over SSH",
             )
             install_started = True
-            self.ssh.run_script(
+            install_lines = self.ssh.run_script(
                 server,
                 singbox_install_script(
                     service_name=service_name,
@@ -207,13 +209,29 @@ class TeardownService(SubscriptionsService):
                 lambda line: self._append_job_log(job_id, line),
                 timeout=1200,
             )
+            tls_cert_sha256 = ""
+            if (
+                deployment.get("protocol") in TLS_CERT_PIN_PROTOCOLS
+                and not str(deployment.get("anytls_domain") or "").strip()
+            ):
+                tls_cert_sha256 = tls_cert_sha256_from_output(install_lines)
+                if not tls_cert_sha256:
+                    raise RuntimeError(
+                        "remote installer did not return the self-signed TLS certificate fingerprint"
+                    )
             self.db.execute(
                 """
                 UPDATE deployments
-                SET status = ?, last_config_hash = ?, updated_at = ?
+                SET status = ?, last_config_hash = ?, tls_cert_sha256 = ?, updated_at = ?
                 WHERE id = ?
                 """,
-                ("ready", self._config_hash(config), now_iso(), deployment_id),
+                (
+                    "ready",
+                    self._config_hash(config),
+                    tls_cert_sha256,
+                    now_iso(),
+                    deployment_id,
+                ),
             )
             self._append_job_log(job_id, self._ready_message(deployment))
             self._finish_job(job_id, "success", None)

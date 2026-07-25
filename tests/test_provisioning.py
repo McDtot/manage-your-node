@@ -1,11 +1,15 @@
+import pytest
+
 from app.provisioning import (
     SINGBOX_SHA256,
     SINGBOX_VERSION,
+    TLS_CERT_SHA256_MARKER,
     chain_service_name,
     node_service_name,
     singbox_config_push_script,
     singbox_install_script,
     singbox_uninstall_script,
+    tls_cert_sha256_from_output,
 )
 
 
@@ -51,7 +55,20 @@ def test_singbox_installer_is_pinned_and_verified():
     assert "sha256sum --check" in script
     assert "sing-box check" in script
     assert "openssl req -x509" in script
+    assert "openssl x509" in script
+    assert TLS_CERT_SHA256_MARKER in script
     assert f"/etc/systemd/system/{service}.service" in script
+
+
+def test_tls_certificate_fingerprint_is_parsed_and_validated():
+    fingerprint = ":".join(["A1"] * 32)
+    assert tls_cert_sha256_from_output(
+        ["installing", f"{TLS_CERT_SHA256_MARKER}{fingerprint}", "ready"]
+    ) == fingerprint
+    assert tls_cert_sha256_from_output(["installing", "ready"]) == ""
+
+    with pytest.raises(ValueError, match="invalid TLS certificate fingerprint"):
+        tls_cert_sha256_from_output([f"{TLS_CERT_SHA256_MARKER}not-a-fingerprint"])
 
 
 def test_singbox_installer_acme_skips_self_signed_and_opens_http():

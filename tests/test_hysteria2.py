@@ -14,6 +14,8 @@ from app.services import (
     new_hy2_password,
 )
 
+CERT_SHA256 = ":".join(["AA"] * 32)
+
 
 @pytest.fixture
 def services(tmp_path):
@@ -57,15 +59,16 @@ def _create_ready_hy2_deployment(
         """
         INSERT INTO deployments (
             id, server_id, engine, protocol, install_method, proxy_port,
-            anytls_domain, encrypted_hy2_obfs_password, status, subscription_url,
-            created_at, updated_at
-        ) VALUES (?, ?, 'sing-box', ?, 'native', 443, ?, ?, 'ready', ?, 'now', 'now')
+            anytls_domain, tls_cert_sha256, encrypted_hy2_obfs_password,
+            status, subscription_url, created_at, updated_at
+        ) VALUES (?, ?, 'sing-box', ?, 'native', 443, ?, ?, ?, 'ready', ?, 'now', 'now')
         """,
         (
             deployment_id,
             server["id"],
             DEPLOYMENT_PROTOCOL_HYSTERIA2,
             domain,
+            "" if domain else CERT_SHA256,
             services.secret_box.seal(obfs_password),
             f"/sub/deployments/{deployment_id}",
         ),
@@ -87,6 +90,7 @@ def test_hy2_share_link_carries_obfs_and_insecure():
         sni="",
         insecure=True,
         obfs_password="obfs-pw",
+        cert_sha256=CERT_SHA256,
     )
     parsed = urlparse(link)
     assert parsed.scheme == "hy2"
@@ -94,9 +98,21 @@ def test_hy2_share_link_carries_obfs_and_insecure():
     assert parsed.port == 443
     assert unquote(parsed.username) == "secret-pass"
     assert "insecure=1" in parsed.query
+    assert f"pinSHA256={CERT_SHA256.replace(':', '%3A')}" in parsed.query
     assert "obfs=salamander" in parsed.query
     assert "obfs-password=obfs-pw" in parsed.query
     assert unquote(parsed.fragment) == "节点 A"
+
+
+def test_hy2_share_link_rejects_unpinned_self_signed_tls():
+    with pytest.raises(ValueError, match="certificate fingerprint"):
+        hy2_share_link(
+            password="secret-pass",
+            host="203.0.113.10",
+            port=443,
+            name="unsafe",
+            insecure=True,
+        )
 
 
 def test_hy2_share_link_round_trips_to_mihomo_proxy():
@@ -118,6 +134,18 @@ def test_hy2_share_link_round_trips_to_mihomo_proxy():
     assert proxy["obfs"] == "salamander"
     assert proxy["obfs-password"] == "obfs"
     assert "skip-cert-verify" not in proxy
+
+    pinned = hy2_share_link(
+        password="pw",
+        host="203.0.113.20",
+        port=8443,
+        name="pinned",
+        insecure=True,
+        cert_sha256=CERT_SHA256,
+    )
+    pinned_proxy = _mihomo_proxy_from_hy2(pinned, 2, set())
+    assert pinned_proxy["skip-cert-verify"] is True
+    assert pinned_proxy["fingerprint"] == CERT_SHA256
 
 
 def test_hy2_deployment_persists_obfs_password(services, monkeypatch):
@@ -163,6 +191,43 @@ def test_hy2_deployment_persists_obfs_password(services, monkeypatch):
     assert services.secret_box.open(row["encrypted_hy2_obfs_password"])
 
 
+def test_self_signed_hy2_deployment_persists_certificate_fingerprint(
+    services, monkeypatch
+):
+    server = services.create_server(
+        {
+            "name": "edge-hy2-pinned",
+            "host": "203.0.113.83",
+            "sshPort": 22,
+            "sshUser": "deploy",
+            "authType": "agent",
+        }
+    )
+    _trust_server_for_native_deployment(services, server["id"])
+
+    def fake_run_script(_server, _script, log, timeout):
+        line = f"__MYN_TLS_CERT_SHA256__={CERT_SHA256}"
+        log(line)
+        return [line]
+
+    monkeypatch.setattr(services.ssh, "run_script", fake_run_script)
+
+    result = services.start_deployment(
+        server["id"],
+        {
+            "protocol": DEPLOYMENT_PROTOCOL_HYSTERIA2,
+            "proxyPort": 443,
+        },
+    )
+    assert services.wait_for_workers()
+
+    row = services.db.query_one(
+        "SELECT status, tls_cert_sha256 FROM deployments WHERE id = ?",
+        (result["deployment"]["id"],),
+    )
+    assert row == {"status": "ready", "tls_cert_sha256": CERT_SHA256}
+
+
 def test_create_hy2_client_pushes_config_and_builds_link(services, monkeypatch):
     deployment_id = _create_ready_hy2_deployment(services, "user", "203.0.113.81")
     captured: dict = {}
@@ -184,6 +249,7 @@ def test_create_hy2_client_pushes_config_and_builds_link(services, monkeypatch):
     assert parsed.scheme == "hy2"
     assert parsed.port == 443
     assert "insecure=1" in parsed.query
+    assert "pinSHA256=" in parsed.query
     assert "obfs=salamander" in parsed.query
 
 

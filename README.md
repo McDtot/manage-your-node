@@ -9,7 +9,7 @@
 
 ## v1.1.0 更新亮点
 
-- 新增 **Hysteria2** 与 **VMess** 节点部署：TLS 支持自签或域名 ACME；Hysteria2 默认 salamander 混淆并需放行 UDP。
+- 新增 **Hysteria2** 与 **VMess** 节点部署：TLS 支持带 SHA-256 指纹绑定的自签证书或域名 ACME；Hysteria2 默认 salamander 混淆并需放行 UDP。
 - 代理链节点间协议新增 Hysteria2 / VMess（用户入口仍固定 VLESS + REALITY）。
 - 分享链接与 Mihomo 订阅已覆盖 `hy2://`、`vmess://`；修复升级后卷挂载密钥校验问题。
 
@@ -115,16 +115,19 @@ sudo bash install.sh --admin-password-file /root/manage-node-admin-password
 
 - 协议模板：VLESS + REALITY、Shadowsocks 2022（2022-blake3-aes-256-gcm）、AnyTLS、Hysteria2 或 VMess；
 - REALITY 伪装目标：仅 VLESS + REALITY 需要，建议选择“自动检测并固定”；
-- TLS 域名（AnyTLS / Hysteria2 / VMess）：留空则由目标 VPS 生成自签证书（客户端自动跳过证书校验）；填写已解析到该服务器的域名则由 sing-box 自动申请并续期 Let's Encrypt 证书；
+- TLS 域名（AnyTLS / Hysteria2 / VMess）：留空则由目标 VPS 生成自签证书，面板回传并固定其 SHA-256 指纹；填写已解析到该服务器的域名则由 sing-box 自动申请并续期 Let's Encrypt 证书；
 - 代理端口：默认 443，必须在目标 VPS 上可从公网访问；Shadowsocks 2022 与 Hysteria2 需同时放行 TCP 和 UDP。
 
 部署会在目标机安装共享二进制 <code>/opt/manage-node/singbox/bin/sing-box</code>，并以 systemd 服务 <code>myn-node-&lt;部署ID&gt;</code> 运行；配置位于 <code>/opt/manage-node/singbox/myn-node-&lt;部署ID&gt;/config.json</code>。用户增删改会重新渲染完整配置并通过 SSH 下发、重启服务。
 
 #### TLS 证书（AnyTLS / Hysteria2 / VMess）
 
-- 自签：订阅链接自动带 <code>insecure=1</code>（或等价字段），客户端导入后无需手动开启“跳过证书校验”。
+- 自签：订阅链接同时携带跳过系统 CA 校验的参数和证书 SHA-256 指纹；客户端只信任部署时生成的证书，避免裸用 <code>insecure</code>。请使用支持 <code>pcs</code> / <code>pinSHA256</code> 的新版客户端。
 - ACME：需要域名已解析到本机并放行 <code>80</code> 端口用于 HTTP-01 验证。
 - Hysteria2 默认启用 salamander 混淆，obfs 密码由面板生成并写入分享链接。
+
+> [!WARNING]
+> 从未固定证书指纹的旧版本升级时，已有无域名 AnyTLS / Hysteria2 / VMess 部署会被标记为失败，其不安全分享链接会清空。请删除并重新部署一次，以回传并固定远端自签证书指纹。
 
 > [!NOTE]
 > 当前钉住 sing-box <code>1.13.14</code>。自 1.14.0 起内联 <code>acme</code> 已废弃，1.16.0 将移除；后续升级需改为独立的 <code>certificate_provider</code> 配置。

@@ -14,6 +14,8 @@ from app.services import (
     new_anytls_password,
 )
 
+CERT_SHA256 = ":".join(["CC"] * 32)
+
 
 @pytest.fixture
 def services(tmp_path):
@@ -56,14 +58,16 @@ def _create_ready_anytls_deployment(
         """
         INSERT INTO deployments (
             id, server_id, engine, protocol, install_method, proxy_port,
-            anytls_domain, status, subscription_url, created_at, updated_at
-        ) VALUES (?, ?, 'sing-box', ?, 'native', 443, ?, 'ready', ?, 'now', 'now')
+            anytls_domain, tls_cert_sha256, status, subscription_url,
+            created_at, updated_at
+        ) VALUES (?, ?, 'sing-box', ?, 'native', 443, ?, ?, 'ready', ?, 'now', 'now')
         """,
         (
             deployment_id,
             server["id"],
             DEPLOYMENT_PROTOCOL_ANYTLS,
             domain,
+            "" if domain else CERT_SHA256,
             f"/sub/deployments/{deployment_id}",
         ),
     )
@@ -83,6 +87,7 @@ def test_anytls_share_link_carries_insecure_and_sni():
         name="节点 A",
         sni="",
         insecure=True,
+        cert_sha256=CERT_SHA256,
     )
     parsed = urlparse(link)
     assert parsed.scheme == "anytls"
@@ -90,7 +95,19 @@ def test_anytls_share_link_carries_insecure_and_sni():
     assert parsed.port == 443
     assert unquote(parsed.username) == "secret-pass"
     assert "insecure=1" in parsed.query
+    assert "pcs=" in parsed.query
     assert unquote(parsed.fragment) == "节点 A"
+
+
+def test_anytls_share_link_rejects_unpinned_self_signed_tls():
+    with pytest.raises(ValueError, match="certificate fingerprint"):
+        anytls_share_link(
+            password="secret-pass",
+            host="203.0.113.10",
+            port=443,
+            name="unsafe",
+            insecure=True,
+        )
 
 
 def test_anytls_share_link_round_trips_to_mihomo_proxy():
@@ -119,9 +136,11 @@ def test_anytls_self_signed_link_sets_skip_cert_verify():
         port=443,
         name="edge",
         insecure=True,
+        cert_sha256=CERT_SHA256,
     )
     proxy = _mihomo_proxy_from_anytls(link, 1, set())
     assert proxy["skip-cert-verify"] is True
+    assert proxy["fingerprint"] == CERT_SHA256
 
 
 def test_anytls_deployment_persists_engine_protocol_and_domain(services, monkeypatch):
@@ -216,6 +235,7 @@ def test_create_anytls_client_pushes_config_and_builds_link(services, monkeypatc
     assert parsed.scheme == "anytls"
     assert parsed.port == 443
     assert "insecure=1" in parsed.query
+    assert "pcs=" in parsed.query
 
     stored = services.secret_box.open(
         services.db.query_one(

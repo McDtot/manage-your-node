@@ -223,9 +223,103 @@ def test_reality_and_config_hash_columns_migrate(tmp_path):
         "encrypted_reality_private_key",
         "reality_public_key",
         "reality_short_id",
+        "tls_cert_sha256",
         "last_config_hash",
     ):
         assert columns[name]["notnull"] == 1
+
+
+def test_unpinned_self_signed_tls_deployments_are_invalidated(tmp_path):
+    path = tmp_path / "unpinned-tls.sqlite"
+    db = Database(path)
+    db.execute(
+        """
+        INSERT INTO servers (
+            id, name, host, ssh_port, ssh_user, auth_type, secret_label,
+            status, created_at, updated_at
+        ) VALUES ('server', 'edge', '203.0.113.10', 22, 'root', 'agent',
+                  'not_saved', 'reachable', 'now', 'now')
+        """
+    )
+    for protocol in ("AnyTLS", "Hysteria2", "VMess"):
+        deployment_id = f"deployment-{protocol.lower()}"
+        client_id = f"client-{protocol.lower()}"
+        db.execute(
+            """
+            INSERT INTO deployments (
+                id, server_id, engine, protocol, install_method, proxy_port,
+                anytls_domain, tls_cert_sha256, status, subscription_url,
+                created_at, updated_at
+            ) VALUES (?, 'server', 'sing-box', ?, 'native', 443, '', '',
+                      'ready', ?, 'now', 'now')
+            """,
+            (deployment_id, protocol, f"/sub/deployments/{deployment_id}"),
+        )
+        db.execute(
+            """
+            INSERT INTO clients (
+                id, deployment_id, name, uuid, expires_at, enabled,
+                share_link, subscription_url, created_at, updated_at
+            ) VALUES (?, ?, 'alice', 'bf000d23-0752-40b4-affe-68f7707a9661',
+                      '', 1, 'unsafe-link', '', 'now', 'now')
+            """,
+            (client_id, deployment_id),
+        )
+    db.execute(
+        """
+        INSERT INTO deployments (
+            id, server_id, engine, protocol, install_method, proxy_port,
+            anytls_domain, tls_cert_sha256, status, subscription_url,
+            created_at, updated_at
+        ) VALUES ('deployment-pinned', 'server', 'sing-box', 'Hysteria2',
+                  'native', 8443, '', ?, 'ready', '', 'now', 'now')
+        """,
+        (":".join(["AA"] * 32),),
+    )
+    db.close()
+
+    upgraded = Database(path)
+    invalidated = upgraded.query_all(
+        """
+        SELECT d.protocol, d.status, d.last_error, c.share_link
+        FROM deployments d
+        JOIN clients c ON c.deployment_id = d.id
+        WHERE d.id != 'deployment-pinned'
+        ORDER BY d.protocol
+        """
+    )
+    assert invalidated == [
+        {
+            "protocol": "AnyTLS",
+            "status": "failed",
+            "last_error": (
+                "Self-signed TLS certificate is not pinned; "
+                "delete and redeploy this node."
+            ),
+            "share_link": "",
+        },
+        {
+            "protocol": "Hysteria2",
+            "status": "failed",
+            "last_error": (
+                "Self-signed TLS certificate is not pinned; "
+                "delete and redeploy this node."
+            ),
+            "share_link": "",
+        },
+        {
+            "protocol": "VMess",
+            "status": "failed",
+            "last_error": (
+                "Self-signed TLS certificate is not pinned; "
+                "delete and redeploy this node."
+            ),
+            "share_link": "",
+        },
+    ]
+    assert upgraded.query_one(
+        "SELECT status FROM deployments WHERE id = 'deployment-pinned'"
+    )["status"] == "ready"
 
 
 def test_subscription_display_names_migrate_existing_tables(tmp_path):

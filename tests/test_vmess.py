@@ -15,6 +15,8 @@ from app.services import (
     vmess_share_link,
 )
 
+CERT_SHA256 = ":".join(["BB"] * 32)
+
 
 @pytest.fixture
 def services(tmp_path):
@@ -57,14 +59,16 @@ def _create_ready_vmess_deployment(
         """
         INSERT INTO deployments (
             id, server_id, engine, protocol, install_method, proxy_port,
-            anytls_domain, status, subscription_url, created_at, updated_at
-        ) VALUES (?, ?, 'sing-box', ?, 'native', 443, ?, 'ready', ?, 'now', 'now')
+            anytls_domain, tls_cert_sha256, status, subscription_url,
+            created_at, updated_at
+        ) VALUES (?, ?, 'sing-box', ?, 'native', 443, ?, ?, 'ready', ?, 'now', 'now')
         """,
         (
             deployment_id,
             server["id"],
             DEPLOYMENT_PROTOCOL_VMESS,
             domain,
+            "" if domain else CERT_SHA256,
             f"/sub/deployments/{deployment_id}",
         ),
     )
@@ -87,6 +91,7 @@ def test_vmess_share_link_encodes_standard_payload():
         sni="",
         tls=True,
         insecure=True,
+        cert_sha256=CERT_SHA256,
     )
     assert link.startswith("vmess://")
     payload = _decode_vmess(link)
@@ -95,8 +100,21 @@ def test_vmess_share_link_encodes_standard_payload():
     assert payload["id"] == "bf000d23-0752-40b4-affe-68f7707a9661"
     assert payload["aid"] == "0"
     assert payload["tls"] == "tls"
-    assert payload["allowInsecure"] == 1
+    assert payload["insecure"] == "1"
+    assert payload["pcs"] == CERT_SHA256
+    assert "allowInsecure" not in payload
     assert payload["ps"] == "节点 A"
+
+
+def test_vmess_share_link_rejects_unpinned_self_signed_tls():
+    with pytest.raises(ValueError, match="certificate fingerprint"):
+        vmess_share_link(
+            client_uuid="bf000d23-0752-40b4-affe-68f7707a9661",
+            host="203.0.113.10",
+            port=443,
+            name="unsafe",
+            insecure=True,
+        )
 
 
 def test_vmess_share_link_round_trips_to_mihomo_proxy():
@@ -118,6 +136,19 @@ def test_vmess_share_link_round_trips_to_mihomo_proxy():
     assert proxy["servername"] == "example.com"
     assert "skip-cert-verify" not in proxy
 
+    pinned = vmess_share_link(
+        client_uuid="bf000d23-0752-40b4-affe-68f7707a9661",
+        host="203.0.113.20",
+        port=8443,
+        name="pinned",
+        tls=True,
+        insecure=True,
+        cert_sha256=CERT_SHA256,
+    )
+    pinned_proxy = _mihomo_proxy_from_vmess(pinned, 2, set())
+    assert pinned_proxy["skip-cert-verify"] is True
+    assert pinned_proxy["fingerprint"] == CERT_SHA256
+
 
 def test_vmess_display_name_updates_ps_field():
     link = vmess_share_link(
@@ -125,6 +156,7 @@ def test_vmess_display_name_updates_ps_field():
         host="203.0.113.30",
         port=443,
         name="old",
+        cert_sha256=CERT_SHA256,
     )
     renamed = _share_link_with_display_name(link, "订阅名")
     assert _decode_vmess(renamed)["ps"] == "订阅名"
@@ -191,7 +223,8 @@ def test_create_vmess_client_pushes_config_and_builds_link(services, monkeypatch
     payload = _decode_vmess(client["share_link"])
     assert payload["id"] == client["uuid"]
     assert payload["tls"] == "tls"
-    assert payload["allowInsecure"] == 1
+    assert payload["insecure"] == "1"
+    assert payload["pcs"] == CERT_SHA256
 
 
 def test_vmess_subscription_renders_base64_and_mihomo(services, monkeypatch):

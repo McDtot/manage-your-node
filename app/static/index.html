@@ -196,7 +196,7 @@
                 <label>
                   TLS 域名（可留空）
                   <input name="anytlsDomain" id="anytlsDomain" placeholder="留空则使用自签证书" />
-                  <span class="meta">适用于 AnyTLS、Hysteria2、VMess。留空使用自签证书（客户端自动跳过证书校验，无需域名）。填写已解析到该服务器的域名则自动申请 Let's Encrypt 证书，需放行 80 端口。</span>
+                  <span class="meta">适用于 AnyTLS、Hysteria2、VMess。留空使用自签证书并在订阅中固定 SHA-256 指纹（无需域名，请使用支持 pcs / pinSHA256 的新版客户端）。填写已解析到该服务器的域名则自动申请 Let's Encrypt 证书，需放行 80 端口。</span>
                 </label>
               </div>
               <div id="realityFields">

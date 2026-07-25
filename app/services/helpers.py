@@ -43,6 +43,11 @@ TLS_DOMAIN_PROTOCOLS = {
     DEPLOYMENT_PROTOCOL_HYSTERIA2,
     DEPLOYMENT_PROTOCOL_VMESS,
 }
+TLS_CERT_PIN_PROTOCOLS = {
+    DEPLOYMENT_PROTOCOL_ANYTLS,
+    DEPLOYMENT_PROTOCOL_HYSTERIA2,
+    DEPLOYMENT_PROTOCOL_VMESS,
+}
 DEPLOYMENT_SS_METHOD = CHAIN_SS_METHOD
 MAX_JOB_LOG_ENTRIES = 2000
 MAX_JOB_LOG_LINE = 4096
@@ -173,15 +178,20 @@ def anytls_share_link(
     name: str,
     sni: str = "",
     insecure: bool = True,
+    cert_sha256: str = "",
 ) -> str:
     """Build an ``anytls://`` share link understood by sing-box/mihomo clients.
 
-    Self-signed deployments advertise ``insecure=1`` so imported clients skip
-    certificate verification without any manual toggling.
+    Self-signed deployments advertise both ``insecure=1`` and ``pcs`` so
+    imported clients skip the system CA check but still pin the exact server
+    certificate.
     """
     params: dict[str, str] = {}
     if insecure:
+        if not cert_sha256:
+            raise ValueError("self-signed AnyTLS links require a certificate fingerprint")
         params["insecure"] = "1"
+        params["pcs"] = cert_sha256
     if sni:
         params["sni"] = sni
     query = f"?{urlencode(params)}" if params else ""
@@ -234,6 +244,12 @@ def _mihomo_proxy_from_anytls(
     insecure = query.get("insecure", "").strip() in {"1", "true", "True"}
     if insecure:
         proxy["skip-cert-verify"] = True
+        cert_sha256 = query.get("pcs", "").strip()
+        if not cert_sha256:
+            raise ValueError(
+                "self-signed AnyTLS subscription link is missing a certificate fingerprint"
+            )
+        proxy["fingerprint"] = cert_sha256
     return proxy
 
 
@@ -245,11 +261,15 @@ def hy2_share_link(
     sni: str = "",
     insecure: bool = True,
     obfs_password: str = "",
+    cert_sha256: str = "",
 ) -> str:
     """Build a ``hy2://`` share link understood by sing-box/mihomo clients."""
     params: dict[str, str] = {}
     if insecure:
+        if not cert_sha256:
+            raise ValueError("self-signed Hysteria2 links require a certificate fingerprint")
         params["insecure"] = "1"
+        params["pinSHA256"] = cert_sha256
     if sni:
         params["sni"] = sni
     if obfs_password:
@@ -307,6 +327,12 @@ def _mihomo_proxy_from_hy2(
     insecure = query.get("insecure", "").strip() in {"1", "true", "True"}
     if insecure:
         proxy["skip-cert-verify"] = True
+        cert_sha256 = query.get("pinSHA256", "").strip()
+        if not cert_sha256:
+            raise ValueError(
+                "self-signed Hysteria2 subscription link is missing a certificate fingerprint"
+            )
+        proxy["fingerprint"] = cert_sha256
     obfs = query.get("obfs", "").strip()
     obfs_password = query.get("obfs-password", "").strip()
     if obfs == "salamander" and obfs_password:
@@ -324,6 +350,7 @@ def vmess_share_link(
     tls: bool = True,
     insecure: bool = True,
     fingerprint: str = "chrome",
+    cert_sha256: str = "",
 ) -> str:
     """Build a standard ``vmess://`` base64 JSON share link."""
     payload: dict[str, Any] = {
@@ -343,7 +370,10 @@ def vmess_share_link(
         "fp": fingerprint if tls else "",
     }
     if tls and insecure:
-        payload["allowInsecure"] = 1
+        if not cert_sha256:
+            raise ValueError("self-signed VMess links require a certificate fingerprint")
+        payload["insecure"] = "1"
+        payload["pcs"] = cert_sha256
     encoded = base64.b64encode(
         json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
     ).decode("ascii")
@@ -374,7 +404,10 @@ def _mihomo_proxy_from_vmess(
     server = str(payload.get("add") or "").strip()
     client_uuid = str(payload.get("id") or "").strip()
     try:
-        port = int(payload.get("port"))
+        raw_port = payload.get("port")
+        if raw_port is None:
+            raise ValueError("invalid VMess subscription port")
+        port = int(raw_port)
     except (TypeError, ValueError) as exc:
         raise ValueError("invalid VMess subscription port") from exc
     if not server or not client_uuid or not 1 <= port <= 65535:
@@ -402,8 +435,18 @@ def _mihomo_proxy_from_vmess(
         fingerprint = str(payload.get("fp") or "").strip()
         if fingerprint:
             proxy["client-fingerprint"] = fingerprint
-        if payload.get("allowInsecure") in {1, "1", "true", "True"}:
+        insecure = payload.get("insecure") in {1, "1", "true", "True"}
+        insecure = insecure or payload.get("allowInsecure") in {1, "1", "true", "True"}
+        if insecure:
             proxy["skip-cert-verify"] = True
+            cert_sha256 = str(
+                payload.get("pcs") or payload.get("pinnedPeerCertSha256") or ""
+            ).strip()
+            if not cert_sha256:
+                raise ValueError(
+                    "self-signed VMess subscription link is missing a certificate fingerprint"
+                )
+            proxy["fingerprint"] = cert_sha256
     return proxy
 
 

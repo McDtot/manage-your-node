@@ -1,9 +1,11 @@
 import base64
 import json
+import re
 import shlex
 from typing import Any
 
 SINGBOX_VERSION = "1.13.14"
+TLS_CERT_SHA256_MARKER = "__MYN_TLS_CERT_SHA256__="
 SINGBOX_SHA256 = {
     "386": "4d1c66260dfcb2120fde6c1c5ad125ce0f94769843c34aab4eef53c8d3bf3ae9",
     "amd64": "f48703461a15476951ac4967cdad339d986f4b8096b4eb3ff0829a500502d697",
@@ -78,6 +80,19 @@ def _encode_config(config: dict[str, Any]) -> str:
     ).decode("ascii")
 
 
+def tls_cert_sha256_from_output(lines: list[str]) -> str:
+    """Return the normalized SHA-256 certificate fingerprint emitted by the installer."""
+    pattern = re.compile(r"^(?:[0-9A-F]{2}:){31}[0-9A-F]{2}$")
+    for line in reversed(lines):
+        if not line.startswith(TLS_CERT_SHA256_MARKER):
+            continue
+        fingerprint = line.removeprefix(TLS_CERT_SHA256_MARKER).strip().upper()
+        if not pattern.fullmatch(fingerprint):
+            raise ValueError("remote installer returned an invalid TLS certificate fingerprint")
+        return fingerprint
+    return ""
+
+
 def singbox_install_script(
     service_name: str,
     config: dict[str, Any],
@@ -109,6 +124,9 @@ def singbox_install_script(
     -subj "/CN={server_host}" >/dev/null 2>&1
   $SUDO chmod 0600 {shell_quote(key_path)}
 fi
+CERT_FINGERPRINT="$($SUDO openssl x509 -in {shell_quote(cert_path)} -noout -fingerprint -sha256)"
+CERT_FINGERPRINT="${{CERT_FINGERPRINT#*=}}"
+printf '{TLS_CERT_SHA256_MARKER}%s\\n' "$CERT_FINGERPRINT"
 """
         if self_signed_cert
         else ""

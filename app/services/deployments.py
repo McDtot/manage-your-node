@@ -31,7 +31,8 @@ DEPLOYMENT_COLUMNS = """
             d.reality_mode, d.reality_dest, d.reality_sni,
             d.encrypted_reality_private_key, d.reality_public_key,
             d.reality_short_id, d.ss_method, d.encrypted_ss_password,
-            d.encrypted_hy2_obfs_password, d.anytls_domain, d.last_config_hash, d.status,
+            d.encrypted_hy2_obfs_password, d.anytls_domain, d.tls_cert_sha256,
+            d.last_config_hash, d.status,
             d.subscription_url, d.last_error, d.created_at, d.updated_at
 """
 
@@ -229,6 +230,7 @@ exit 43
                 name=name,
                 sni=domain,
                 insecure=not domain,
+                cert_sha256=str(deployment.get("tls_cert_sha256") or ""),
             )
         if protocol == DEPLOYMENT_PROTOCOL_HYSTERIA2:
             domain = str(deployment.get("anytls_domain") or "").strip()
@@ -240,6 +242,7 @@ exit 43
                 sni=domain,
                 insecure=not domain,
                 obfs_password=str(deployment.get("hy2_obfs_password") or ""),
+                cert_sha256=str(deployment.get("tls_cert_sha256") or ""),
             )
         if protocol == DEPLOYMENT_PROTOCOL_VMESS:
             domain = str(deployment.get("anytls_domain") or "").strip()
@@ -251,6 +254,7 @@ exit 43
                 sni=domain,
                 tls=True,
                 insecure=not domain,
+                cert_sha256=str(deployment.get("tls_cert_sha256") or ""),
             )
         return vless_reality_share_link(
             client_uuid=client_uuid,

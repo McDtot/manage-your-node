@@ -562,6 +562,12 @@ function chainDropIndex(target) {
 }
 
 function deploymentItem(deployment, options = {}) {
+  const usesTlsCertificate = ["AnyTLS", "Hysteria2", "VMess"].includes(deployment.protocol);
+  const securityMeta = usesTlsCertificate
+    ? deployment.anytls_domain
+      ? `<div class="meta">TLS 域名：<span class="mono">${escapeHtml(deployment.anytls_domain)}</span></div>`
+      : `<div class="meta">自签证书 SHA-256：<span class="mono">${escapeHtml(deployment.tls_cert_sha256 || "未固定")}</span></div>`
+    : `<div class="meta">伪装目标：<span class="mono">${escapeHtml(deployment.reality_dest || (deployment.reality_mode === "auto" ? "自动检测中" : "-"))}</span> · ${deployment.reality_mode === "auto" ? "自动选择" : "手动指定"}</div>`;
   return `
     <article class="item">
       <div class="item-head">
@@ -573,7 +579,7 @@ function deploymentItem(deployment, options = {}) {
       </div>
       <div class="meta">代理端口：<span class="mono">${deployment.proxy_port}</span></div>
       <div class="meta">用户：${Number(deployment.client_count || 0)} 名</div>
-      <div class="meta">伪装目标：<span class="mono">${escapeHtml(deployment.reality_dest || (deployment.reality_mode === "auto" ? "自动检测中" : "-"))}</span> · ${deployment.reality_mode === "auto" ? "自动选择" : "手动指定"}</div>
+      ${securityMeta}
       <div class="item-actions">
         ${deployment.status === "ready" && deployment.install_method === "native" ? `<button class="primary" data-add-user="${deployment.id}">添加用户</button>` : ""}
         <button class="ghost" data-section-jump="subscriptions">管理订阅</button>
