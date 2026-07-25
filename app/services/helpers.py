@@ -402,7 +402,7 @@ def _mihomo_proxy_from_vmess(
         fingerprint = str(payload.get("fp") or "").strip()
         if fingerprint:
             proxy["client-fingerprint"] = fingerprint
-        if payload.get("allowInsecure") in {1, "1", True, "true", "True"}:
+        if payload.get("allowInsecure") in {1, "1", "true", "True"}:
             proxy["skip-cert-verify"] = True
     return proxy
 
