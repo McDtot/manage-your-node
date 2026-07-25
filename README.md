@@ -7,15 +7,13 @@
 > [!IMPORTANT]
 > 本项目适合个人或小规模运维，当前为单管理员模式。应用本身不提供 HTTPS；公网使用前请配置反向代理和 TLS，并遵守所在地法律法规及服务商条款。
 
-## v1.0.0 更新亮点
+## v1.1.0 更新亮点
 
-- **全面切换到 sing-box**：删除 3x-ui / Xray / 面板 API / SSH 隧道；所有协议统一为「本地渲染完整配置 → SSH 下发 → systemd 重启」。
-- 支持协议：VLESS + REALITY、Shadowsocks 2022、AnyTLS、Hysteria2、VMess；REALITY 密钥在面板本机用 `cryptography` 生成，无需远端 `xray x25519`。
-- **放弃流量统计与流量配额**；保留到期时间与启用/停用。到期后由后台配置同步任务自动从节点配置中剔除。
-- 代理链改为 sing-box sidecar，**任意 sing-box 节点均可入链**（含 AnyTLS / Hysteria2 / VMess 部署机）。
-- 破坏性升级：必须先在旧版删除全部 3x-ui 节点，再升级；否则启动会拒绝迁移（可用 `MYN_FORCE_SINGBOX_MIGRATION=1` 强制清空残留记录）。
+- 新增 **Hysteria2** 与 **VMess** 节点部署：TLS 支持自签或域名 ACME；Hysteria2 默认 salamander 混淆并需放行 UDP。
+- 代理链节点间协议新增 Hysteria2 / VMess（用户入口仍固定 VLESS + REALITY）。
+- 分享链接与 Mihomo 订阅已覆盖 `hy2://`、`vmess://`；修复升级后卷挂载密钥校验问题。
 
-完整变更见 [v1.0.0 发布说明](https://github.com/McDtot/manage-your-node/releases/tag/v1.0.0)。
+完整变更见 [v1.1.0 发布说明](https://github.com/McDtot/manage-your-node/releases/tag/v1.1.0)。此前 v1.0.0 为 sing-box 单引擎迁移，见 [v1.0.0](https://github.com/McDtot/manage-your-node/releases/tag/v1.0.0)。
 
 ## 主要功能
 
