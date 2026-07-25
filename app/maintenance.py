@@ -37,15 +37,20 @@ def check_database(db: Database, secret_box: SecretBox) -> None:
 
     encrypted_columns = [
         ("servers", "encrypted_secret"),
-        ("deployments", "encrypted_panel_password"),
-        ("deployments", "encrypted_api_token"),
+        ("deployments", "encrypted_reality_private_key"),
+        ("deployments", "encrypted_ss_password"),
+        ("clients", "encrypted_ss_password"),
+        ("clients", "encrypted_anytls_password"),
         ("proxy_chain_nodes", "encrypted_private_key"),
         ("proxy_chain_nodes", "encrypted_ss_password"),
     ]
     checked = 0
     for table, column in encrypted_columns:
+        if not _table_has_column(db, table, column):
+            continue
         rows = db.query_all(
-            f"SELECT rowid AS record_id, {column} AS value FROM {table} WHERE {column} <> ''"
+            f"SELECT rowid AS record_id, {column} AS value FROM {table} "
+            f"WHERE {column} IS NOT NULL AND {column} <> ''"
         )
         for row in rows:
             try:
@@ -57,6 +62,11 @@ def check_database(db: Database, secret_box: SecretBox) -> None:
                 ) from exc
             checked += 1
     print(f"Database integrity is OK; decrypted {checked} encrypted value(s).")
+
+
+def _table_has_column(db: Database, table: str, column: str) -> bool:
+    rows = db.query_all(f"PRAGMA table_info({table})")
+    return any(row["name"] == column for row in rows)
 
 
 def main() -> None:
