@@ -11,12 +11,15 @@ from ..provisioning import (
 )
 from .clients import ClientsService
 from .helpers import (
+    CHAIN_PROTOCOL_HYSTERIA2,
     CHAIN_PROTOCOL_SHADOWSOCKS_2022,
     CHAIN_PROTOCOL_VLESS_REALITY,
+    CHAIN_PROTOCOL_VMESS,
     CHAIN_PROTOCOLS,
     CHAIN_SS_METHOD,
     _deployment_reality_settings,
     _render_subscription_links,
+    new_hy2_password,
     new_id,
     new_ss2022_password,
     now_iso,
@@ -482,10 +485,19 @@ class ChainsService(ClientsService):
                     private_key, public_key = new_reality_keypair()
                     update["encrypted_private_key"] = self.secret_box.seal(private_key)
                     update["public_key"] = public_key
-            elif not node.get("encrypted_ss_password"):
-                update["encrypted_ss_password"] = self.secret_box.seal(
-                    new_ss2022_password()
-                )
+            elif protocol == CHAIN_PROTOCOL_SHADOWSOCKS_2022:
+                if not node.get("encrypted_ss_password"):
+                    update["encrypted_ss_password"] = self.secret_box.seal(
+                        new_ss2022_password()
+                    )
+            elif protocol == CHAIN_PROTOCOL_HYSTERIA2:
+                if not node.get("encrypted_hy2_password"):
+                    update["encrypted_hy2_password"] = self.secret_box.seal(
+                        new_hy2_password()
+                    )
+            elif protocol == CHAIN_PROTOCOL_VMESS:
+                if not node.get("node_client_uuid"):
+                    update["client_uuid"] = str(uuid.uuid4())
             if not node.get("remote_service_name"):
                 update["remote_service_name"] = chain_service_name(
                     chain_id, node["position"]
@@ -512,6 +524,7 @@ class ChainsService(ClientsService):
             **node,
             "private_key": self.secret_box.open(node.get("encrypted_private_key") or ""),
             "ss_password": self.secret_box.open(node.get("encrypted_ss_password") or ""),
+            "hy2_password": self.secret_box.open(node.get("encrypted_hy2_password") or ""),
         }
 
     def _install_proxy_chain_service(
@@ -522,6 +535,7 @@ class ChainsService(ClientsService):
         config: dict[str, Any],
     ) -> None:
         service_name = node["remote_service_name"]
+        protocol = node.get("inbound_protocol") or CHAIN_PROTOCOL_VLESS_REALITY
         self._append_job_log(
             job_id,
             f"Installing {service_name} on {node['server_name']}:{node['inbound_port']}",
@@ -533,7 +547,9 @@ class ChainsService(ClientsService):
                 config=config,
                 proxy_port=int(node["inbound_port"]),
                 server_host=node["host"],
-                allow_udp=node["inbound_protocol"] == CHAIN_PROTOCOL_SHADOWSOCKS_2022,
+                allow_udp=protocol
+                in {CHAIN_PROTOCOL_SHADOWSOCKS_2022, CHAIN_PROTOCOL_HYSTERIA2},
+                self_signed_cert=protocol == CHAIN_PROTOCOL_HYSTERIA2,
             ),
             lambda line: self._append_job_log(job_id, f"{node['server_name']}: {line}"),
             timeout=600,
@@ -594,7 +610,7 @@ class ChainsService(ClientsService):
             SELECT pcn.position, pcn.inbound_protocol, pcn.inbound_port,
                    pcn.client_uuid AS node_client_uuid,
                    pcn.encrypted_private_key, pcn.public_key, pcn.short_id,
-                   pcn.ss_method, pcn.encrypted_ss_password,
+                   pcn.ss_method, pcn.encrypted_ss_password, pcn.encrypted_hy2_password,
                    pcn.remote_service_name, pcn.status AS node_status,
                    d.id AS deployment_id, d.install_method,
                    d.status AS deployment_status, d.protocol, d.proxy_port,

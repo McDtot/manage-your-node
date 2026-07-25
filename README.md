@@ -10,9 +10,9 @@
 ## v1.0.0 更新亮点
 
 - **全面切换到 sing-box**：删除 3x-ui / Xray / 面板 API / SSH 隧道；所有协议统一为「本地渲染完整配置 → SSH 下发 → systemd 重启」。
-- 支持协议：VLESS + REALITY、Shadowsocks 2022、AnyTLS；REALITY 密钥在面板本机用 `cryptography` 生成，无需远端 `xray x25519`。
+- 支持协议：VLESS + REALITY、Shadowsocks 2022、AnyTLS、Hysteria2、VMess；REALITY 密钥在面板本机用 `cryptography` 生成，无需远端 `xray x25519`。
 - **放弃流量统计与流量配额**；保留到期时间与启用/停用。到期后由后台配置同步任务自动从节点配置中剔除。
-- 代理链改为 sing-box sidecar，**任意 sing-box 节点均可入链**（含 AnyTLS 部署机）。
+- 代理链改为 sing-box sidecar，**任意 sing-box 节点均可入链**（含 AnyTLS / Hysteria2 / VMess 部署机）。
 - 破坏性升级：必须先在旧版删除全部 3x-ui 节点，再升级；否则启动会拒绝迁移（可用 `MYN_FORCE_SINGBOX_MIGRATION=1` 强制清空残留记录）。
 
 完整变更见 [v1.0.0 发布说明](https://github.com/McDtot/manage-your-node/releases/tag/v1.0.0)。
@@ -27,7 +27,7 @@
 | 节点部署 | 通过 SSH 安装固定版本、经 SHA256 校验的 sing-box（当前钉 `1.13.14`） |
 | 用户管理 | 同一节点可创建多个独立用户，支持启停与到期时间 |
 | 订阅分发 | 按需创建订阅，自由组合普通用户和代理链，并为每个条目设置显示名称，可生成二维码 |
-| 代理链 | 将多个可用节点按顺序组成入口、中继和出口，节点间支持 REALITY 或 SS2022 |
+| 代理链 | 将多个可用节点按顺序组成入口、中继和出口，节点间支持 REALITY、SS2022、Hysteria2 或 VMess |
 | 运维与安全 | 任务日志、审计记录、在线备份、敏感信息加密、登录限流和 CSRF 防护 |
 
 ## 快速部署
@@ -115,17 +115,18 @@ sudo bash install.sh --admin-password-file /root/manage-node-admin-password
 
 进入“部署”并选择已通过 SSH 测试的服务器：
 
-- 协议模板：VLESS + REALITY、Shadowsocks 2022（2022-blake3-aes-256-gcm）或 AnyTLS；
+- 协议模板：VLESS + REALITY、Shadowsocks 2022（2022-blake3-aes-256-gcm）、AnyTLS、Hysteria2 或 VMess；
 - REALITY 伪装目标：仅 VLESS + REALITY 需要，建议选择“自动检测并固定”；
-- 域名（仅 AnyTLS）：留空则由目标 VPS 生成自签证书（客户端自动跳过证书校验）；填写已解析到该服务器的域名则由 sing-box 自动申请并续期 Let's Encrypt 证书；
-- 代理端口：默认 443，必须在目标 VPS 上可从公网访问；Shadowsocks 2022 需同时放行 TCP 和 UDP。
+- TLS 域名（AnyTLS / Hysteria2 / VMess）：留空则由目标 VPS 生成自签证书（客户端自动跳过证书校验）；填写已解析到该服务器的域名则由 sing-box 自动申请并续期 Let's Encrypt 证书；
+- 代理端口：默认 443，必须在目标 VPS 上可从公网访问；Shadowsocks 2022 与 Hysteria2 需同时放行 TCP 和 UDP。
 
 部署会在目标机安装共享二进制 <code>/opt/manage-node/singbox/bin/sing-box</code>，并以 systemd 服务 <code>myn-node-&lt;部署ID&gt;</code> 运行；配置位于 <code>/opt/manage-node/singbox/myn-node-&lt;部署ID&gt;/config.json</code>。用户增删改会重新渲染完整配置并通过 SSH 下发、重启服务。
 
-#### AnyTLS 证书
+#### TLS 证书（AnyTLS / Hysteria2 / VMess）
 
-- 自签：订阅链接自动带 <code>insecure=1</code>，客户端导入后无需手动开启“跳过证书校验”。
+- 自签：订阅链接自动带 <code>insecure=1</code>（或等价字段），客户端导入后无需手动开启“跳过证书校验”。
 - ACME：需要域名已解析到本机并放行 <code>80</code> 端口用于 HTTP-01 验证。
+- Hysteria2 默认启用 salamander 混淆，obfs 密码由面板生成并写入分享链接。
 
 > [!NOTE]
 > 当前钉住 sing-box <code>1.13.14</code>。自 1.14.0 起内联 <code>acme</code> 已废弃，1.16.0 将移除；后续升级需改为独立的 <code>certificate_provider</code> 配置。
@@ -163,7 +164,7 @@ sudo bash install.sh --admin-password-file /root/manage-node-admin-password
 代理链适合把多台已部署节点组成固定路径。例如：
 
 ~~~text
-用户 ─ VLESS + REALITY → 香港入口 ─ REALITY / SS2022 → 日本中继 ─ REALITY / SS2022 → 美国出口 → Internet
+用户 ─ VLESS + REALITY → 香港入口 ─ REALITY / SS2022 / HY2 / VMess → 日本中继 ─ REALITY / SS2022 / HY2 / VMess → 美国出口 → Internet
 ~~~
 
 使用方法：
@@ -171,15 +172,15 @@ sudo bash install.sh --admin-password-file /root/manage-node-admin-password
 1. 确保至少两台 native 部署处于“可用”状态；
 2. 进入“代理链”，按入口到出口的顺序添加节点；
 3. 为每个节点填写 NAT 商家分配的、内外一致的链路端口；
-4. 为节点间链路选择 VLESS + REALITY 或 SS2022；
+4. 为节点间链路选择 VLESS + REALITY、SS2022、Hysteria2 或 VMess；
 5. 保存后点击“下发远端”；
 6. 下发成功后复制独立订阅，或把代理链加入组合订阅。
 
 端口规则：
 
 - 用户设备到入口固定使用 VLESS + REALITY；
-- REALITY 链路只需映射 TCP；
-- SS2022 链路必须在同一端口同时映射 TCP 和 UDP；
+- REALITY / VMess 链路只需映射 TCP；
+- SS2022 / Hysteria2 链路必须在同一端口同时映射 TCP 和 UDP；
 - 入口端口供用户设备连接，其余节点端口供上一跳连接；
 - 当前只支持公网端口与本机监听端口相同的 NAT 映射，不支持端口转换。
 
@@ -340,12 +341,12 @@ ssh -L 8787:127.0.0.1:8787 user@管理服务器IP
 - 使用的是 native 且状态为“可用”的部署；
 - 链路端口没有被其他程序占用；
 - NAT 公网端口与本机监听端口一致；
-- REALITY 已放行 TCP，SS2022 已同时放行 TCP 和 UDP；
+- REALITY / VMess 已放行 TCP，SS2022 / Hysteria2 已同时放行 TCP 和 UDP；
 - 系统使用 systemd，SSH 用户有 root 或免密码 sudo 权限。
 
 ## 安全设计
 
-- SSH 密钥与节点 REALITY / Shadowsocks / AnyTLS 密钥使用 Fernet + scrypt 加密后存入 SQLite；
+- SSH 密钥与节点 REALITY / Shadowsocks / AnyTLS / Hysteria2 / VMess 密钥使用 Fernet + scrypt 加密后存入 SQLite；
 - 首次 SSH 主机指纹必须带外核验，指纹变化时拒绝连接；
 - 管理端写操作使用与会话绑定的 CSRF 令牌，并校验 Origin；
 - 登录失败次数持久化限流，默认 5 分钟内失败 5 次后锁定 15 分钟；

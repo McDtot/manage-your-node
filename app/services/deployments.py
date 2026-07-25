@@ -5,18 +5,23 @@ from .helpers import (
     ACME_HTTP_PORT,
     ACTIVE_CLIENT_CONDITION,
     DEPLOYMENT_PROTOCOL_ANYTLS,
+    DEPLOYMENT_PROTOCOL_HYSTERIA2,
     DEPLOYMENT_PROTOCOL_SHADOWSOCKS_2022,
+    DEPLOYMENT_PROTOCOL_VMESS,
     DEPLOYMENT_SS_METHOD,
+    TLS_DOMAIN_PROTOCOLS,
     _render_subscription_links,
     _share_link_with_display_name,
     anytls_share_link,
     host_field,
+    hy2_share_link,
     now_iso,
     parse_reality_destination,
     reality_candidates,
     reality_dest,
     ss_share_link,
     vless_reality_share_link,
+    vmess_share_link,
 )
 from .servers import ServersService
 
@@ -26,7 +31,7 @@ DEPLOYMENT_COLUMNS = """
             d.reality_mode, d.reality_dest, d.reality_sni,
             d.encrypted_reality_private_key, d.reality_public_key,
             d.reality_short_id, d.ss_method, d.encrypted_ss_password,
-            d.anytls_domain, d.last_config_hash, d.status,
+            d.encrypted_hy2_obfs_password, d.anytls_domain, d.last_config_hash, d.status,
             d.subscription_url, d.last_error, d.created_at, d.updated_at
 """
 
@@ -58,7 +63,14 @@ class DeploymentsService(ServersService):
         protocol = deployment.get("protocol")
         if protocol == DEPLOYMENT_PROTOCOL_SHADOWSOCKS_2022:
             return {"allow_udp": True, "self_signed_cert": False, "acme_http_port": 0}
-        if protocol == DEPLOYMENT_PROTOCOL_ANYTLS:
+        if protocol == DEPLOYMENT_PROTOCOL_HYSTERIA2:
+            domain = str(deployment.get("anytls_domain") or "").strip()
+            return {
+                "allow_udp": True,
+                "self_signed_cert": not domain,
+                "acme_http_port": ACME_HTTP_PORT if domain else 0,
+            }
+        if protocol in TLS_DOMAIN_PROTOCOLS:
             domain = str(deployment.get("anytls_domain") or "").strip()
             return {
                 "allow_udp": False,
@@ -196,8 +208,10 @@ exit 43
         name: str,
         ss_password: str = "",
         anytls_password: str = "",
+        hy2_password: str = "",
     ) -> str:
-        if deployment.get("protocol") == DEPLOYMENT_PROTOCOL_SHADOWSOCKS_2022:
+        protocol = deployment.get("protocol")
+        if protocol == DEPLOYMENT_PROTOCOL_SHADOWSOCKS_2022:
             return ss_share_link(
                 method=deployment.get("ss_method") or DEPLOYMENT_SS_METHOD,
                 server_password=deployment.get("ss_password") or "",
@@ -206,7 +220,7 @@ exit 43
                 port=int(deployment["proxy_port"]),
                 name=name,
             )
-        if deployment.get("protocol") == DEPLOYMENT_PROTOCOL_ANYTLS:
+        if protocol == DEPLOYMENT_PROTOCOL_ANYTLS:
             domain = str(deployment.get("anytls_domain") or "").strip()
             return anytls_share_link(
                 password=anytls_password,
@@ -214,6 +228,28 @@ exit 43
                 port=int(deployment["proxy_port"]),
                 name=name,
                 sni=domain,
+                insecure=not domain,
+            )
+        if protocol == DEPLOYMENT_PROTOCOL_HYSTERIA2:
+            domain = str(deployment.get("anytls_domain") or "").strip()
+            return hy2_share_link(
+                password=hy2_password,
+                host=domain or deployment["host"],
+                port=int(deployment["proxy_port"]),
+                name=name,
+                sni=domain,
+                insecure=not domain,
+                obfs_password=str(deployment.get("hy2_obfs_password") or ""),
+            )
+        if protocol == DEPLOYMENT_PROTOCOL_VMESS:
+            domain = str(deployment.get("anytls_domain") or "").strip()
+            return vmess_share_link(
+                client_uuid=client_uuid,
+                host=domain or deployment["host"],
+                port=int(deployment["proxy_port"]),
+                name=name,
+                sni=domain,
+                tls=True,
                 insecure=not domain,
             )
         return vless_reality_share_link(

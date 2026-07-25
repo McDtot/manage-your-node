@@ -66,10 +66,12 @@ class ServicesBase:
             ("servers", "encrypted_secret"),
             ("deployments", "encrypted_reality_private_key"),
             ("deployments", "encrypted_ss_password"),
+            ("deployments", "encrypted_hy2_obfs_password"),
             ("clients", "encrypted_ss_password"),
             ("clients", "encrypted_anytls_password"),
             ("proxy_chain_nodes", "encrypted_private_key"),
             ("proxy_chain_nodes", "encrypted_ss_password"),
+            ("proxy_chain_nodes", "encrypted_hy2_password"),
         ]
         try:
             for table, column in encrypted_columns:
@@ -299,9 +301,11 @@ class ServicesBase:
             row["subscription_url"] = self._deployment_subscription_url(row["id"])
         encrypted_reality_key = row.pop("encrypted_reality_private_key", "")
         encrypted_ss_password = row.pop("encrypted_ss_password", "")
+        encrypted_hy2_obfs_password = row.pop("encrypted_hy2_obfs_password", "")
         if reveal:
             row["reality_private_key"] = self.secret_box.open(encrypted_reality_key)
             row["ss_password"] = self.secret_box.open(encrypted_ss_password)
+            row["hy2_obfs_password"] = self.secret_box.open(encrypted_hy2_obfs_password)
 
     def _client_rows(self, client_id: str | None = None) -> list[dict[str, Any]]:
         where = "WHERE c.id = ?" if client_id else ""

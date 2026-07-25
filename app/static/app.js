@@ -17,6 +17,8 @@ const state = {
 
 const CHAIN_PROTOCOL_VLESS_REALITY = "vless_reality";
 const CHAIN_PROTOCOL_SHADOWSOCKS_2022 = "shadowsocks_2022";
+const CHAIN_PROTOCOL_HYSTERIA2 = "hysteria2";
+const CHAIN_PROTOCOL_VMESS = "vmess";
 
 const $ = (selector) => document.querySelector(selector);
 const $$ = (selector) => Array.from(document.querySelectorAll(selector));
@@ -389,9 +391,10 @@ function readyDeployments() {
 }
 
 function chainProtocolLabel(protocol) {
-  return protocol === CHAIN_PROTOCOL_SHADOWSOCKS_2022
-    ? "SS2022"
-    : "VLESS + REALITY";
+  if (protocol === CHAIN_PROTOCOL_SHADOWSOCKS_2022) return "SS2022";
+  if (protocol === CHAIN_PROTOCOL_HYSTERIA2) return "Hysteria2";
+  if (protocol === CHAIN_PROTOCOL_VMESS) return "VMess";
+  return "VLESS + REALITY";
 }
 
 function chainEdgeKey(fromDeploymentId, toDeploymentId) {
@@ -486,7 +489,11 @@ function chainSelectedItem(deployment, index) {
   const inboundProtocol = index === 0
     ? CHAIN_PROTOCOL_VLESS_REALITY
     : chainProtocolFor(state.chainDraft[index - 1], deployment.id);
-  const transportHint = inboundProtocol === CHAIN_PROTOCOL_SHADOWSOCKS_2022 ? "TCP + UDP" : "TCP";
+  const transportHint =
+    inboundProtocol === CHAIN_PROTOCOL_SHADOWSOCKS_2022 ||
+    inboundProtocol === CHAIN_PROTOCOL_HYSTERIA2
+      ? "TCP + UDP"
+      : "TCP";
   return `
     <article class="chain-node is-selected" draggable="true" data-chain-drag="selected" data-chain-index="${index}" data-chain-position="${index}">
       <span class="chain-index">${index + 1}</span>
@@ -518,6 +525,8 @@ function chainHopItem(fromDeployment, toDeployment, destinationIndex) {
         <select data-chain-protocol data-chain-edge="${escapeHtml(edgeKey)}" aria-label="选择节点间协议">
           <option value="${CHAIN_PROTOCOL_VLESS_REALITY}" ${protocol === CHAIN_PROTOCOL_VLESS_REALITY ? "selected" : ""}>VLESS + REALITY（TCP，适合 NAT）</option>
           <option value="${CHAIN_PROTOCOL_SHADOWSOCKS_2022}" ${protocol === CHAIN_PROTOCOL_SHADOWSOCKS_2022 ? "selected" : ""}>Shadowsocks 2022（需 TCP + UDP）</option>
+          <option value="${CHAIN_PROTOCOL_HYSTERIA2}" ${protocol === CHAIN_PROTOCOL_HYSTERIA2 ? "selected" : ""}>Hysteria2（需 TCP + UDP）</option>
+          <option value="${CHAIN_PROTOCOL_VMESS}" ${protocol === CHAIN_PROTOCOL_VMESS ? "selected" : ""}>VMess（TCP）</option>
         </select>
       </label>
     </div>
@@ -850,9 +859,10 @@ async function pollJob(jobId) {
 function syncRealityTargetFields() {
   const protocol = $("#deployProtocol").value;
   const isReality = protocol === "VLESS + REALITY";
-  const isAnyTls = protocol === "AnyTLS";
+  const usesTlsDomain =
+    protocol === "AnyTLS" || protocol === "Hysteria2" || protocol === "VMess";
   $("#realityFields").hidden = !isReality;
-  $("#anytlsFields").hidden = !isAnyTls;
+  $("#anytlsFields").hidden = !usesTlsDomain;
   const manual = isReality && $("#realityMode").value === "manual";
   $("#realityManualFields").hidden = !manual;
   $("#deployForm").realityDest.required = manual;

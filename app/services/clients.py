@@ -11,9 +11,11 @@ from .deployments import DeploymentsService
 from .helpers import (
     ACTIVE_CLIENT_CONDITION,
     DEPLOYMENT_PROTOCOL_ANYTLS,
+    DEPLOYMENT_PROTOCOL_HYSTERIA2,
     DEPLOYMENT_PROTOCOL_SHADOWSOCKS_2022,
     boolean_field,
     new_anytls_password,
+    new_hy2_password,
     new_id,
     new_ss2022_password,
     now_iso,
@@ -69,7 +71,7 @@ class ClientsService(DeploymentsService):
             password = ""
             if protocol == DEPLOYMENT_PROTOCOL_SHADOWSOCKS_2022:
                 password = self.secret_box.open(row["encrypted_ss_password"] or "")
-            elif protocol == DEPLOYMENT_PROTOCOL_ANYTLS:
+            elif protocol in {DEPLOYMENT_PROTOCOL_ANYTLS, DEPLOYMENT_PROTOCOL_HYSTERIA2}:
                 password = self.secret_box.open(row["encrypted_anytls_password"] or "")
                 if not password:
                     continue
@@ -157,14 +159,18 @@ class ClientsService(DeploymentsService):
         self._assert_user_name_available(deployment_id, name)
         is_shadowsocks = deployment.get("protocol") == DEPLOYMENT_PROTOCOL_SHADOWSOCKS_2022
         is_anytls = deployment.get("protocol") == DEPLOYMENT_PROTOCOL_ANYTLS
+        is_hy2 = deployment.get("protocol") == DEPLOYMENT_PROTOCOL_HYSTERIA2
         ss_password = new_ss2022_password() if is_shadowsocks else ""
         anytls_password = new_anytls_password() if is_anytls else ""
+        hy2_password = new_hy2_password() if is_hy2 else ""
+        password_auth = anytls_password or hy2_password
         share_link = self._default_share_link(
             deployment,
             client_uuid,
             name,
             ss_password=ss_password,
             anytls_password=anytls_password,
+            hy2_password=hy2_password,
         )
         # Push before the insert so a failing node leaves no orphaned user.
         config_hash = ""
@@ -175,7 +181,7 @@ class ClientsService(DeploymentsService):
                     {
                         "name": name,
                         "uuid": client_uuid,
-                        "password": anytls_password or ss_password,
+                        "password": password_auth or ss_password,
                     }
                 ],
             )
@@ -199,7 +205,7 @@ class ClientsService(DeploymentsService):
                     expires_at,
                     1,
                     self.secret_box.seal(ss_password),
-                    self.secret_box.seal(anytls_password),
+                    self.secret_box.seal(password_auth),
                     share_link,
                     deployment["subscription_url"],
                     stamp,
@@ -299,14 +305,17 @@ class ClientsService(DeploymentsService):
         enabled = 1 if bool(payload.get("enabled", client["enabled"])) else 0
         is_shadowsocks = deployment.get("protocol") == DEPLOYMENT_PROTOCOL_SHADOWSOCKS_2022
         is_anytls = deployment.get("protocol") == DEPLOYMENT_PROTOCOL_ANYTLS
+        is_hy2 = deployment.get("protocol") == DEPLOYMENT_PROTOCOL_HYSTERIA2
         ss_password = self._client_ss_password(client_id) if is_shadowsocks else ""
         anytls_password = self._client_anytls_password(client_id) if is_anytls else ""
+        hy2_password = self._client_anytls_password(client_id) if is_hy2 else ""
         share_link = self._default_share_link(
             deployment,
             client["uuid"],
             name,
             ss_password=ss_password,
             anytls_password=anytls_password,
+            hy2_password=hy2_password,
         )
         stamp = now_iso()
         self.db.execute(

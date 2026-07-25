@@ -187,14 +187,16 @@
                   <option value="VLESS + REALITY">VLESS + REALITY</option>
                   <option value="Shadowsocks 2022">Shadowsocks 2022</option>
                   <option value="AnyTLS">AnyTLS</option>
+                  <option value="Hysteria2">Hysteria2</option>
+                  <option value="VMess">VMess</option>
                 </select>
-                <span class="meta">Shadowsocks 2022 使用 2022-blake3-aes-256-gcm，需要 TCP + UDP 端口放行。所有协议均由 sing-box 提供，通过配置下发管理用户。</span>
+                <span class="meta">Shadowsocks 2022 与 Hysteria2 需要 TCP + UDP 端口放行。AnyTLS / Hysteria2 / VMess 支持可选域名申请证书。所有协议均由 sing-box 提供，通过配置下发管理用户。</span>
               </label>
               <div id="anytlsFields" hidden>
                 <label>
-                  域名（可留空）
+                  TLS 域名（可留空）
                   <input name="anytlsDomain" id="anytlsDomain" placeholder="留空则使用自签证书" />
-                  <span class="meta">留空使用自签证书（客户端自动跳过证书校验，无需域名）。填写已解析到该服务器的域名则自动申请 Let's Encrypt 证书，需放行 80 端口。</span>
+                  <span class="meta">适用于 AnyTLS、Hysteria2、VMess。留空使用自签证书（客户端自动跳过证书校验，无需域名）。填写已解析到该服务器的域名则自动申请 Let's Encrypt 证书，需放行 80 端口。</span>
                 </label>
               </div>
               <div id="realityFields">

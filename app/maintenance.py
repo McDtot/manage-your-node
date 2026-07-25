@@ -39,10 +39,12 @@ def check_database(db: Database, secret_box: SecretBox) -> None:
         ("servers", "encrypted_secret"),
         ("deployments", "encrypted_reality_private_key"),
         ("deployments", "encrypted_ss_password"),
+        ("deployments", "encrypted_hy2_obfs_password"),
         ("clients", "encrypted_ss_password"),
         ("clients", "encrypted_anytls_password"),
         ("proxy_chain_nodes", "encrypted_private_key"),
         ("proxy_chain_nodes", "encrypted_ss_password"),
+        ("proxy_chain_nodes", "encrypted_hy2_password"),
     ]
     checked = 0
     for table, column in encrypted_columns:

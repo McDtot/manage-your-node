@@ -9,12 +9,14 @@ from ..provisioning import (
     singbox_uninstall_script,
 )
 from .helpers import (
-    DEPLOYMENT_PROTOCOL_ANYTLS,
+    DEPLOYMENT_PROTOCOL_HYSTERIA2,
     DEPLOYMENT_PROTOCOL_SHADOWSOCKS_2022,
     DEPLOYMENT_PROTOCOL_VLESS_REALITY,
     DEPLOYMENT_PROTOCOLS,
     DEPLOYMENT_SS_METHOD,
+    TLS_DOMAIN_PROTOCOLS,
     host_field,
+    new_hy2_password,
     new_id,
     new_ss2022_password,
     now_iso,
@@ -39,22 +41,25 @@ class TeardownService(SubscriptionsService):
         protocol = str(payload.get("protocol", DEPLOYMENT_PROTOCOL_VLESS_REALITY)).strip()
         if protocol not in DEPLOYMENT_PROTOCOLS:
             raise ValueError(
-                "only VLESS + REALITY, Shadowsocks 2022 and AnyTLS are supported"
+                "only VLESS + REALITY, Shadowsocks 2022, AnyTLS, Hysteria2 and VMess are supported"
             )
         install_method = str(payload.get("installMethod", "native")).strip() or "native"
         if install_method != "native":
             raise ValueError("only native deployments are supported")
         is_shadowsocks = protocol == DEPLOYMENT_PROTOCOL_SHADOWSOCKS_2022
-        is_anytls = protocol == DEPLOYMENT_PROTOCOL_ANYTLS
+        uses_tls_domain = protocol in TLS_DOMAIN_PROTOCOLS
         anytls_domain = ""
         ss_password = ""
+        hy2_obfs_password = ""
         reality_private_key, reality_public_key, reality_short_id = "", "", ""
-        if is_anytls:
+        if uses_tls_domain:
             reality_mode = "manual"
             selected_reality_dest, selected_reality_sni = "", ""
             raw_domain = str(payload.get("anytlsDomain", "")).strip()
             if raw_domain:
                 anytls_domain = host_field({"anytlsDomain": raw_domain}, "anytlsDomain")
+            if protocol == DEPLOYMENT_PROTOCOL_HYSTERIA2:
+                hy2_obfs_password = new_hy2_password()
         elif is_shadowsocks:
             reality_mode = "manual"
             selected_reality_dest, selected_reality_sni = "", ""
@@ -98,10 +103,10 @@ class TeardownService(SubscriptionsService):
                     id, server_id, engine, protocol, install_method, proxy_port,
                     reality_mode, reality_dest, reality_sni,
                     encrypted_reality_private_key, reality_public_key, reality_short_id,
-                    ss_method, encrypted_ss_password, anytls_domain,
+                    ss_method, encrypted_ss_password, encrypted_hy2_obfs_password, anytls_domain,
                     subscription_configured, status, subscription_url,
                     created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     deployment_id,
@@ -118,6 +123,7 @@ class TeardownService(SubscriptionsService):
                     reality_short_id,
                     DEPLOYMENT_SS_METHOD,
                     self.secret_box.seal(ss_password),
+                    self.secret_box.seal(hy2_obfs_password),
                     anytls_domain,
                     0,
                     "provisioning",
@@ -244,14 +250,14 @@ class TeardownService(SubscriptionsService):
 
     def _ready_message(self, deployment: dict[str, Any]) -> str:
         protocol = deployment.get("protocol")
-        if protocol != DEPLOYMENT_PROTOCOL_ANYTLS:
+        if protocol not in TLS_DOMAIN_PROTOCOLS:
             return f"sing-box {protocol} inbound is installed and ready"
         certificate = (
             "Let's Encrypt certificate"
             if str(deployment.get("anytls_domain") or "").strip()
             else "self-signed certificate"
         )
-        return f"sing-box AnyTLS inbound is installed and ready ({certificate})"
+        return f"sing-box {protocol} inbound is installed and ready ({certificate})"
 
     def delete_deployment(self, deployment_id: str) -> dict[str, Any]:
         deployment = self.get_deployment(deployment_id)

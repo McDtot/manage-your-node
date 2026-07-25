@@ -223,6 +223,84 @@ def test_chain_relay_routes_to_next_hop():
 
 def test_chain_rejects_unknown_protocol():
     with pytest.raises(ValueError, match="unsupported chain protocol"):
-        chain_inbound(_chain_node(0, "hysteria2"))
+        chain_inbound(_chain_node(0, "trojan"))
     with pytest.raises(ValueError, match="unsupported chain protocol"):
-        chain_outbound(_chain_node(1, "hysteria2"))
+        chain_outbound(_chain_node(1, "tuic"))
+
+
+def test_hysteria2_node_config_uses_obfs_and_tls():
+    deployment = {
+        "id": "dep_hy2",
+        "protocol": "Hysteria2",
+        "proxy_port": 443,
+        "anytls_domain": "",
+        "hy2_obfs_password": "obfs-secret",
+    }
+    config = build_node_config(
+        deployment,
+        [{"name": "alice", "password": "user-pass"}],
+    )
+    inbound = config["inbounds"][0]
+    assert inbound["type"] == "hysteria2"
+    assert inbound["users"] == [{"name": "alice", "password": "user-pass"}]
+    assert inbound["obfs"] == {"type": "salamander", "password": "obfs-secret"}
+    assert inbound["tls"]["alpn"] == ["h3"]
+    assert "certificate_path" in inbound["tls"]
+
+
+def test_vmess_node_config_uses_tls_and_alter_id_zero():
+    deployment = {
+        "id": "dep_vmess",
+        "protocol": "VMess",
+        "proxy_port": 443,
+        "anytls_domain": "vpn.example.com",
+    }
+    config = build_node_config(
+        deployment,
+        [{"name": "alice", "uuid": "bf000d23-0752-40b4-affe-68f7707a9661"}],
+    )
+    inbound = config["inbounds"][0]
+    assert inbound["type"] == "vmess"
+    assert inbound["users"] == [
+        {
+            "name": "alice",
+            "uuid": "bf000d23-0752-40b4-affe-68f7707a9661",
+            "alterId": 0,
+        }
+    ]
+    assert inbound["tls"]["server_name"] == "vpn.example.com"
+    assert "acme" in inbound["tls"]
+
+
+def test_chain_hysteria2_hop_uses_self_signed_tls():
+    node = _chain_node(
+        1,
+        "hysteria2",
+        hy2_password="hop-pass",
+        remote_service_name="myn-chain-test-1",
+    )
+    inbound = chain_inbound(node)
+    outbound = chain_outbound(node)
+
+    assert inbound["type"] == "hysteria2"
+    assert inbound["users"][0]["password"] == "hop-pass"
+    assert inbound["tls"]["alpn"] == ["h3"]
+    assert inbound["tls"]["certificate_path"].endswith("cert.pem")
+    assert outbound["type"] == "hysteria2"
+    assert outbound["password"] == "hop-pass"
+    assert outbound["tls"]["insecure"] is True
+
+
+def test_chain_vmess_hop_uses_uuid_without_tls():
+    node = _chain_node(1, "vmess")
+    inbound = chain_inbound(node)
+    outbound = chain_outbound(node)
+
+    assert inbound["type"] == "vmess"
+    assert inbound["users"][0]["uuid"] == node["node_client_uuid"]
+    assert inbound["users"][0]["alterId"] == 0
+    assert "tls" not in inbound
+    assert outbound["type"] == "vmess"
+    assert outbound["uuid"] == node["node_client_uuid"]
+    assert outbound["alter_id"] == 0
+    assert "tls" not in outbound

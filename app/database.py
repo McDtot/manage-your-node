@@ -67,6 +67,7 @@ class Database:
                     reality_short_id TEXT NOT NULL DEFAULT '',
                     ss_method TEXT NOT NULL DEFAULT '2022-blake3-aes-256-gcm',
                     encrypted_ss_password TEXT NOT NULL DEFAULT '',
+                    encrypted_hy2_obfs_password TEXT NOT NULL DEFAULT '',
                     anytls_domain TEXT NOT NULL DEFAULT '',
                     last_config_hash TEXT NOT NULL DEFAULT '',
                     subscription_configured INTEGER NOT NULL DEFAULT 0,
@@ -171,6 +172,7 @@ class Database:
                     short_id TEXT,
                     ss_method TEXT NOT NULL DEFAULT '2022-blake3-aes-256-gcm',
                     encrypted_ss_password TEXT,
+                    encrypted_hy2_password TEXT,
                     remote_service_name TEXT,
                     status TEXT NOT NULL DEFAULT 'planned',
                     created_at TEXT NOT NULL,
@@ -278,6 +280,11 @@ class Database:
             )
             self._ensure_column(
                 "deployments",
+                "encrypted_hy2_obfs_password",
+                "TEXT NOT NULL DEFAULT ''",
+            )
+            self._ensure_column(
+                "deployments",
                 "encrypted_reality_private_key",
                 "TEXT NOT NULL DEFAULT ''",
             )
@@ -339,6 +346,7 @@ class Database:
                 "TEXT NOT NULL DEFAULT '2022-blake3-aes-256-gcm'",
             )
             self._ensure_column("proxy_chain_nodes", "encrypted_ss_password", "TEXT")
+            self._ensure_column("proxy_chain_nodes", "encrypted_hy2_password", "TEXT")
             self._ensure_column("proxy_chain_nodes", "remote_service_name", "TEXT")
             self._ensure_column("proxy_chain_nodes", "status", "TEXT NOT NULL DEFAULT 'planned'")
             self._ensure_column("proxy_chain_nodes", "updated_at", "TEXT")

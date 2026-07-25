@@ -1,5 +1,6 @@
 import base64
 import ipaddress
+import json
 import os
 import secrets
 from datetime import UTC, datetime
@@ -16,18 +17,31 @@ DEFAULT_REALITY_CANDIDATES = (
 )
 CHAIN_PROTOCOL_VLESS_REALITY = "vless_reality"
 CHAIN_PROTOCOL_SHADOWSOCKS_2022 = "shadowsocks_2022"
+CHAIN_PROTOCOL_HYSTERIA2 = "hysteria2"
+CHAIN_PROTOCOL_VMESS = "vmess"
 CHAIN_PROTOCOLS = {
     CHAIN_PROTOCOL_VLESS_REALITY,
     CHAIN_PROTOCOL_SHADOWSOCKS_2022,
+    CHAIN_PROTOCOL_HYSTERIA2,
+    CHAIN_PROTOCOL_VMESS,
 }
 CHAIN_SS_METHOD = "2022-blake3-aes-256-gcm"
 DEPLOYMENT_PROTOCOL_VLESS_REALITY = "VLESS + REALITY"
 DEPLOYMENT_PROTOCOL_SHADOWSOCKS_2022 = "Shadowsocks 2022"
 DEPLOYMENT_PROTOCOL_ANYTLS = "AnyTLS"
+DEPLOYMENT_PROTOCOL_HYSTERIA2 = "Hysteria2"
+DEPLOYMENT_PROTOCOL_VMESS = "VMess"
 DEPLOYMENT_PROTOCOLS = {
     DEPLOYMENT_PROTOCOL_VLESS_REALITY,
     DEPLOYMENT_PROTOCOL_SHADOWSOCKS_2022,
     DEPLOYMENT_PROTOCOL_ANYTLS,
+    DEPLOYMENT_PROTOCOL_HYSTERIA2,
+    DEPLOYMENT_PROTOCOL_VMESS,
+}
+TLS_DOMAIN_PROTOCOLS = {
+    DEPLOYMENT_PROTOCOL_ANYTLS,
+    DEPLOYMENT_PROTOCOL_HYSTERIA2,
+    DEPLOYMENT_PROTOCOL_VMESS,
 }
 DEPLOYMENT_SS_METHOD = CHAIN_SS_METHOD
 MAX_JOB_LOG_ENTRIES = 2000
@@ -147,6 +161,11 @@ def new_anytls_password() -> str:
     return base64.b64encode(secrets.token_bytes(32)).decode("ascii")
 
 
+def new_hy2_password() -> str:
+    """Return a base64-encoded 32-byte password for Hysteria2 auth or obfs."""
+    return base64.b64encode(secrets.token_bytes(32)).decode("ascii")
+
+
 def anytls_share_link(
     password: str,
     host: str,
@@ -215,6 +234,176 @@ def _mihomo_proxy_from_anytls(
     insecure = query.get("insecure", "").strip() in {"1", "true", "True"}
     if insecure:
         proxy["skip-cert-verify"] = True
+    return proxy
+
+
+def hy2_share_link(
+    password: str,
+    host: str,
+    port: int,
+    name: str,
+    sni: str = "",
+    insecure: bool = True,
+    obfs_password: str = "",
+) -> str:
+    """Build a ``hy2://`` share link understood by sing-box/mihomo clients."""
+    params: dict[str, str] = {}
+    if insecure:
+        params["insecure"] = "1"
+    if sni:
+        params["sni"] = sni
+    if obfs_password:
+        params["obfs"] = "salamander"
+        params["obfs-password"] = obfs_password
+    query = f"?{urlencode(params)}" if params else ""
+    tag = quote(name)
+    return f"hy2://{quote(password, safe='')}@{url_host(host)}:{port}{query}#{tag}"
+
+
+def _unique_proxy_name(base_name: str, used_names: set[str]) -> str:
+    name = base_name
+    suffix = 2
+    while name in used_names or name in {"AUTO", "DIRECT", "PROXY", "REJECT"}:
+        name = f"{base_name} {suffix}"
+        suffix += 1
+    used_names.add(name)
+    return name
+
+
+def _mihomo_proxy_from_hy2(
+    share_link: str,
+    index: int,
+    used_names: set[str],
+) -> dict[str, Any]:
+    parsed = urlparse(share_link)
+    password = unquote(parsed.password or parsed.username or "").strip()
+    server = parsed.hostname
+    try:
+        port = parsed.port
+    except ValueError as exc:
+        raise ValueError("invalid Hysteria2 subscription port") from exc
+    if not password or not server or port is None:
+        raise ValueError("invalid Hysteria2 subscription link")
+
+    query = {
+        key: values[-1]
+        for key, values in parse_qs(parsed.query, keep_blank_values=True).items()
+        if values
+    }
+
+    base_name = unquote(parsed.fragment).strip() or f"节点 {index}"
+    name = _unique_proxy_name(base_name, used_names)
+
+    proxy: dict[str, Any] = {
+        "name": name,
+        "type": "hysteria2",
+        "server": server,
+        "port": port,
+        "password": password,
+    }
+    sni = query.get("sni", "").strip()
+    if sni:
+        proxy["sni"] = sni
+    insecure = query.get("insecure", "").strip() in {"1", "true", "True"}
+    if insecure:
+        proxy["skip-cert-verify"] = True
+    obfs = query.get("obfs", "").strip()
+    obfs_password = query.get("obfs-password", "").strip()
+    if obfs == "salamander" and obfs_password:
+        proxy["obfs"] = "salamander"
+        proxy["obfs-password"] = obfs_password
+    return proxy
+
+
+def vmess_share_link(
+    client_uuid: str,
+    host: str,
+    port: int,
+    name: str,
+    sni: str = "",
+    tls: bool = True,
+    insecure: bool = True,
+    fingerprint: str = "chrome",
+) -> str:
+    """Build a standard ``vmess://`` base64 JSON share link."""
+    payload: dict[str, Any] = {
+        "v": "2",
+        "ps": name,
+        "add": host,
+        "port": str(port),
+        "id": client_uuid,
+        "aid": "0",
+        "scy": "auto",
+        "net": "tcp",
+        "type": "none",
+        "host": "",
+        "path": "",
+        "tls": "tls" if tls else "",
+        "sni": sni,
+        "fp": fingerprint if tls else "",
+    }
+    if tls and insecure:
+        payload["allowInsecure"] = 1
+    encoded = base64.b64encode(
+        json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    ).decode("ascii")
+    return f"vmess://{encoded}"
+
+
+def _mihomo_proxy_from_vmess(
+    share_link: str,
+    index: int,
+    used_names: set[str],
+) -> dict[str, Any]:
+    parsed = urlparse(share_link)
+    if parsed.scheme.lower() != "vmess":
+        raise ValueError("invalid VMess subscription link")
+    raw = (parsed.netloc or "") + (parsed.path or "")
+    if not raw:
+        raise ValueError("invalid VMess subscription link")
+    try:
+        padded = raw + "=" * (-len(raw) % 4)
+        payload = json.loads(
+            base64.urlsafe_b64decode(padded.encode("ascii")).decode("utf-8")
+        )
+    except (ValueError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError("invalid VMess subscription link") from exc
+    if not isinstance(payload, dict):
+        raise ValueError("invalid VMess subscription link")
+
+    server = str(payload.get("add") or "").strip()
+    client_uuid = str(payload.get("id") or "").strip()
+    try:
+        port = int(payload.get("port"))
+    except (TypeError, ValueError) as exc:
+        raise ValueError("invalid VMess subscription port") from exc
+    if not server or not client_uuid or not 1 <= port <= 65535:
+        raise ValueError("invalid VMess subscription link")
+
+    base_name = str(payload.get("ps") or "").strip() or f"节点 {index}"
+    name = _unique_proxy_name(base_name, used_names)
+
+    proxy: dict[str, Any] = {
+        "name": name,
+        "type": "vmess",
+        "server": server,
+        "port": port,
+        "uuid": client_uuid,
+        "alterId": int(payload.get("aid") or 0),
+        "cipher": str(payload.get("scy") or "auto"),
+        "udp": True,
+        "network": str(payload.get("net") or "tcp"),
+    }
+    if str(payload.get("tls") or "").lower() == "tls":
+        proxy["tls"] = True
+        sni = str(payload.get("sni") or "").strip()
+        if sni:
+            proxy["servername"] = sni
+        fingerprint = str(payload.get("fp") or "").strip()
+        if fingerprint:
+            proxy["client-fingerprint"] = fingerprint
+        if payload.get("allowInsecure") in {1, "1", True, "true", "True"}:
+            proxy["skip-cert-verify"] = True
     return proxy
 
 
@@ -301,6 +490,10 @@ def _mihomo_proxy_from_link(
         return _mihomo_proxy_from_ss(share_link, index, used_names)
     if scheme == "anytls":
         return _mihomo_proxy_from_anytls(share_link, index, used_names)
+    if scheme in {"hy2", "hysteria2"}:
+        return _mihomo_proxy_from_hy2(share_link, index, used_names)
+    if scheme == "vmess":
+        return _mihomo_proxy_from_vmess(share_link, index, used_names)
     return _mihomo_proxy_from_vless(share_link, index, used_names)
 
 
@@ -353,6 +546,22 @@ def _share_link_with_display_name(share_link: str, display_name: str) -> str:
     if not link or not name:
         return link
     parsed = urlparse(link)
+    if parsed.scheme.lower() == "vmess":
+        raw = (parsed.netloc or "") + (parsed.path or "")
+        try:
+            padded = raw + "=" * (-len(raw) % 4)
+            payload = json.loads(
+                base64.urlsafe_b64decode(padded.encode("ascii")).decode("utf-8")
+            )
+        except (ValueError, UnicodeDecodeError, json.JSONDecodeError):
+            return link
+        if not isinstance(payload, dict):
+            return link
+        payload["ps"] = name
+        encoded = base64.b64encode(
+            json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        ).decode("ascii")
+        return f"vmess://{encoded}"
     return parsed._replace(fragment=quote(name, safe="")).geturl()
 
 

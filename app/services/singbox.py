@@ -23,12 +23,16 @@ from cryptography.hazmat.primitives.serialization import (
 
 from ..provisioning import node_service_name, singbox_acme_dir, singbox_cert_paths
 from .helpers import (
+    CHAIN_PROTOCOL_HYSTERIA2,
     CHAIN_PROTOCOL_SHADOWSOCKS_2022,
     CHAIN_PROTOCOL_VLESS_REALITY,
+    CHAIN_PROTOCOL_VMESS,
     CHAIN_SS_METHOD,
     DEPLOYMENT_PROTOCOL_ANYTLS,
+    DEPLOYMENT_PROTOCOL_HYSTERIA2,
     DEPLOYMENT_PROTOCOL_SHADOWSOCKS_2022,
     DEPLOYMENT_PROTOCOL_VLESS_REALITY,
+    DEPLOYMENT_PROTOCOL_VMESS,
     DEPLOYMENT_SS_METHOD,
     _deployment_reality_settings,
     parse_reality_destination,
@@ -97,6 +101,48 @@ def _reality_tls(
     }
 
 
+def _tls_from_domain(
+    deployment: dict[str, Any],
+    *,
+    service_name: str | None = None,
+    alpn: list[str] | None = None,
+) -> dict[str, Any]:
+    """TLS for AnyTLS / Hysteria2 / VMess: ACME when a domain is set, else self-signed."""
+    resolved_service = service_name or node_service_name(deployment["id"])
+    domain = str(deployment.get("anytls_domain") or "").strip()
+    if domain:
+        tls: dict[str, Any] = {
+            "enabled": True,
+            "server_name": domain,
+            "acme": {
+                "domain": [domain],
+                "data_directory": singbox_acme_dir(resolved_service),
+            },
+        }
+    else:
+        certificate_path, key_path = singbox_cert_paths(resolved_service)
+        tls = {
+            "enabled": True,
+            "certificate_path": certificate_path,
+            "key_path": key_path,
+        }
+    if alpn:
+        tls["alpn"] = alpn
+    return tls
+
+
+def _self_signed_tls(service_name: str, *, alpn: list[str] | None = None) -> dict[str, Any]:
+    certificate_path, key_path = singbox_cert_paths(service_name)
+    tls: dict[str, Any] = {
+        "enabled": True,
+        "certificate_path": certificate_path,
+        "key_path": key_path,
+    }
+    if alpn:
+        tls["alpn"] = alpn
+    return tls
+
+
 def vless_reality_inbound(
     deployment: dict[str, Any],
     users: list[dict[str, str]],
@@ -152,24 +198,6 @@ def anytls_inbound(
     certificate; with one, sing-box obtains and renews a real certificate over
     ACME.
     """
-    service_name = node_service_name(deployment["id"])
-    domain = str(deployment.get("anytls_domain") or "").strip()
-    if domain:
-        tls: dict[str, Any] = {
-            "enabled": True,
-            "server_name": domain,
-            "acme": {
-                "domain": [domain],
-                "data_directory": singbox_acme_dir(service_name),
-            },
-        }
-    else:
-        certificate_path, key_path = singbox_cert_paths(service_name)
-        tls = {
-            "enabled": True,
-            "certificate_path": certificate_path,
-            "key_path": key_path,
-        }
     return {
         "type": "anytls",
         "tag": NODE_INBOUND_TAG,
@@ -178,7 +206,46 @@ def anytls_inbound(
         "users": [
             {"name": user["name"], "password": user["password"]} for user in users
         ],
-        "tls": tls,
+        "tls": _tls_from_domain(deployment),
+    }
+
+
+def hysteria2_inbound(
+    deployment: dict[str, Any],
+    users: list[dict[str, str]],
+) -> dict[str, Any]:
+    """Hysteria2 inbound. Each user needs ``name`` and ``password``."""
+    obfs_password = str(deployment.get("hy2_obfs_password") or "").strip()
+    if not obfs_password:
+        raise ValueError("Hysteria2 obfuscation password is missing for this deployment")
+    return {
+        "type": "hysteria2",
+        "tag": NODE_INBOUND_TAG,
+        "listen": LISTEN_ANY,
+        "listen_port": int(deployment["proxy_port"]),
+        "users": [
+            {"name": user["name"], "password": user["password"]} for user in users
+        ],
+        "obfs": {"type": "salamander", "password": obfs_password},
+        "tls": _tls_from_domain(deployment, alpn=["h3"]),
+    }
+
+
+def vmess_inbound(
+    deployment: dict[str, Any],
+    users: list[dict[str, str]],
+) -> dict[str, Any]:
+    """VMess inbound with TLS. Each user needs ``name`` and ``uuid``."""
+    return {
+        "type": "vmess",
+        "tag": NODE_INBOUND_TAG,
+        "listen": LISTEN_ANY,
+        "listen_port": int(deployment["proxy_port"]),
+        "users": [
+            {"name": user["name"], "uuid": user["uuid"], "alterId": 0}
+            for user in users
+        ],
+        "tls": _tls_from_domain(deployment),
     }
 
 
@@ -186,6 +253,8 @@ _NODE_INBOUND_BUILDERS = {
     DEPLOYMENT_PROTOCOL_VLESS_REALITY: vless_reality_inbound,
     DEPLOYMENT_PROTOCOL_SHADOWSOCKS_2022: shadowsocks_inbound,
     DEPLOYMENT_PROTOCOL_ANYTLS: anytls_inbound,
+    DEPLOYMENT_PROTOCOL_HYSTERIA2: hysteria2_inbound,
+    DEPLOYMENT_PROTOCOL_VMESS: vmess_inbound,
 }
 
 
@@ -220,6 +289,45 @@ def chain_inbound(node: dict[str, Any]) -> dict[str, Any]:
             "listen_port": int(node["inbound_port"]),
             "method": node.get("ss_method") or CHAIN_SS_METHOD,
             "password": password,
+        }
+    if protocol == CHAIN_PROTOCOL_HYSTERIA2:
+        password = str(node.get("hy2_password") or "").strip()
+        if not password:
+            raise ValueError(f"Hysteria2 password is missing for {node['server_name']}")
+        service_name = str(node.get("remote_service_name") or "").strip()
+        if not service_name:
+            raise ValueError(
+                f"Hysteria2 service name is missing for {node['server_name']}"
+            )
+        return {
+            "type": "hysteria2",
+            "tag": CHAIN_INBOUND_TAG,
+            "listen": LISTEN_ANY,
+            "listen_port": int(node["inbound_port"]),
+            "users": [
+                {
+                    "name": f"myn-chain-{node['position']}",
+                    "password": password,
+                }
+            ],
+            "tls": _self_signed_tls(service_name, alpn=["h3"]),
+        }
+    if protocol == CHAIN_PROTOCOL_VMESS:
+        client_uuid = str(node.get("node_client_uuid") or "").strip()
+        if not client_uuid:
+            raise ValueError(f"VMess UUID is missing for {node['server_name']}")
+        return {
+            "type": "vmess",
+            "tag": CHAIN_INBOUND_TAG,
+            "listen": LISTEN_ANY,
+            "listen_port": int(node["inbound_port"]),
+            "users": [
+                {
+                    "name": f"myn-chain-{node['position']}",
+                    "uuid": client_uuid,
+                    "alterId": 0,
+                }
+            ],
         }
     if protocol != CHAIN_PROTOCOL_VLESS_REALITY:
         raise ValueError(f"unsupported chain protocol on {node['server_name']}: {protocol}")
@@ -260,6 +368,37 @@ def chain_outbound(next_node: dict[str, Any] | None) -> dict[str, Any]:
             "server_port": int(next_node["inbound_port"]),
             "method": next_node.get("ss_method") or CHAIN_SS_METHOD,
             "password": password,
+        }
+    if protocol == CHAIN_PROTOCOL_HYSTERIA2:
+        password = str(next_node.get("hy2_password") or "").strip()
+        if not password:
+            raise ValueError(
+                f"Hysteria2 password is missing for {next_node['server_name']}"
+            )
+        return {
+            "type": "hysteria2",
+            "tag": CHAIN_OUTBOUND_TAG,
+            "server": next_node["host"],
+            "server_port": int(next_node["inbound_port"]),
+            "password": password,
+            "tls": {
+                "enabled": True,
+                "insecure": True,
+                "alpn": ["h3"],
+            },
+        }
+    if protocol == CHAIN_PROTOCOL_VMESS:
+        client_uuid = str(next_node.get("node_client_uuid") or "").strip()
+        if not client_uuid:
+            raise ValueError(f"VMess UUID is missing for {next_node['server_name']}")
+        return {
+            "type": "vmess",
+            "tag": CHAIN_OUTBOUND_TAG,
+            "server": next_node["host"],
+            "server_port": int(next_node["inbound_port"]),
+            "uuid": client_uuid,
+            "security": "auto",
+            "alter_id": 0,
         }
     if protocol != CHAIN_PROTOCOL_VLESS_REALITY:
         raise ValueError(
