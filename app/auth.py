@@ -39,7 +39,14 @@ class AuthManager:
         self._lock = threading.Lock()
 
     def lockout_remaining(self, client_key: str) -> int:
-        """Return seconds the client must wait, or 0 if not currently locked."""
+        """Return seconds the client must wait, or 0 if not currently locked.
+
+        This is a **pure read**. It must never mutate the rate-limit state:
+        ``login()`` calls it at the start of every login request, so any cleanup
+        performed here would wipe the failure history that has just been
+        accumulated and the lockout would never trigger. Expiry is handled on
+        the write paths (``register_failure`` / ``register_success``) instead.
+        """
         now = self._now()
         if self.db is not None:
             row = self.db.query_one(
@@ -48,16 +55,9 @@ class AuthManager:
             )
             if not row:
                 return 0
-            remaining = max(0, int(float(row["locked_until"]) - now))
-            if remaining == 0:
-                self.db.execute("DELETE FROM login_rate_limits WHERE client_key = ?", (client_key,))
-            return remaining
+            return self._remaining(float(row.get("locked_until") or 0), now)
         with self._lock:
-            unlock_at = self._locked_until.get(client_key, 0)
-            if unlock_at <= now:
-                self._locked_until.pop(client_key, None)
-                return 0
-            return max(0, int(unlock_at - now))
+            return self._remaining(self._locked_until.get(client_key, 0.0), now)
 
     def register_failure(self, client_key: str) -> None:
         now = self._now()
@@ -67,10 +67,17 @@ class AuthManager:
                     "SELECT failures, locked_until FROM login_rate_limits WHERE client_key = ?",
                     (client_key,),
                 )
-                attempts = self._decode_failures(row.get("failures") if row else None)
-                attempts = [ts for ts in attempts if ts >= now - self.window_seconds]
+                locked_until = float(row.get("locked_until") or 0) if row else 0.0
+                if locked_until and locked_until <= now:
+                    # A previous lockout has been served in full. Start the
+                    # client from a clean slate so stale failures cannot lock
+                    # them out again on their very next attempt.
+                    attempts: list[float] = []
+                    locked_until = 0.0
+                else:
+                    attempts = self._decode_failures(row.get("failures") if row else None)
+                    attempts = [ts for ts in attempts if ts >= now - self.window_seconds]
                 attempts.append(now)
-                locked_until = float(row.get("locked_until") or 0) if row else 0
                 if len(attempts) >= self.max_attempts:
                     locked_until = max(locked_until, now + self.lockout_seconds)
                 self.db.execute(
@@ -86,16 +93,23 @@ class AuthManager:
                         client_key,
                         json.dumps(attempts),
                         locked_until,
-                        datetime.now(UTC).isoformat(timespec="seconds"),
+                        self._timestamp(now),
                     ),
                 )
+                self._purge_stale(now)
             return
         with self._lock:
-            attempts = self._recent(client_key, now)
+            locked_until = self._locked_until.get(client_key, 0.0)
+            if locked_until and locked_until <= now:
+                self._locked_until.pop(client_key, None)
+                locked_until = 0.0
+                attempts = []
+            else:
+                attempts = self._recent(client_key, now)
             attempts.append(now)
             self._failures[client_key] = attempts
             if len(attempts) >= self.max_attempts:
-                self._locked_until[client_key] = now + self.lockout_seconds
+                self._locked_until[client_key] = max(locked_until, now + self.lockout_seconds)
 
     def register_success(self, client_key: str) -> None:
         if self.db is not None:
@@ -108,6 +122,28 @@ class AuthManager:
     def _recent(self, client_key: str, now: float) -> list[float]:
         window_start = now - self.window_seconds
         return [ts for ts in self._failures.get(client_key, []) if ts >= window_start]
+
+    def _remaining(self, locked_until: float, now: float) -> int:
+        """Seconds left on a lockout deadline, floored at 0. Never mutates."""
+        return max(0, int(locked_until - now))
+
+    def _purge_stale(self, now: float) -> None:
+        """Drop rows whose lockout has expired and whose failures fell out of the window.
+
+        The read path used to delete these, which was the cause of the lockout
+        never engaging. Reclaiming the space here keeps the table bounded
+        without touching state that a login attempt in flight still depends on.
+        """
+        if self.db is None:
+            return
+        cutoff = now - self.window_seconds
+        self.db.execute(
+            "DELETE FROM login_rate_limits WHERE locked_until <= ? AND updated_at < ?",
+            (now, self._timestamp(cutoff)),
+        )
+
+    def _timestamp(self, epoch_seconds: float) -> str:
+        return datetime.fromtimestamp(epoch_seconds, UTC).isoformat(timespec="seconds")
 
     def _now(self) -> float:
         return time.time() if self.db is not None else time.monotonic()
